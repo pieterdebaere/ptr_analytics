@@ -418,6 +418,14 @@ describe('Hosted mode', () => {
     expect(container.textContent).toContain('Member');
   });
 
+  it('defaults new users to members in hosted mode (no viewers there)', async () => {
+    publicConfig = HOSTED;
+    await renderAt('/settings');
+    const roleTrigger = container.querySelector('[aria-label="Role of the new user"]');
+    expect(roleTrigger?.textContent).toContain('Member');
+    expect(container.textContent).not.toContain('Viewers can see all sites');
+  });
+
   it('hides site management from viewers', async () => {
     me = { ...ADMIN, role: 'viewer' };
     await renderAt('/');

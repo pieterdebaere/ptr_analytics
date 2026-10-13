@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Trash2Icon } from 'lucide-react';
 import { api, errorMessage } from '@/api/client';
 import { CodeBlock } from '@/components/common';
-import { DomainsInput } from '@/components/DomainsInput';
+import { DomainsInput, MAX_DOMAINS, MEMBER_MAX_DOMAINS } from '@/components/DomainsInput';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -101,6 +101,8 @@ function GeneralSettings({ readOnly, onSaved }: { readOnly: boolean; onSaved: ()
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const nameId = useId();
+  const { user } = useAuth();
+  const maxDomains = user?.role === 'member' ? MEMBER_MAX_DOMAINS : MAX_DOMAINS;
 
   useEffect(() => {
     setName(site.name);
@@ -138,7 +140,7 @@ function GeneralSettings({ readOnly, onSaved }: { readOnly: boolean; onSaved: ()
             <Label htmlFor={nameId}>Name</Label>
             <Input id={nameId} value={name} maxLength={100} required readOnly={readOnly} onChange={(e) => setName(e.target.value)} />
           </div>
-          <DomainsInput value={domains} onChange={setDomains} disabled={readOnly} />
+          <DomainsInput value={domains} onChange={setDomains} disabled={readOnly} max={maxDomains} />
           {message ? (
             <p className={message.kind === 'ok' ? 'text-sm text-good' : 'text-sm text-destructive'} role="status">
               {message.text}

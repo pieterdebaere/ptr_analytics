@@ -34,7 +34,7 @@ export function LoginPage() {
       navigate(next, { replace: true });
     } catch (err) {
       // Unverified accounts get the same 401 as a wrong password (no account enumeration).
-      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) setError('Invalid email or password.');
+      if (err instanceof ApiError && err.status === 401) setError('Invalid email or password.');
       else if (err instanceof ApiError && err.status === 429) setError('Too many attempts. Please wait a few minutes and try again.');
       else setError(err instanceof ApiError ? err.message : 'Login failed.');
       setBusy(false);

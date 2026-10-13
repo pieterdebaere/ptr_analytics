@@ -109,15 +109,24 @@ function ChangePassword() {
   );
 }
 
+/** Roles an admin can assign: hosted mode has no viewers (sign-ups are members). */
+function useAssignableRoles(current?: Role): readonly Role[] {
+  const { publicConfig } = useAuth();
+  const roles = publicConfig.signupEnabled ? ROLES.filter((r) => r !== 'viewer') : ROLES;
+  return current && !roles.includes(current) ? [...roles, current] : roles;
+}
+
 function RoleSelect({ value, onChange, disabled, label, size = 'default' }: { value: Role; onChange: (r: Role) => void; disabled?: boolean; label: string; size?: 'sm' | 'default' }) {
+  const roles = useAssignableRoles(value);
+  const hosted = useAuth().publicConfig.signupEnabled;
   return (
     <Select<Role> value={value} onValueChange={(v) => (isRole(v) ? onChange(v) : undefined)} disabled={disabled}>
       <SelectTrigger size={size} aria-label={label} className="w-28">
         <SelectValue>{(v: Role) => roleLabel(v)}</SelectValue>
       </SelectTrigger>
       <SelectContent alignItemWithTrigger={false}>
-        {ROLES.map((r) => (
-          <SelectItem key={r} value={r}>
+        {roles.map((r) => (
+          <SelectItem key={r} value={r} disabled={hosted && r === 'viewer'}>
             {ROLE_LABELS[r]}
           </SelectItem>
         ))}
@@ -127,6 +136,7 @@ function RoleSelect({ value, onChange, disabled, label, size = 'default' }: { va
 }
 
 function UsersSection({ me }: { me: User }) {
+  const { publicConfig } = useAuth();
   const { data: users, error, loading, reload } = useApi((signal) => api.listUsers(signal), []);
   const [actionError, setActionError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<User | null>(null);
@@ -166,8 +176,9 @@ function UsersSection({ me }: { me: User }) {
       <CardHeader className="pb-4">
         <CardTitle>Users</CardTitle>
         <CardDescription>
-          Admins manage all sites and users. Viewers can see all sites and statistics. Members are self-service accounts that
-          only see their own sites.
+          Admins manage all sites and users.{' '}
+          {publicConfig.signupEnabled ? '' : 'Viewers can see all sites and statistics. '}Members are self-service accounts that
+          only see and manage their own sites.
         </CardDescription>
       </CardHeader>
       <CardContent className="px-0">
@@ -262,8 +273,9 @@ function UsersSection({ me }: { me: User }) {
 }
 
 function AddUserForm({ onCreated }: { onCreated: () => void }) {
+  const { publicConfig } = useAuth();
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<Role>('viewer');
+  const [role, setRole] = useState<Role>(publicConfig.signupEnabled ? 'member' : 'viewer');
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);

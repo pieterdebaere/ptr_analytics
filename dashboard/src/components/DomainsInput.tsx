@@ -5,16 +5,21 @@ import { displayText, normalizeDomain } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 
 export const MAX_DOMAINS = 20;
+/** Hosted mode: members may list at most this many domains per site. */
+export const MEMBER_MAX_DOMAINS = 5;
 
 /** Chips input for site domains (hostname, localhost or *.example.com). */
 export function DomainsInput({
   value,
   onChange,
   disabled = false,
+  max = MAX_DOMAINS,
 }: {
   value: string[];
   onChange: (domains: string[]) => void;
   disabled?: boolean;
+  /** maximum number of entries (20, or 5 for hosted-mode members) */
+  max?: number;
 }) {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -32,8 +37,8 @@ export function DomainsInput({
         return false;
       }
       if (!next.includes(d)) {
-        if (next.length >= MAX_DOMAINS) {
-          setError(`A site can have at most ${MAX_DOMAINS} domains.`);
+        if (next.length >= max) {
+          setError(`A site can have at most ${max} domains.`);
           return false;
         }
         next.push(d);

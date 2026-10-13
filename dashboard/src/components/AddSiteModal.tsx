@@ -12,7 +12,7 @@ import { formatPrice, pricingNote } from '@/lib/billing';
 import { displayText } from '@/lib/safety';
 import { installSnippet, snippetOrigin } from '@/lib/snippet';
 import { CodeBlock } from './common';
-import { DomainsInput } from './DomainsInput';
+import { DomainsInput, MAX_DOMAINS, MEMBER_MAX_DOMAINS } from './DomainsInput';
 
 /** Shown when POST /api/sites answers 402 upgrade_required. */
 export function UpgradeContent({ onClose }: { onClose: () => void }) {
@@ -56,7 +56,8 @@ export function UpgradeContent({ onClose }: { onClose: () => void }) {
 }
 
 export function AddSiteModal({ onClose, onCreated }: { onClose: () => void; onCreated: (site: Site) => void }) {
-  const { config } = useAuth();
+  const { config, user } = useAuth();
+  const maxDomains = user?.role === 'member' ? MEMBER_MAX_DOMAINS : MAX_DOMAINS;
   const [name, setName] = useState('');
   const [domains, setDomains] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -127,7 +128,7 @@ export function AddSiteModal({ onClose, onCreated }: { onClose: () => void; onCr
                 onChange={(e) => setName(e.target.value)}
               />
             </div>
-            <DomainsInput value={domains} onChange={setDomains} />
+            <DomainsInput value={domains} onChange={setDomains} max={maxDomains} />
             {error ? (
               <p className="text-sm text-destructive" role="alert">
                 {error}

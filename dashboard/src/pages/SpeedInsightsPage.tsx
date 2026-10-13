@@ -274,9 +274,13 @@ function VitalsOverview({ data, metric, onSelect }: { data: VitalsSummaryRespons
                   {formatVital(m, s?.p75 ?? null)}
                 </span>
                 <RatingScale metric={m} value={s?.p75 ?? null} />
-                <span className={cn('flex items-start gap-1.5 text-xs leading-tight font-medium', rating ? RATING_TEXT[rating] : 'text-muted-foreground')}>
-                  <i className={cn('mt-[0.3em] size-1.5 shrink-0 rounded-full', rating ? RATING_BG[rating] : 'bg-muted-foreground/40')} aria-hidden="true" />
-                  <span>{rating ? RATING_LABELS[rating] : 'No data'}</span>
+                <span className={cn('flex min-w-0 items-center gap-1.5 text-xs leading-tight font-medium', rating ? RATING_TEXT[rating] : 'text-muted-foreground')}>
+                  <i className={cn('size-1.5 shrink-0 rounded-full', rating ? RATING_BG[rating] : 'bg-muted-foreground/40')} aria-hidden="true" />
+                  {/* one line in every card so the values above line up */}
+                  <span className="truncate whitespace-nowrap" title={rating ? RATING_LABELS[rating] : undefined}>
+                    {rating ? (rating === 'needs-improvement' ? 'Needs work' : RATING_LABELS[rating]) : 'No data'}
+                  </span>
+                  {rating === 'needs-improvement' ? <span className="sr-only">({RATING_LABELS[rating]})</span> : null}
                 </span>
                 <span className="sr-only">{formatNumber(s?.count ?? 0)} samples</span>
               </span>
