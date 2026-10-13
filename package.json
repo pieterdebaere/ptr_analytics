@@ -11,7 +11,8 @@
   "workspaces": [
     "tracker",
     "dashboard",
-    "server"
+    "server",
+    "landing"
   ],
   "scripts": {
     "build": "npm run build -w tracker && npm run build -w dashboard && npm run build -w server",
@@ -19,7 +20,9 @@
     "dev:dashboard": "npm run dev -w dashboard",
     "start": "node server/dist/index.js",
     "cli": "node server/dist/cli.js",
-    "test": "npm test -w tracker && npm test -w server && npm test -w dashboard",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "test": "npm test -w tracker && npm test -w server && npm test -w dashboard && npm test -w landing",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build:landing": "npm run build -w landing",
+    "dev:landing": "npm run dev -w landing"
   }
 }

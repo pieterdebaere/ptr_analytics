@@ -373,13 +373,95 @@ CLS 25% (re-normalised over metrics that have data; `null` if none).
 * `GET /api/sites/:id/vitals/breakdown?metric=<m>&dimension=<path|hostname|country|device|browser|os>&limit` →
   `{rows: [{value, p75, count, rating}]}` sorted by count desc.
 
+#### Live map (globe)
+* `GET /api/sites/:id/stats/live` →
+  `{visitors, countries: [{country: string|null, visitors}], recent: [{ts, country: string|null, path}]}`
+  over the last 5 minutes (`recent` = newest pageviews first, max 50). Never cached.
+* `GET /api/live` → `{visitors, countries: [{country, visitors}], sites: [{id, name, visitors}]}`
+  aggregated over all sites the user can access (last 5 minutes).
+
 ## 5. Dashboard (`/dashboard`)
 
-React 18+ + Vite + TypeScript, `react-router-dom` for routing, **no other runtime
-dependencies** (charts are hand-written SVG). Plain CSS (CSS variables, light & dark theme
-following `prefers-color-scheme` with a manual toggle). No inline `<script>` and no
+React + Vite + TypeScript, `react-router-dom` for routing, Tailwind CSS v4 with
+[shadcn/ui](https://ui.shadcn.com) components (Base UI flavour, `src/components/ui`) and
+[Bklit UI](https://bklit.com) charts (`src/components/charts`, MIT). The 3D globe
+(`src/components/globe`) is drawn with d3-geo (orthographic projection) on a canvas.
+Light & dark theme following `prefers-color-scheme` with a manual toggle. No inline `<script>` and no
 `style="…"` attributes in `index.html` (strict CSP). Never use `dangerouslySetInnerHTML`.
 All analytics values (paths, referrers, event names, props, countries…) are untrusted.
 
 See the dashboard README for screens. All mutating requests send `X-PA-Request: 1`.
 Period + filters live in the URL query string so views are linkable.
+
+## 6. Hosted ("cloud") mode
+
+The same server can run as a hosted service where anyone can sign up. Everything below is
+**off by default**; a self-hosted install behaves exactly as described above.
+
+### 6.1 Configuration
+
+| var | default | meaning |
+|-----|---------|---------|
+| `SIGNUP_ENABLED` | `false` | allow public self-service sign-up (`member` accounts). Requires `SMTP_URL` + `MAIL_FROM` (email verification is mandatory). |
+| `SMTP_URL` | – | e.g. `smtps://user:pass@smtp.example.com:465` (nodemailer URL) |
+| `MAIL_FROM` | – | e.g. `PTR Analytics <no-reply@example.com>` |
+| `MEMBER_SITE_LIMIT` | `10` | max sites per member when billing is disabled |
+| `BILLING_ENABLED` | `false` | charge members per site via Stripe. Requires `SIGNUP_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`. |
+| `STRIPE_SECRET_KEY` | – | `sk_live_…` / `sk_test_…` (or a restricted key) |
+| `STRIPE_WEBHOOK_SECRET` | – | `whsec_…` of the webhook endpoint `PUBLIC_URL/api/billing/webhook` |
+| `STRIPE_PRICE_ID` | – | recurring per-unit price, e.g. €1.00 / month (`price_…`) |
+| `STRIPE_AUTOMATIC_TAX` | `false` | enable Stripe Tax on checkout |
+| `FREE_SITES` | `1` | sites included for free per member |
+| `PRICE_PER_SITE_CENTS` / `PRICE_CURRENCY` | `100` / `eur` | display only (Stripe's price is authoritative) |
+| `TERMS_URL` / `PRIVACY_URL` | – | links shown on the sign-up page (required to be accepted) |
+
+### 6.2 Accounts & tenancy
+
+Roles: `admin` (operator: all sites, user management, never billed), `viewer` (read-only
+access to all sites — self-hosted teams) and `member` (self-service account: sees and manages
+**only the sites it owns**). `sites.owner_id` references the creating user (`ON DELETE CASCADE`).
+Every site-scoped endpoint (stats, vitals, export, live, settings) checks access:
+admin/viewer → any site; member → `owner_id = user.id`, otherwise `404`.
+`User = {id, email, role, createdAt, emailVerified}`; `Site` gains `suspended: boolean`.
+
+### 6.3 Auth endpoints (cloud)
+
+* `GET /api/public-config` (no auth) →
+  `{signupEnabled, billingEnabled, freeSites, pricePerSiteCents, currency, termsUrl, privacyUrl}`
+* `POST /api/auth/signup` `{email, password, acceptTerms: true}` → always `202 {ok:true}`
+  (no account enumeration). New address: create unverified member + send a verification link
+  `PUBLIC_URL/verify?token=…` (24 h). Existing address: send a "you already have an account"
+  mail with a reset link instead. Rate limited per IP and per email.
+* `POST /api/auth/verify` `{token}` → `200 {user}` + session cookie (marks the email verified).
+* `POST /api/auth/forgot` `{email}` → always `202 {ok:true}`; sends `PUBLIC_URL/reset?token=…` (1 h).
+* `POST /api/auth/reset` `{token, password}` → `204`; signs out all sessions of that user.
+* Login of an unverified member → `403 {error: "email not verified"}`.
+* `DELETE /api/account` `{password}` (members) → `204`; cancels the Stripe subscription,
+  deletes the user and all its sites and data.
+Tokens: 32 random bytes, only `sha256(token)` stored, single use.
+
+### 6.4 Billing (Stripe)
+
+Allowance for a member = `FREE_SITES + paidSites` (billing enabled) or `MEMBER_SITE_LIMIT`.
+`POST /api/sites` beyond the allowance → `402 {error, code: "upgrade_required"}`.
+* `GET /api/billing` →
+  `{enabled, freeSites, pricePerSiteCents, currency, sitesUsed, sitesAllowed, paidSites, status: "none"|"active"|"trialing"|"past_due"|"canceled"|"unpaid"|"incomplete", hasCustomer}`
+* `POST /api/billing/checkout` `{paidSites: 1..1000}` → `{url}` — Stripe Checkout (subscription,
+  `STRIPE_PRICE_ID` × paidSites). Only when the member has no active subscription.
+* `POST /api/billing/quantity` `{paidSites: 0..1000}` → `{billing}` — updates the existing
+  subscription quantity (prorated); `0` cancels at period end.
+* `POST /api/billing/portal` → `{url}` — Stripe customer portal (invoices, payment method, cancel).
+* `POST /api/billing/webhook` — Stripe webhook (no auth, no CSRF header; signature verified
+  with `STRIPE_WEBHOOK_SECRET`, 5 min tolerance, raw body ≤ 1 MB). Handles
+  `checkout.session.completed`, `customer.subscription.created|updated|deleted`; the state is
+  always re-read from the Stripe API (webhook payloads are only a trigger).
+Paid-site count / status changes recompute `sites.suspended` for the member: the oldest
+`allowance` sites stay active, newer ones are suspended (ingest silently drops their events,
+the dashboard shows a banner). Nothing is deleted.
+The Stripe API is called with `fetch` (no SDK).
+
+## 7. Landing page (`/landing`)
+
+Static marketing site (Vite + React + Tailwind + shadcn/Bklit, sharing components with the
+dashboard), deployed on its own domain. Build-time config: `VITE_APP_URL` (the hosted
+analytics server, e.g. `https://analytics.pieterdebaere.be`) and `VITE_REPO_URL`.
