@@ -1,6 +1,6 @@
 // PTR Analytics tracker. See ../README.md and docs/SPEC.md section 3.
 // Privacy: never writes cookies or storage; only reads localStorage.pa_ignore.
-import { globToRegExp } from './glob';
+import { globMatcher } from './glob';
 import { observeVitals, type Metric } from './vitals';
 
 export interface Payload {
@@ -38,7 +38,9 @@ function main() {
   // Included twice: the first instance already owns window.pa.
   if (prev && prev._ptr) return;
 
-  const script = (d.currentScript || d.querySelector('script[data-site]')) as HTMLScriptElement | null;
+  // Fallback (currentScript is null in some loaders): only a tag that actually loads the tracker,
+  // so an inert injected `<script data-site>` cannot redirect the data.
+  const script = (d.currentScript || d.querySelector('script[data-site][src$="/script.js"]')) as HTMLScriptElement | null;
   const attr = (k: string) => (script && script.getAttribute('data-' + k)) || '';
   const is = (k: string, v: string) => attr(k) === v;
   const warn = (m: string) => {
@@ -46,10 +48,12 @@ function main() {
   };
   const site = attr('site');
   const endpoint = attr('endpoint') || (script && script.src ? new URL(script.src).origin : '') + '/api/event';
+  // At most 20 globs of up to 200 characters each (matching is linear-time anyway).
   const exclude = attr('exclude')
     .split(',')
-    .filter((g) => g.trim())
-    .map(globToRegExp);
+    .filter((g) => g.trim() && g.length <= 200)
+    .slice(0, 20)
+    .map(globMatcher);
   const sample = +(attr('vitals-sample') || 1);
   const optedOut = () => {
     try {
@@ -78,8 +82,10 @@ function main() {
   let referrer = d.referrer;
   const queue: ArrayLike<unknown>[] = prev && prev.q ? [].slice.call(prev.q) : [];
 
+  const base = (u: URL) => u.protocol + '//' + u.host;
+
   const send = (type: Payload['type'], url: string, path: string, extra: Partial<Payload>) => {
-    if (off || optedOut() || exclude.some((r) => r.test(path))) return;
+    if (off || optedOut() || exclude.some((m) => m(path))) return;
     let p: ReturnType<BeforeSend> = Object.assign({ site, type, url, width: w.innerWidth }, extra);
     const hook = api.beforeSend;
     if (typeof hook == 'function') {
@@ -91,20 +97,44 @@ function main() {
       }
       if (!p || typeof p != 'object') return;
     }
-    const body = JSON.stringify(p);
+    // Data minimisation, applied to whatever beforeSend returned: the url keeps only origin,
+    // path and the utm_* parameters the server uses (never the fragment); the referrer only
+    // its origin, and only when it is another http(s) origin.
+    let body: string;
     try {
-      if (n.sendBeacon(endpoint, new Blob([body], { type: 'text/plain' }))) return;
+      const u = new URL(p.url);
+      const q = u.search
+        .slice(1)
+        .split('&')
+        .filter((s) => /^utm_(source|medium|campaign|term|content)=/.test(s))
+        .join('&');
+      const r = p.referrer && new URL(p.referrer);
+      const ref = r && /^https?:$/.test(r.protocol) && base(r);
+      body = JSON.stringify(
+        Object.assign({}, p, {
+          url: base(u) + u.pathname + (q && '?' + q),
+          referrer: ref && ref != base(u) && ref != loc.origin ? ref + '/' : undefined,
+        }),
+      );
+    } catch (e) {
+      return warn('bad url: ' + e);
+    }
+    // fetch keepalive survives page unload and, unlike sendBeacon, can omit credentials.
+    // text/plain without custom headers is a CORS-simple request: no preflight.
+    try {
+      if ('keepalive' in Request.prototype)
+        return void fetch(endpoint, {
+          method: 'POST',
+          body,
+          keepalive: true,
+          credentials: 'omit',
+          headers: { 'Content-Type': 'text/plain' },
+        }).catch(noop);
     } catch {
-      // no sendBeacon: fall through to fetch
+      // no fetch / Request: fall through to sendBeacon
     }
     try {
-      fetch(endpoint, {
-        method: 'POST',
-        body,
-        keepalive: true,
-        credentials: 'omit',
-        headers: { 'Content-Type': 'text/plain' },
-      }).catch(noop);
+      n.sendBeacon(endpoint, new Blob([body], { type: 'text/plain' }));
     } catch {
       // no transport available
     }

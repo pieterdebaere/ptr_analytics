@@ -4,25 +4,38 @@
 /**
  * Validates a post-login redirect target. Only same-origin relative paths are
  * accepted: must start with a single "/", no "//" or "/\" prefix, no
- * backslashes, no control characters or whitespace. Returns null if unsafe.
+ * backslashes, no control characters or whitespace. The path part (before
+ * "?" / "#") must not contain dot segments or encoded ".", "/" or "\"
+ * (`%2e`, `%2f`, `%5c`), because URL normalisation could otherwise turn e.g.
+ * "/.//evil.example" into the protocol-relative "//evil.example". The
+ * normalised output is validated again. Returns null if unsafe.
  */
 export function safeNextPath(next: string | null | undefined): string | null {
   if (typeof next !== 'string' || next.length === 0 || next.length > 2048) return null;
-  if (next[0] !== '/') return null;
-  if (next[1] === '/' || next[1] === '\\') return null;
+  if (!isSingleSlashPath(next)) return null;
   if (next.includes('\\')) return null;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000- \u007f-\u009f]/.test(next)) return null;
+  const rawPath = next.split(/[?#]/, 1)[0] ?? '';
+  if (/%(?:2e|2f|5c)/i.test(rawPath)) return null;
+  if (rawPath.split('/').some((seg) => seg === '.' || seg === '..')) return null;
   try {
     const base = 'https://dashboard.invalid';
     const url = new URL(next, base);
     if (url.origin !== base) return null;
-    const path = url.pathname + url.search + url.hash;
+    if (!isSingleSlashPath(url.pathname)) return null;
     if (url.pathname === '/login' || url.pathname.startsWith('/login/')) return '/';
+    const path = url.pathname + url.search + url.hash;
+    if (!isSingleSlashPath(path)) return null;
     return path;
   } catch {
     return null;
   }
+}
+
+/** Starts with exactly one "/" that is not followed by another "/" or "\". */
+function isSingleSlashPath(p: string): boolean {
+  return p[0] === '/' && p[1] !== '/' && p[1] !== '\\';
 }
 
 /** URL of the login page that returns to `currentPath` afterwards. */
@@ -69,6 +82,44 @@ export function pageHref(hostname: string | null | undefined, path: string | nul
   } catch {
     return null;
   }
+}
+
+/**
+ * True when `host` is a safe public hostname that belongs to one of the site's
+ * configured domains: an exact match, the `www.` variant of a domain (either
+ * way round), or for a wildcard `*.base` the base itself or any subdomain of it.
+ */
+export function hostMatchesDomains(host: string | null | undefined, domains: readonly string[]): host is string {
+  if (!isSafeHostname(host)) return false;
+  for (const raw of domains) {
+    if (typeof raw !== 'string') continue;
+    const d = raw.trim().toLowerCase().replace(/\.$/, '');
+    if (!d) continue;
+    if (d.startsWith('*.')) {
+      const base = d.slice(2);
+      if (base && (host === base || host.endsWith(`.${base}`))) return true;
+      continue;
+    }
+    if (host === d || host === `www.${d}` || (d.startsWith('www.') && host === d.slice(4))) return true;
+  }
+  return false;
+}
+
+// C0 controls, DEL and C1 controls.
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+// Explicit bidi embeddings/overrides/isolates (LRE, RLE, PDF, LRO, RLO, LRI,
+// RLI, FSI, PDI): they can reorder the surrounding text (Trojan-Source style).
+const BIDI_CONTROL_RE = /[\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Makes an untrusted string safe to display: control characters and explicit
+ * bidi formatting characters are replaced by U+FFFD so that they are visible
+ * and cannot reorder neighbouring text. Rendered elements should additionally
+ * be bidi-isolated (`<bdi>` / `unicode-bidi: isolate`).
+ */
+export function displayText(value: string): string {
+  return value.replace(CONTROL_RE, '\ufffd').replace(BIDI_CONTROL_RE, '\ufffd');
 }
 
 /**
