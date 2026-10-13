@@ -124,9 +124,6 @@ export function AreaChart({
               y2={yScale(th.value)}
               className={`chart-threshold chart-threshold-${th.tone}`}
             />
-            <text x={right - 4} y={yScale(th.value) - 4} className={`chart-threshold-label chart-threshold-label-${th.tone}`} textAnchor="end">
-              {th.label}
-            </text>
           </g>
         ))}
         {segs.map((s, i) => (
@@ -135,6 +132,18 @@ export function AreaChart({
             <path d={linePath(s)} className="chart-line" />
             {s.length === 1 ? <circle cx={s[0]!.x} cy={s[0]!.y} r={3} className="chart-dot" /> : null}
           </g>
+        ))}
+        {/* Threshold labels on top of the data line, with a halo so they stay readable. */}
+        {thresholds.map((th) => (
+          <text
+            key={th.label}
+            x={right - 4}
+            y={yScale(th.value) - 5}
+            className={`chart-threshold-label chart-threshold-label-${th.tone}`}
+            textAnchor="end"
+          >
+            {th.label}
+          </text>
         ))}
         {xLabels.map((i) => {
           const p = points[i];

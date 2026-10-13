@@ -1,6 +1,10 @@
 /* PTR Analytics dashboard — plain CSS, light & dark themes. */
 
 :root {
+  /* Control heights: every button, input, select and segmented control uses one of these. */
+  --h-md: 36px;
+  --h-sm: 32px;
+  --h-xs: 28px;
   --bg: #ffffff;
   --bg-subtle: #fafafa;
   --bg-muted: #f2f2f2;
@@ -385,7 +389,7 @@ bdi,
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 36px;
+  height: var(--h-md);
   padding: 0 14px;
   border-radius: var(--radius);
   border: 1px solid var(--border-strong);
@@ -406,8 +410,13 @@ bdi,
   cursor: not-allowed;
 }
 .btn-sm {
-  height: 30px;
+  height: var(--h-sm);
   padding: 0 10px;
+  font-size: 13px;
+}
+.btn-xs {
+  height: var(--h-xs);
+  padding: 0 8px;
   font-size: 13px;
 }
 .btn-primary {
@@ -447,8 +456,8 @@ bdi,
 .icon-btn {
   display: inline-grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: var(--h-sm);
+  height: var(--h-sm);
   border-radius: var(--radius);
   border: 1px solid transparent;
   background: transparent;
@@ -475,7 +484,7 @@ bdi,
 
 .input,
 .select {
-  height: 36px;
+  height: var(--h-md);
   padding: 0 10px;
   border-radius: var(--radius);
   border: 1px solid var(--border-strong);
@@ -500,23 +509,10 @@ bdi,
   cursor: pointer;
 }
 .select-sm {
-  height: 30px;
-}
-.select-title {
-  font-size: 20px;
-  font-weight: 600;
-  height: 40px;
-  border-color: transparent;
-  background: transparent;
-  padding-left: 4px;
-  max-width: 100%;
-}
-.select-title:hover {
-  border-color: var(--border);
+  height: var(--h-sm);
 }
 .input-date {
   width: auto;
-  height: 32px;
 }
 
 .input-group {
@@ -593,8 +589,8 @@ bdi,
   align-items: center;
   gap: 4px;
   max-width: 100%;
-  height: 26px;
-  padding: 0 4px 0 8px;
+  height: var(--h-xs);
+  padding: 0 5px 0 10px;
   border-radius: 999px;
   background: var(--bg-muted);
   border: 1px solid var(--border);
@@ -643,6 +639,9 @@ bdi,
 
 .tabs {
   display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  height: var(--h-sm);
   gap: 2px;
   padding: 2px;
   border-radius: var(--radius);
@@ -655,19 +654,24 @@ bdi,
   display: none;
 }
 .tab {
+  display: inline-flex;
+  align-items: center;
   border: 0;
   background: transparent;
   color: var(--text-muted);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
-  padding: 3px 10px;
+  padding: 0 10px;
   border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
 }
+.tabs-md {
+  height: var(--h-md);
+}
 .tabs-md .tab {
-  padding: 5px 12px;
+  padding: 0 12px;
 }
 .tab:hover {
   color: var(--text);
@@ -1115,10 +1119,13 @@ bdi,
 }
 .site-switcher {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
-  flex-wrap: wrap;
+}
+.site-switcher .site-domains {
+  flex: 1 1 0;
+  min-width: 0;
 }
 .site-domains {
   font-size: 13px;
@@ -1126,13 +1133,13 @@ bdi,
 }
 .site-tabs {
   display: flex;
-  gap: 4px;
+  gap: 24px;
   overflow-x: auto;
   margin-bottom: -1px;
   scrollbar-width: none;
 }
 .site-tab {
-  padding: 8px 12px;
+  padding: 8px 0;
   color: var(--text-muted);
   text-decoration: none;
   border-bottom: 2px solid transparent;
@@ -1169,9 +1176,6 @@ bdi,
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-.period .select {
-  height: 32px;
 }
 .period-custom {
   display: flex;
@@ -1342,6 +1346,10 @@ bdi,
 .chart-threshold-label {
   font-size: 11px;
   fill: var(--text-muted);
+  paint-order: stroke;
+  stroke: var(--card);
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 .chart-tooltip {
   position: absolute;
@@ -1396,15 +1404,17 @@ bdi,
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 12px 14px;
-  flex-wrap: wrap;
+  padding: 12px 14px 8px;
 }
 .panel-header p {
   margin: 2px 0 0;
 }
 .panel-title {
+  margin: 0;
   font-size: 14px;
-  padding: 3px 4px;
+  line-height: 20px;
+  /* same height as the tab bars of the other panels */
+  padding: calc((var(--h-sm) - 20px) / 2) 4px;
 }
 .panel-body {
   flex: 1;
@@ -1581,8 +1591,9 @@ bdi,
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 18px;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
 }
 .res-head {
   display: flex;
@@ -1633,6 +1644,9 @@ bdi,
 }
 .vital-name {
   font-size: 12px;
+  line-height: 1.4;
+  /* reserve two lines so the values of all cards line up */
+  min-height: 2.8em;
 }
 .vital-value {
   font-size: 24px;
@@ -1641,9 +1655,10 @@ bdi,
 }
 .vital-foot {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
-  align-items: center;
+  margin-top: auto;
   font-size: 12px;
 }
 .vital-foot .badge {
@@ -1819,14 +1834,14 @@ bdi,
   .chip-value {
     max-width: 160px;
   }
-  .select-title {
+  .site-switch-trigger {
     font-size: 17px;
   }
   .hide-sm {
     display: none;
   }
   .table td.cell-email {
-    min-width: 140px;
+    max-width: 150px;
   }
   .table th,
   .table td {
@@ -1837,4 +1852,132 @@ bdi,
     padding-right: 14px;
     padding-top: 42px;
   }
+}
+
+/* ---------- site switcher ---------- */
+
+.site-switch {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 75%;
+  /* align the text (not the hover background) with the page edge */
+  margin-left: -8px;
+}
+.site-switch-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 40px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 20px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.site-switch-trigger:hover,
+.site-switch-trigger[aria-expanded='true'] {
+  background: var(--bg-muted);
+}
+.site-switch-trigger svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.menu-list-left {
+  left: 0;
+  right: auto;
+  min-width: 260px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+}
+.site-switch-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.menu-item-active {
+  background: var(--bg-muted);
+  font-weight: 600;
+}
+
+/* ---------- panel column header ---------- */
+
+.panel-header .tabs {
+  flex-shrink: 1;
+  min-width: 0;
+}
+.panel-columns {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 6px 6px 22px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.panel-columns-flush {
+  padding: 0 0 6px 8px;
+  margin-right: -8px;
+}
+.metric-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.metric-switch-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.metric-switch-btn:hover {
+  color: var(--text);
+}
+.metric-switch-active {
+  background: var(--bg-muted);
+  color: var(--text);
+}
+
+/* ---------- users table ---------- */
+
+.cell-email-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cell-email-inner .badge {
+  flex-shrink: 0;
+}
+.table td.cell-email {
+  max-width: 320px;
+}
+
+/* ---------- scrollable tab bars ---------- */
+
+.tabs-fade-right {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+}
+.tabs-fade-left {
+  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+}
+.tabs-fade-left.tabs-fade-right {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
 }

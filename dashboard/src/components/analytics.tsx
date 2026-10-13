@@ -81,7 +81,7 @@ export function FilterChips({
         );
       })}
       {active.length > 1 ? (
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onClear}>
+        <button type="button" className="btn btn-ghost btn-xs" onClick={onClear}>
           Clear all
         </button>
       ) : null}
@@ -202,16 +202,8 @@ export function BreakdownPanel({
         ) : (
           <h2 className="panel-title">{title}</h2>
         )}
-        <Tabs
-          items={[
-            { key: 'visitors', label: 'Visitors' },
-            { key: 'count', label: countLabel },
-          ]}
-          value={metric}
-          onChange={setMetric}
-          label="Metric"
-        />
       </div>
+      <PanelColumns label={DIMENSION_LABELS[tab]} metric={metric} onMetric={setMetric} countLabel={countLabel} />
       <div className="panel-body">
         {error ? (
           <ErrorState message={error} onRetry={reload} />
@@ -260,6 +252,45 @@ export function BreakdownPanel({
         />
       ) : null}
     </section>
+  );
+}
+
+/** Column header row: dimension name on the left, Visitors / count switch on the right. */
+function PanelColumns({
+  label,
+  metric,
+  onMetric,
+  countLabel,
+  flush = false,
+}: {
+  label: string;
+  metric: RowMetric;
+  onMetric: (m: RowMetric) => void;
+  countLabel: string;
+  flush?: boolean;
+}) {
+  const options: Array<[RowMetric, string]> = [
+    ['visitors', 'Visitors'],
+    ['count', countLabel],
+  ];
+  return (
+    <div className={`panel-columns${flush ? ' panel-columns-flush' : ''}`}>
+      <span>{label}</span>
+      <div className="metric-switch" role="tablist" aria-label="Metric">
+        {options.map(([key, text]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={metric === key}
+            className={`metric-switch-btn${metric === key ? ' metric-switch-active' : ''}`}
+            onClick={() => onMetric(key)}
+          >
+            {text}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -317,16 +348,8 @@ export function ViewAllModal({
             data-autofocus
           />
         </div>
-        <Tabs
-          items={[
-            { key: 'visitors', label: 'Visitors' },
-            { key: 'count', label: countLabel },
-          ]}
-          value={metric}
-          onChange={setMetric}
-          label="Metric"
-        />
       </div>
+      <PanelColumns label={DIMENSION_LABELS[dimension]} metric={metric} onMetric={setMetric} countLabel={countLabel} flush />
       <div className="viewall-body">
         {error ? (
           <ErrorState message={error} onRetry={reload} />

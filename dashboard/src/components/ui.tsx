@@ -108,8 +108,42 @@ export function Tabs<K extends string>({
   label: string;
   size?: 'sm' | 'md';
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [fade, setFade] = useState({ left: false, right: false });
+
+  // When the tabs don't fit (narrow panels / phones) they scroll horizontally; fade the
+  // edge that has more tabs behind it so it is clear there is more to see.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const left = el.scrollLeft > 1;
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      setFade((f) => (f.left === left && f.right === right ? f : { left, right }));
+    };
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+    ro?.observe(el);
+    return () => {
+      el.removeEventListener('scroll', update);
+      ro?.disconnect();
+    };
+  }, [items.length]);
+
+  // Keep the active tab visible.
+  useEffect(() => {
+    const el = ref.current;
+    const active = el?.querySelector<HTMLElement>('.tab-active');
+    if (!el || !active) return;
+    if (active.offsetLeft < el.scrollLeft || active.offsetLeft + active.offsetWidth > el.scrollLeft + el.clientWidth) {
+      el.scrollTo({ left: active.offsetLeft - 24, behavior: 'smooth' });
+    }
+  }, [value]);
+
+  const cls = `tabs tabs-${size}${fade.left ? ' tabs-fade-left' : ''}${fade.right ? ' tabs-fade-right' : ''}`;
   return (
-    <div className={`tabs tabs-${size}`} role="tablist" aria-label={label}>
+    <div ref={ref} className={cls} role="tablist" aria-label={label}>
       {items.map((it) => (
         <button
           key={it.key}

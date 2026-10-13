@@ -165,6 +165,7 @@ function VitalsOverview({
           <InfoTip text={RES_DESCRIPTION} />
         </div>
         <RingGauge
+          size={120}
           score={data.score}
           tone={ratingTone(scoreRating)}
           label={data.score === null ? 'No score' : `Score ${Math.round(data.score)} of 100`}

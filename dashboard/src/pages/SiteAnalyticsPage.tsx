@@ -27,17 +27,17 @@ const PAGES_TABS: PanelTab[] = [
 ];
 const REFERRER_TABS: PanelTab[] = [
   { key: 'referrer', label: 'Referrers' },
-  { key: 'utm_source', label: 'UTM Source' },
-  { key: 'utm_medium', label: 'UTM Medium' },
-  { key: 'utm_campaign', label: 'UTM Campaign' },
-  { key: 'utm_term', label: 'UTM Term' },
-  { key: 'utm_content', label: 'UTM Content' },
+  { key: 'utm_source', label: 'Source' },
+  { key: 'utm_medium', label: 'Medium' },
+  { key: 'utm_campaign', label: 'Campaign' },
+  { key: 'utm_term', label: 'Term' },
+  { key: 'utm_content', label: 'Content' },
 ];
 const COUNTRY_TABS: PanelTab[] = [{ key: 'country', label: 'Countries' }];
 const DEVICE_TABS: PanelTab[] = [
   { key: 'device', label: 'Devices' },
   { key: 'browser', label: 'Browsers' },
-  { key: 'os', label: 'Operating Systems' },
+  { key: 'os', label: 'OS' },
 ];
 const EVENT_TABS: PanelTab[] = [{ key: 'event', label: 'Events' }];
 
@@ -61,7 +61,7 @@ export function SiteAnalyticsPage() {
           <PeriodSelector value={period} onChange={setPeriod} />
           <LiveIndicator siteId={site.id} tz={tz} />
         </div>
-        <a className="btn btn-sm" href={exportUrl(site.id, query)} download>
+        <a className="btn" href={exportUrl(site.id, query)} download>
           <DownloadIcon />
           <span>Export CSV</span>
         </a>

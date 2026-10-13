@@ -6,6 +6,7 @@ import { useAuth } from '../hooks/auth';
 import { useApi } from '../hooks/useApi';
 import { formatDate } from '../lib/format';
 import { MAX_PASSWORD, MIN_PASSWORD, generatePassword, validateNewPassword } from '../lib/password';
+import { displayText } from '../lib/safety';
 
 export function AccountPage() {
   const { user } = useAuth();
@@ -174,9 +175,13 @@ function UsersSection({ me }: { me: User }) {
                 const self = u.id === me.id;
                 return (
                   <tr key={u.id}>
-                    <td className="break-all cell-email">
-                      {u.email}
-                      {self ? <span className="badge badge-none">You</span> : null}
+                    <td className="cell-email">
+                      <span className="cell-email-inner">
+                        <span className="truncate bidi-isolate" title={u.email}>
+                          {displayText(u.email)}
+                        </span>
+                        {self ? <span className="badge badge-none">You</span> : null}
+                      </span>
                     </td>
                     <td>
                       <label className="sr-only" htmlFor={`role-${u.id}`}>

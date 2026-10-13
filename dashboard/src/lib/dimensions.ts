@@ -10,7 +10,7 @@ export const DIMENSION_LABELS: Record<FilterKey, string> = {
   country: 'Country',
   device: 'Device',
   browser: 'Browser',
-  os: 'OS',
+  os: 'Operating system',
   utm_source: 'UTM Source',
   utm_medium: 'UTM Medium',
   utm_campaign: 'UTM Campaign',

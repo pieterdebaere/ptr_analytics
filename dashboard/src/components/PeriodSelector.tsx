@@ -87,7 +87,7 @@ export function PeriodSelector({
             onChange={(e) => setTo(e.target.value)}
             required
           />
-          <button type="submit" className="btn btn-sm">
+          <button type="submit" className="btn">
             Apply
           </button>
           {error ? (
