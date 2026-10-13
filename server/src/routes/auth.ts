@@ -1,0 +1,89 @@
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { PASSWORD_MAX, PASSWORD_MIN } from '../config.js';
+import type { AppContext } from '../context.js';
+import { currentUser, requireAuth } from '../auth/guard.js';
+import { SESSION_COOKIE, SESSION_TTL_MS } from '../auth/sessions.js';
+import { field, objectBody } from '../lib/body.js';
+import { HttpError, badRequest } from '../lib/errors.js';
+import { dummyVerify, hashPassword, verifyPassword } from '../lib/password.js';
+
+export function validPassword(v: unknown): v is string {
+  return typeof v === 'string' && v.length >= PASSWORD_MIN && v.length <= PASSWORD_MAX;
+}
+
+export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
+  const { ctx } = opts;
+  const auth = requireAuth(ctx);
+
+  const setSessionCookie = (reply: FastifyReply, token: string): void => {
+    reply.setCookie(SESSION_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'strict',
+      path: '/',
+      secure: ctx.config.cookieSecure,
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    });
+  };
+
+  app.post('/api/auth/login', async (request, reply) => {
+    const body = objectBody(request.body);
+    const emailRaw = field(body, 'email');
+    const password = field(body, 'password');
+    if (typeof emailRaw !== 'string' || emailRaw.length > 254 || typeof password !== 'string' || password.length > PASSWORD_MAX) {
+      throw badRequest('email and password are required');
+    }
+    const email = emailRaw.trim().toLowerCase();
+    const ipKey = request.ip;
+    if (ctx.limits.loginIp.isLimited(ipKey) || ctx.limits.loginEmail.isLimited(email)) {
+      throw new HttpError(429, 'too many failed login attempts, try again later');
+    }
+
+    const found = ctx.users.byEmailWithHash(email);
+    let ok = false;
+    if (found) ok = await verifyPassword(password, found.passwordHash);
+    else await dummyVerify(password);
+
+    if (!found || !ok) {
+      ctx.limits.loginIp.hit(ipKey);
+      ctx.limits.loginEmail.hit(email);
+      throw new HttpError(401, 'invalid email or password');
+    }
+    ctx.limits.loginEmail.reset(email);
+    const { token } = ctx.authSessions.create(found.user.id, ctx.now());
+    setSessionCookie(reply, token);
+    return { user: found.user };
+  });
+
+  app.post('/api/auth/logout', async (request, reply) => {
+    const token = request.cookies[SESSION_COOKIE];
+    if (token !== undefined) ctx.authSessions.deleteToken(token);
+    reply.clearCookie(SESSION_COOKIE, { path: '/', httpOnly: true, sameSite: 'strict', secure: ctx.config.cookieSecure });
+    return reply.code(204).send();
+  });
+
+  app.get('/api/auth/me', { preHandler: auth }, async (request) => ({ user: currentUser(request) }));
+
+  app.post('/api/auth/password', { preHandler: auth }, async (request, reply) => {
+    const user = currentUser(request);
+    const body = objectBody(request.body);
+    const currentPassword = field(body, 'currentPassword');
+    const newPassword = field(body, 'newPassword');
+    if (typeof currentPassword !== 'string' || currentPassword.length > PASSWORD_MAX) throw badRequest('invalid currentPassword');
+    if (!validPassword(newPassword)) {
+      throw badRequest(`new password must be ${PASSWORD_MIN}..${PASSWORD_MAX} characters`);
+    }
+    const ipKey = request.ip;
+    if (ctx.limits.loginIp.isLimited(ipKey) || ctx.limits.loginEmail.isLimited(user.email)) {
+      throw new HttpError(429, 'too many failed attempts, try again later');
+    }
+    const hash = ctx.users.passwordHash(user.id);
+    if (hash === null || !(await verifyPassword(currentPassword, hash))) {
+      ctx.limits.loginIp.hit(ipKey);
+      ctx.limits.loginEmail.hit(user.email);
+      throw badRequest('current password is incorrect');
+    }
+    ctx.users.setPasswordHash(user.id, await hashPassword(newPassword));
+    ctx.authSessions.deleteForUser(user.id, request.authTokenHash ?? undefined);
+    return reply.code(204).send();
+  });
+}
