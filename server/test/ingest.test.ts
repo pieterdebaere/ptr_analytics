@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CHROME_UA, FIREFOX_MAC_UA, IPHONE_UA, MIN, createTestApp, pageview, sendEvent, type TestApp } from './helpers.js';
+import { FIREFOX_MAC_UA, IPHONE_UA, MIN, createTestApp, pageview, sendEvent, type TestApp } from './helpers.js';
 
 interface EventRow {
   type: string;
@@ -344,6 +344,24 @@ describe('visitors and sessions', () => {
     expect(e[0]?.session_id).toBe(e[2]?.session_id);
     expect(e[3]?.session_id).not.toBe(e[0]?.session_id);
     expect(e.map((x) => x.session_id).every((s) => /^[0-9a-f]{32}$/.test(s))).toBe(true);
-    void CHROME_UA;
+  });
+
+  it('ignores cookies on /api/event (same-site beacons may carry the dashboard cookie)', async () => {
+    const login = await t.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      headers: { 'x-pa-request': '1' },
+      payload: { email: 'admin@example.com', password: 'correct horse battery' },
+    });
+    const cookie = String(login.headers['set-cookie']).split(';')[0] as string;
+    const headers = { cookie: `${cookie}; other=1; broken` };
+    const a = await sendEvent(t.app, pageview(siteId, 'https://example.com/'), { headers });
+    const b = await sendEvent(t.app, pageview(siteId, 'https://example.com/'));
+    expect(a.statusCode).toBe(202);
+    expect(a.headers['set-cookie']).toBeUndefined();
+    const [x, y] = events();
+    // identical visitor/session with or without the cookie: the cookie plays no role
+    expect(x?.visitor_id).toBe(y?.visitor_id);
+    expect(x?.session_id).toBe(y?.session_id);
   });
 });

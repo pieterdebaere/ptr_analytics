@@ -36,7 +36,9 @@ export function normalizeDomainEntry(input: unknown): string | null {
     }
   } else {
     // allow "example.com:8080" / "example.com/" style input
-    s = s.replace(/[/:].*$/, '');
+    const m = /^([^/:]+)(?::\d{1,5})?(?:\/.*)?$/.exec(s);
+    if (!m) return null;
+    s = m[1] as string;
   }
   if (s.endsWith('.')) s = s.slice(0, -1);
   if (s === 'localhost') return s;

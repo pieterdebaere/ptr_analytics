@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { PASSWORD_MAX, PASSWORD_MIN } from '../config.js';
 import type { AppContext } from '../context.js';
+import { sessionToken } from '../auth/cookie.js';
 import { currentUser, requireAuth } from '../auth/guard.js';
 import { SESSION_COOKIE, SESSION_TTL_MS } from '../auth/sessions.js';
 import { field, objectBody } from '../lib/body.js';
@@ -55,7 +56,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
   });
 
   app.post('/api/auth/logout', async (request, reply) => {
-    const token = request.cookies[SESSION_COOKIE];
+    const token = sessionToken(request);
     if (token !== undefined) ctx.authSessions.deleteToken(token);
     reply.clearCookie(SESSION_COOKIE, { path: '/', httpOnly: true, sameSite: 'strict', secure: ctx.config.cookieSecure });
     return reply.code(204).send();

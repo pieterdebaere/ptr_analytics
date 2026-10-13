@@ -1,3 +1,4 @@
+import { field as own, isPlainObject } from '../lib/body.js';
 import { SITE_ID_RE } from '../lib/ids.js';
 import { VITAL_METRICS, type VitalMetric } from '../stats/vitals-score.js';
 
@@ -23,15 +24,6 @@ const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
-  const proto = Object.getPrototypeOf(v) as unknown;
-  return proto === Object.prototype || proto === null;
-}
-
-function own(o: Record<string, unknown>, key: string): unknown {
-  return Object.prototype.hasOwnProperty.call(o, key) ? o[key] : undefined;
-}
 
 function parseHttpUrl(v: string): URL | null {
   try {

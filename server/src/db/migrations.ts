@@ -86,4 +86,8 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX vitals_site_metric_ts ON vitals(site_id, metric, ts);
   CREATE INDEX vitals_site_ts ON vitals(site_id, ts);
   `,
+  // v2 — per-bucket bounce rate looks sessions up by start time
+  `
+  CREATE INDEX sessions_site_started ON sessions(site_id, started_at);
+  `,
 ];

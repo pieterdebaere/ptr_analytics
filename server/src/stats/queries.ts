@@ -26,6 +26,8 @@ export interface TimeseriesPoint {
   t: number;
   visitors: number;
   pageviews: number;
+  /** sessions with pageviews <= 1 / sessions started in the bucket (matching filters); null if none */
+  bounceRate: number | null;
 }
 
 export interface BreakdownRow {
@@ -112,13 +114,28 @@ export class StatsQueries {
        GROUP BY b.i ORDER BY b.i`,
       [...cte.params, siteId, ...pv.params],
     );
-    const points: TimeseriesPoint[] = range.buckets.map((b) => ({ t: b.start, visitors: 0, pageviews: 0 }));
+    // Sessions that started in the bucket and have at least one matching pageview in range.
+    const bounceRows = this.all<{ i: number; sessions: number; bounces: number }>(
+      `${cte.sql}
+       SELECT b.i AS i, COUNT(s.id) AS sessions, COALESCE(SUM(s.pageviews <= 1), 0) AS bounces
+       FROM b LEFT JOIN sessions s
+         ON s.site_id = ? AND s.started_at >= b.s AND s.started_at < b.e
+        AND s.id IN (SELECT e.session_id FROM events e
+                     WHERE e.site_id = ? AND e.type = 'pageview' AND e.ts >= ? AND e.ts < ?${pv.sql})
+       GROUP BY b.i ORDER BY b.i`,
+      [...cte.params, siteId, siteId, range.from, range.to, ...pv.params],
+    );
+    const points: TimeseriesPoint[] = range.buckets.map((b) => ({ t: b.start, visitors: 0, pageviews: 0, bounceRate: null }));
     for (const r of rows) {
       const p = points[r.i];
       if (p) {
         p.visitors = r.visitors;
         p.pageviews = r.pageviews;
       }
+    }
+    for (const r of bounceRows) {
+      const p = points[r.i];
+      if (p && r.sessions > 0) p.bounceRate = r.bounces / r.sessions;
     }
     return points;
   }

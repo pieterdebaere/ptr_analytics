@@ -127,7 +127,9 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
     if (db.open) db.close();
   });
 
-  await app.register(fastifyCookie);
+  // hook: false -> cookies are never parsed globally; only auth routes read the session
+  // cookie explicitly, so /api/event ignores cookies entirely (same-site beacons may carry one).
+  await app.register(fastifyCookie, { hook: false });
   // Only /api/event accepts text/plain (registered inside its own encapsulated context).
   app.removeContentTypeParser('text/plain');
 

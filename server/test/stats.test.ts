@@ -110,6 +110,17 @@ describe('timeseries', () => {
     expect(r.points.map((p) => p.pageviews)).toEqual([0, 0, 0, 0, 0, 1, 3]);
   });
 
+  it('includes a per-bucket bounce rate of sessions started in the bucket', async () => {
+    type P = { points: Array<{ bounceRate: number | null }> };
+    const r = (await get(`/api/sites/${siteId}/stats/timeseries?period=7d`)) as P;
+    // today: A (2 pageviews) + B (1 pageview); yesterday: C (1 pageview)
+    expect(r.points.map((p) => p.bounceRate)).toEqual([null, null, null, null, null, 1, 0.5]);
+    const f = (await get(`/api/sites/${siteId}/stats/timeseries?period=7d&referrer=google.com`)) as P;
+    expect(f.points.map((p) => p.bounceRate)).toEqual([null, null, null, null, null, null, 1]);
+    const d = (await get(`/api/sites/${siteId}/stats/timeseries?period=7d&path=%2Fb`)) as P;
+    expect(d.points.map((p) => p.bounceRate)).toEqual([null, null, null, null, null, null, 0]);
+  });
+
   it('returns 24 hourly buckets for 24h', async () => {
     const r = (await get(`/api/sites/${siteId}/stats/timeseries?period=24h`)) as {
       interval: string;
@@ -120,10 +131,11 @@ describe('timeseries', () => {
     expect(r.points[23]?.t).toBe(NOW);
     expect(r.points[0]?.t).toBe(NOW - 23 * HOUR);
     // A was active in two different hours: counted in both hours, but once for the day
-    expect(r.points[20]).toEqual({ t: NOW - 3 * HOUR, visitors: 1, pageviews: 1 });
-    expect(r.points[21]).toEqual({ t: NOW - 2 * HOUR, visitors: 1, pageviews: 1 });
-    expect(r.points[22]).toEqual({ t: NOW - HOUR, visitors: 1, pageviews: 1 });
-    expect(r.points[0]).toEqual({ t: NOW - 23 * HOUR, visitors: 0, pageviews: 0 });
+    expect(r.points[20]).toEqual({ t: NOW - 3 * HOUR, visitors: 1, pageviews: 1, bounceRate: 0 });
+    // A's session started in the previous hour: no session starts here -> null
+    expect(r.points[21]).toEqual({ t: NOW - 2 * HOUR, visitors: 1, pageviews: 1, bounceRate: null });
+    expect(r.points[22]).toEqual({ t: NOW - HOUR, visitors: 1, pageviews: 1, bounceRate: 1 });
+    expect(r.points[0]).toEqual({ t: NOW - 23 * HOUR, visitors: 0, pageviews: 0, bounceRate: null });
   });
 
   it('returns monthly buckets for 12m and custom long ranges', async () => {
