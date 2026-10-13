@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { PASSWORD_MAX, PASSWORD_MIN } from '../config.js';
+import { PASSWORD_MAX, PASSWORD_MIN, mailboxKey } from '../config.js';
 import type { AppContext } from '../context.js';
 import { sessionToken } from '../auth/cookie.js';
 import { currentUser, requireAuth } from '../auth/guard.js';
+import { resendVerification } from '../auth/verification.js';
 import { SESSION_TTL_MS, sessionCookieName } from '../auth/sessions.js';
 import { field, objectBody } from '../lib/body.js';
 import { clientIp, rateLimitKey } from '../lib/client-ip.js';
@@ -43,7 +44,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     if (typeof emailRaw !== 'string' || emailRaw.length > 254 || typeof password !== 'string' || password.length > PASSWORD_MAX) {
       throw badRequest('email and password are required');
     }
-    const email = emailRaw.trim().toLowerCase();
+    const email = mailboxKey(emailRaw);
     // Count the attempt *before* the (async) password check: checking first and counting
     // afterwards lets a burst of concurrent requests slip past the limit.
     const ipKey = rateLimitKey(clientIp(request));
@@ -62,9 +63,14 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     if (!found || !ok) {
       throw new HttpError(401, 'invalid email or password');
     }
+    if (found.user.role === 'member' && !found.user.emailVerified) {
+      // Exactly the answer of a wrong password: otherwise sign-up + login with a guessed
+      // password would tell whether an address has an account. The owner gets the
+      // verification mail again instead (rate limited per account).
+      resendVerification(ctx, found.user);
+      throw new HttpError(401, 'invalid email or password');
+    }
     ctx.limits.loginEmailIp.reset(`${email}\n${ipKey}`);
-    // Only revealed to someone who knows the password.
-    if (found.user.role === 'member' && !found.user.emailVerified) throw new HttpError(403, 'email not verified');
     const { token } = ctx.authSessions.create(found.user.id, ctx.now());
     setSessionCookie(ctx, reply, token);
     return { user: found.user };
@@ -90,7 +96,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     }
     const ipKey = rateLimitKey(clientIp(request));
     const ipOk = ctx.limits.loginIp.hit(ipKey);
-    const pairOk = ctx.limits.loginEmailIp.hit(`${user.email}\n${ipKey}`);
+    const pairOk = ctx.limits.loginEmailIp.hit(`${mailboxKey(user.email)}\n${ipKey}`);
     if (!ipOk || !pairOk) {
       throw new HttpError(429, 'too many failed attempts, try again later');
     }
@@ -98,7 +104,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     if (hash === null || !(await verifyPassword(currentPassword, hash))) {
       throw badRequest('current password is incorrect');
     }
-    ctx.limits.loginEmailIp.reset(`${user.email}\n${ipKey}`);
+    ctx.limits.loginEmailIp.reset(`${mailboxKey(user.email)}\n${ipKey}`);
     ctx.users.setPasswordHash(user.id, await hashPassword(newPassword));
     ctx.authSessions.deleteForUser(user.id, request.authTokenHash ?? undefined);
     return reply.code(204).send();

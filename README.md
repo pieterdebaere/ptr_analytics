@@ -180,6 +180,8 @@ Open the browser console on your website and run
 | `INGEST_RATE_LIMIT` | `600` | Max tracking requests per IP per minute. |
 | `STATS_WORKERS` | `2` | Worker threads for dashboard queries and exports (0 = run in the main thread). |
 | `STATS_QUERY_TIMEOUT_MS` | `30000` | Time budget per dashboard query; slower queries are aborted with 503. |
+| `STATS_EXPORT_IDLE_TIMEOUT_MS` | `30000` | A CSV export whose client reads nothing for this long is cut off (frees the export slot). |
+| `STATS_EXPORT_MAX_DURATION_MS` | `600000` | Maximum duration of a CSV export. |
 | `STATS_CACHE_TTL_MS` | `15000` | How long identical dashboard queries are served from cache. |
 | `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 
@@ -187,9 +189,14 @@ Hosted mode (all off by default, see [Hosted mode](#hosted-mode)):
 
 | Variable | Default | Description |
 |---|---|---|
-| `SIGNUP_ENABLED` | `false` | Public self-service sign-up (`member` accounts, email verification). Requires `SMTP_URL`, `MAIL_FROM` and `PUBLIC_URL`. |
-| `SMTP_URL` | – | Outgoing mail server, e.g. `smtps://user:pass@smtp.example.com:465`. |
+| `SIGNUP_ENABLED` | `false` | Public self-service sign-up (`member` accounts, email verification). Requires `SMTP_URL`, `MAIL_FROM` and an `https://` `PUBLIC_URL`. |
+| `ALLOW_INSECURE_PUBLIC_URL` | `false` | Local development only: allow `SIGNUP_ENABLED` with an `http://` `PUBLIC_URL`. |
+| `SMTP_URL` | – | Outgoing mail server, e.g. `smtps://user:pass@smtp.example.com:465`. `smtp://` connections must upgrade with STARTTLS. |
+| `SMTP_ALLOW_INSECURE` | `false` | Allow `smtp://` without STARTTLS (e.g. a relay on localhost); logs a warning at startup. |
 | `MAIL_FROM` | – | Sender, e.g. `PTR Analytics <no-reply@example.com>`. |
+| `SIGNUP_MAX_PER_HOUR` | `200` | Sign-up requests per hour over all clients; beyond it sign-up answers `503`. |
+| `MAIL_MAX_PER_HOUR` | `500` | Outgoing mails per hour; beyond it sign-up and "forgot password" answer `503`. |
+| `MAX_UNVERIFIED_ACCOUNTS` | `5000` | Sign-up answers `503` while this many accounts wait for verification. |
 | `MEMBER_SITE_LIMIT` | `10` | Max sites per member when billing is disabled. |
 | `TERMS_URL` / `PRIVACY_URL` | – | Shown on the sign-up page; when set, sign-up requires accepting them. |
 | `BILLING_ENABLED` | `false` | Charge members per site with Stripe. Requires `SIGNUP_ENABLED` and the three Stripe variables. |
@@ -207,19 +214,38 @@ self-hosted install is unaffected unless you set `SIGNUP_ENABLED=true`.
 
 * **Accounts.** Besides `admin` (operator: all sites, user management, never billed) and
   `viewer` (read-only access to all sites), there is a `member` role: a self-service account
-  that only sees and manages the sites it created. Sign-up needs a verified email address
-  (link valid 24 h); "forgot password" mails a one-hour reset link. Members can delete their
-  account, which cancels their subscription and deletes all their sites and data. Admins can
-  also create members (`role: "member"`) from the user management screen or the CLI.
-  Sign-ups that are never verified are removed after 7 days.
+  that only sees and manages the sites it created. Sign-up needs a verified email address:
+  the mailed link (valid 24 h) asks for the password chosen at sign-up, so a link alone can
+  neither activate an account someone else registered for your address nor log you into
+  someone else's account. Logging in before verifying answers like a wrong password and
+  re-sends the verification mail. "Forgot password" mails one-hour reset links. Tokens are
+  in the link's `#fragment`, so they never reach server logs or `Referer` headers.
+  Members can delete their account, which cancels their subscription and deletes all their
+  sites and data. Admins can also create members (`role: "member"`) from the user
+  management screen or the CLI. Sign-ups that are never verified are removed after 7 days.
+* **Operator accounts.** New `viewer` accounts cannot be created in hosted mode (a viewer
+  can read every member's sites). Passwords of operator accounts (`admin`, `viewer`) are
+  never reset by mail; use `cli reset-password`.
+* **Deleting sites and accounts.** A deleted site disappears immediately; its analytics data
+  is removed in the background in small chunks, so deleting a large site never stalls the
+  server. Accounts with a Stripe customer are deleted from the dashboard (this cancels every
+  subscription and deletes the customer); the CLI refuses them. An admin cannot change the
+  role of a member with a live subscription.
 * **Limits.** Without billing every member may create `MEMBER_SITE_LIMIT` sites. With
   billing, `FREE_SITES` are free and each additional site is one unit of `STRIPE_PRICE_ID`.
   When a member pays for fewer sites than it has (e.g. after cancelling), its oldest sites
   stay active and newer ones are *suspended*: their tracking requests are accepted but
   dropped, nothing is deleted, and they become active again as soon as the allowance allows.
-  Sites created by admins have no owner and are never limited.
+  Sites created by admins have no owner and are never limited. A member's site can have at
+  most 5 domains, and wildcards directly over shared hosting domains (`*.github.io`,
+  `*.vercel.app`, `*.netlify.app`, …) are refused.
 * **Mail.** Any SMTP provider works. Mail is sent in the background; delivery failures are
-  logged without addresses or links.
+  logged without addresses or links. Only plain addresses (`name@example.com`) are accepted.
+  Sign-up and mail volume are capped globally (see the table above); when a cap or the mail
+  queue is full, sign-up and "forgot password" answer `503` instead of dropping mail.
+* **Reverse proxy.** Set `TRUST_PROXY` correctly: the sign-up, login and reset rate limits are
+  per client IP (IPv6 per /64 and, for sign-up, per /48). With `TRUST_PROXY=false` behind a
+  proxy every client shares one bucket; the server warns about this at startup.
 
 ### Stripe setup
 

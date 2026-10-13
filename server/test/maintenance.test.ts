@@ -6,6 +6,7 @@ import { runCli } from '../src/cli.js';
 import { migrate, openDatabase } from '../src/db/index.js';
 import { MIGRATIONS } from '../src/db/migrations.js';
 import { CLEANUP_CHUNK, runCleanup } from '../src/jobs/cleanup.js';
+import { purgeDeletedSites } from '../src/jobs/purge.js';
 import { verifyPassword } from '../src/lib/password.js';
 import { DAY, api, createTestApp, login, pageview, sendEvent, tmpDir } from './helpers.js';
 
@@ -88,7 +89,7 @@ describe('cleanup job', () => {
     }
   });
 
-  it('deleting a site cascades to all its data', async () => {
+  it('deleting a site removes all its data (purged in the background)', async () => {
     const t = await createTestApp();
     try {
       const cookie = await login(t.app);
@@ -96,6 +97,9 @@ describe('cleanup job', () => {
       await sendEvent(t.app, pageview(id, 'https://example.com/'));
       await sendEvent(t.app, { site: id, type: 'vitals', url: 'https://example.com/', metrics: [{ name: 'LCP', value: 1 }] });
       expect((await api(t.app, cookie, 'DELETE', `/api/sites/${id}`)).statusCode).toBe(204);
+      expect(t.ctx.sites.byId(id)).toBeNull();
+      await purgeDeletedSites(t.ctx);
+      expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM sites').get()).toEqual({ n: 0 });
       for (const table of ['events', 'sessions', 'vitals']) {
         expect(t.ctx.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
       }

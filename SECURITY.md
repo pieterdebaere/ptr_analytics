@@ -36,21 +36,40 @@ Only the latest release (and `main`) receives security fixes.
 
 * Tenancy is enforced in one place on every site-scoped endpoint (settings, stats, speed
   insights, export, live map): members only reach sites they own; any other site answers
-  `404`, exactly like a site that does not exist. Viewers cannot change anything.
+  `404`, exactly like a site that does not exist. Viewers cannot change anything; because a
+  viewer reads every tenant's sites, no new viewers can be created in hosted mode.
 * Sign-up and "forgot password" always answer `202` after the same work and send mail in the
   background, so neither the response nor its timing reveals whether an address has an
   account. Signing up with an existing address mails a password-reset link instead of a
-  verification link, so an account pre-registered by someone else cannot be activated by the
-  real owner clicking a link; resetting the password replaces the stranger's password.
-* Verification and reset tokens are 256-bit random, stored only as SHA-256, single use,
-  short-lived (24 h / 1 h) and only the newest one per purpose is valid. A reset signs out
-  every session. Sign-up, forgot-password and token submission are rate limited per IP and
-  per address.
+  verification link. Logging into an unverified account answers exactly like a wrong
+  password (`401`); with the right password the verification mail is re-sent (at most once
+  per 10 minutes, 3 times a day).
+* Verifying an address needs the mailed token **and** the account's password (checked with
+  scrypt in constant time, through the login rate limits). A link alone therefore can neither
+  activate an account pre-registered by someone else with a password they know, nor log a
+  victim into an attacker's account (login CSRF). A wrong password does not use up the link.
+* Verification and reset tokens are 256-bit random, stored only as SHA-256, single use and
+  short-lived (24 h / 1 h). Up to 3 links per purpose stay valid (so a third party requesting
+  another mail cannot void the owner's link); a successful reset invalidates all of them and
+  signs out every session. Tokens are sent in the URL fragment (`/verify#token=…`), which
+  browsers never send to servers, and those pages are served with `Referrer-Policy: no-referrer`.
+  Operator accounts (admin, viewer) are never reset by mail (CLI only).
+* Only plain email addresses are accepted (no display names, comments, quoting or lists that a
+  mail library would deliver elsewhere). Sign-up, forgot-password and token submission are
+  rate limited per IP (IPv6 per /64, sign-up also per /48) and per address; sign-ups and
+  outgoing mails per hour and pending unverified accounts are capped globally, and a full
+  mail queue answers `503` instead of silently dropping mail.
 * Stripe webhooks are verified with HMAC-SHA256 over the raw body (constant-time compare,
-  5 minute tolerance, 1 MB limit) and de-duplicated by event id. They are only a trigger:
-  the subscription state is always re-read from the Stripe API for the customer id the
-  server stored itself, so a webhook can never grant more sites than are paid for, nor
-  affect another account. Stripe errors are logged without keys or request bodies.
+  5 minute tolerance, 256 KB limit; rejected before the body is read when billing is off)
+  and de-duplicated by event id. They are only a trigger: the subscription state is always
+  re-read from the Stripe API for the customer id the server stored itself, so a webhook can
+  never grant more sites than are paid for, nor affect another account. Deleting any account
+  with a Stripe customer cancels its subscriptions and deletes the customer first; a paying
+  member's role cannot be changed. Stripe errors are logged without keys or request bodies.
+* Deleted sites are hidden at once and purged in small background chunks, so deleting a
+  large site or account cannot stall the server. Per-user fair queueing and reserved capacity
+  for stats queries, and idle/total timeouts for CSV exports, keep one tenant from starving
+  the others.
 * SMTP credentials and Stripe secrets are never logged or echoed in configuration errors.
 
 ## Hardening checklist for operators
@@ -65,5 +84,8 @@ Only the latest release (and `main`) receives security fixes.
 * Keep the container read-only and unprivileged (see `docker-compose.yml`).
 * Back up the `/data` volume.
 * Hosted mode: use a restricted Stripe key where possible, keep `TRUST_PROXY` correct (the
-  sign-up rate limits are per client IP), and only enable `SIGNUP_ENABLED` with a working
-  SMTP setup and `PUBLIC_URL` on https.
+  sign-up rate limits are per client IP; the server warns at startup when it is `false`), and
+  only enable `SIGNUP_ENABLED` with a working SMTP setup (`smtps://`, or `smtp://` with
+  STARTTLS, which is required unless `SMTP_ALLOW_INSECURE=true`). `SIGNUP_ENABLED` refuses
+  to start without an `https://` `PUBLIC_URL` (`ALLOW_INSECURE_PUBLIC_URL=true` is for local
+  development only).

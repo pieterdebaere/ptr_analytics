@@ -111,6 +111,12 @@ export async function exportRoutes(app: FastifyInstance, opts: { ctx: AppContext
       reply.raw.once('close', () => {
         if (!stream.destroyed) stream.destroy();
       });
+      // A client that stops reading (or an export running too long) is cut off.
+      session.onAbort((reason) => {
+        request.log.info({ reason }, 'export aborted');
+        reply.raw.destroy();
+        if (!stream.destroyed) stream.destroy();
+      });
       return reply.send(stream);
     },
   );

@@ -331,8 +331,12 @@ Bucket starts are computed in `tz` (DST-correct) and returned as ms epoch (`t`).
 #### Load protection
 Stats, vitals, overview and export queries run in a pool of worker threads with read-only
 SQLite connections (`STATS_WORKERS`), each with a time budget (`STATS_QUERY_TIMEOUT_MS` →
-`503 {"error":"query timed out"}`). Concurrency is capped (32 in flight globally, 6 per user;
-exports 1 per user and 2 globally → `429` with `Retry-After`). Identical queries are cached
+`503 {"error":"query timed out"}`). Concurrency is capped (32 in flight globally, 6 per user,
+and the last 8 global slots only go to users with nothing in flight; exports 1 per user and 2
+globally → `429` with `Retry-After`). Waiting queries are dispatched fairly between users
+(least recently served first). An export whose client reads nothing for
+`STATS_EXPORT_IDLE_TIMEOUT_MS` (30 s), or that runs longer than `STATS_EXPORT_MAX_DURATION_MS`
+(10 min), is aborted: the connection is closed and the slot freed. Identical queries are cached
 for `STATS_CACHE_TTL_MS`. Authenticated GETs carrying a `Sec-Fetch-Site` header other than
 `same-origin`/`none` are rejected with `403`. `HEAD` on export returns headers only.
 Vitals endpoints reject the `referrer`, `utm_*` and `event` filters with `400`.
@@ -402,9 +406,14 @@ The same server can run as a hosted service where anyone can sign up. Everything
 
 | var | default | meaning |
 |-----|---------|---------|
-| `SIGNUP_ENABLED` | `false` | allow public self-service sign-up (`member` accounts). Requires `SMTP_URL` + `MAIL_FROM` (email verification is mandatory). |
-| `SMTP_URL` | – | e.g. `smtps://user:pass@smtp.example.com:465` (nodemailer URL) |
+| `SIGNUP_ENABLED` | `false` | allow public self-service sign-up (`member` accounts). Requires `SMTP_URL` + `MAIL_FROM` (email verification is mandatory) and an `https://` `PUBLIC_URL`. Startup warns loudly when `TRUST_PROXY=false`. |
+| `ALLOW_INSECURE_PUBLIC_URL` | `false` | development only: allow `SIGNUP_ENABLED` with an `http://` `PUBLIC_URL` (warns) |
+| `SMTP_URL` | – | e.g. `smtps://user:pass@smtp.example.com:465` (nodemailer URL). `smtp://` uses `requireTLS` (STARTTLS mandatory). |
+| `SMTP_ALLOW_INSECURE` | `false` | allow `smtp://` without STARTTLS (warns at startup) |
 | `MAIL_FROM` | – | e.g. `PTR Analytics <no-reply@example.com>` |
+| `SIGNUP_MAX_PER_HOUR` | `200` | sign-up requests per hour, all clients together (beyond: `503`) |
+| `MAIL_MAX_PER_HOUR` | `500` | outgoing mails per hour (beyond: sign-up / forgot `503`) |
+| `MAX_UNVERIFIED_ACCOUNTS` | `5000` | sign-up answers `503` while this many members are unverified |
 | `MEMBER_SITE_LIMIT` | `10` | max sites per member when billing is disabled |
 | `BILLING_ENABLED` | `false` | charge members per site via Stripe. Requires `SIGNUP_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`. |
 | `STRIPE_SECRET_KEY` | – | `sk_live_…` / `sk_test_…` (or a restricted key) |
@@ -419,7 +428,21 @@ The same server can run as a hosted service where anyone can sign up. Everything
 
 Roles: `admin` (operator: all sites, user management, never billed), `viewer` (read-only
 access to all sites — self-hosted teams) and `member` (self-service account: sees and manages
-**only the sites it owns**). `sites.owner_id` references the creating user (`ON DELETE CASCADE`).
+**only the sites it owns**). With `SIGNUP_ENABLED`, no new viewers can be created
+(`POST /api/users` / `PATCH` to `viewer` → `400`, CLI refuses; existing ones keep working).
+`sites.owner_id` references the creating user.
+Members: at most 5 domains per site, and no wildcard directly over a shared hosting suffix
+(`*.github.io`, `*.vercel.app`, `*.netlify.app`, `*.pages.dev`, `*.herokuapp.com`, `*.web.app`,
+`*.firebaseapp.com`, `*.onrender.com`, `*.fly.dev`, `*.azurewebsites.net`, `*.cloudfront.net`,
+`*.appspot.com`) → `400` (admins unaffected).
+
+**Deletion is soft** (schema v5: `sites.deleted_at`). Deleting a site (member or admin) sets
+`deleted_at`: from then on the site is invisible everywhere (access checks `404`, lists,
+overview, live map, ingest treats it as unknown, allowance). A background job purges its
+events, vitals and sessions in small adaptive chunks (yielding between them, like the
+retention cleanup), then deletes the row; it runs after every deletion and hourly. Deleting
+a user first soft-deletes and detaches (`owner_id = NULL`) its sites in the same transaction,
+so the `users → sites` cascade never deletes analytics rows synchronously.
 Every site-scoped endpoint (stats, vitals, export, live, settings) checks access:
 admin/viewer → any site; member → `owner_id = user.id`, otherwise `404`.
 `User = {id, email, role, createdAt, emailVerified}`; `Site` gains `suspended: boolean` and,
@@ -432,15 +455,34 @@ deleted together with a user).
   `{signupEnabled, billingEnabled, freeSites, memberSiteLimit, pricePerSiteCents, currency, termsUrl, privacyUrl}`
 * `POST /api/auth/signup` `{email, password, acceptTerms: true}` → always `202 {ok:true}`
   (no account enumeration). New address: create unverified member + send a verification link
-  `PUBLIC_URL/verify?token=…` (24 h). Existing address: send a "you already have an account"
-  mail with a reset link instead. Rate limited per IP and per email.
-* `POST /api/auth/verify` `{token}` → `200 {user}` + session cookie (marks the email verified).
-* `POST /api/auth/forgot` `{email}` → always `202 {ok:true}`; sends `PUBLIC_URL/reset?token=…` (1 h).
-* `POST /api/auth/reset` `{token, password}` → `204`; signs out all sessions of that user.
-* Login of an unverified member → `403 {error: "email not verified"}`.
-* `DELETE /api/account` `{password}` (members) → `204`; cancels the Stripe subscription,
-  deletes the user and all its sites and data.
-Tokens: 32 random bytes, only `sha256(token)` stored, single use.
+  `PUBLIC_URL/verify#token=…` (24 h). Existing member: send a "you already have an account"
+  mail with a reset link instead (operator accounts: the same mail without a link). Rate
+  limited per IP (IPv6 /64 and /48) and per email (`429`). Global caps (`SIGNUP_MAX_PER_HOUR`,
+  `MAIL_MAX_PER_HOUR`, mail queue full, `MAX_UNVERIFIED_ACCOUNTS`) → `503 {"error":"please try
+  again later"}`, checked before the address is looked at.
+* `POST /api/auth/verify` `{token, password}` → `200 {user}` + session cookie (marks the email
+  verified). The password must be the account's (scrypt, constant time; counts against the
+  login rate limits per IP / email+IP / email and the token-submission limit per IP). Any
+  failure (unknown/expired/used token, wrong password) → `400 {"error":"this link is invalid
+  or has expired"}`; a wrong password does **not** consume the token. Missing password → `400`.
+* `POST /api/auth/forgot` `{email}` → always `202 {ok:true}`; sends `PUBLIC_URL/reset#token=…`
+  (1 h) to members only (admins/viewers: nothing is sent; reset them with the CLI). `503` when
+  mail cannot be accepted (checked before the lookup).
+* `POST /api/auth/reset` `{token, password}` → `204`; signs out all sessions of that user and
+  invalidates all its tokens. Tokens of non-member accounts are refused (`400`).
+* Login of an unverified member → `401 {"error":"invalid email or password"}`, identical to a
+  wrong password. With the correct password the verification mail is re-sent in the
+  background (per account at most 1 per 10 min, 3 per day).
+* `DELETE /api/account` `{password}` (members) → `204`; cancels the Stripe subscriptions and
+  deletes the customer, deletes the user and soft-deletes all its sites (data purged in the
+  background).
+Tokens: 32 random bytes in the URL **fragment** (never sent to the server, so never in access
+logs or `Referer`), only `sha256(token)` stored, single use; up to 3 valid tokens per user and
+purpose (older ones are dropped). The SPA pages `/verify` and `/reset` are served with
+`Referrer-Policy: no-referrer`; the SPA reads the token from `location.hash` and POSTs it.
+Email addresses must be plain `local@domain` (no display names, comments, quotes, lists,
+`<>()",;:[]\`, whitespace or control characters); mail is addressed as `{address}` objects;
+identical recipient + template mails still in the queue are replaced (not duplicated).
 
 ### 6.4 Billing (Stripe)
 
@@ -457,12 +499,17 @@ Allowance for a member = `FREE_SITES + paidSites` (billing enabled) or `MEMBER_S
   subscription quantity (prorated); `0` cancels at period end.
 * `POST /api/billing/portal` → `{url}` — Stripe customer portal (invoices, payment method, cancel).
 * `POST /api/billing/webhook` — Stripe webhook (no auth, no CSRF header; signature verified
-  with `STRIPE_WEBHOOK_SECRET`, 5 min tolerance, raw body ≤ 1 MB). Handles
+  with `STRIPE_WEBHOOK_SECRET`, 5 min tolerance, raw body ≤ 256 KB; with billing disabled it
+  answers `404` in `onRequest`, before reading the body). Handles
   `checkout.session.completed`, `customer.subscription.created|updated|deleted`; the state is
   always re-read from the Stripe API (webhook payloads are only a trigger).
 Paid-site count / status changes recompute `sites.suspended` for the member: the oldest
 `allowance` sites stay active, newer ones are suspended (ingest silently drops their events,
 the dashboard shows a banner). Nothing is deleted.
+Deleting **any** user that has a `stripe_customer_id` (whatever its current role) first cancels
+all its subscriptions and deletes the Stripe customer (`502`, nothing deleted, if Stripe fails);
+`cli delete-user` refuses such accounts. Changing the role of a member whose subscription is
+`active`/`trialing`/`past_due` → `409`.
 The Stripe API is called with `fetch` (no SDK).
 
 ## 7. Landing page (`/landing`)

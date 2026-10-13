@@ -7,7 +7,8 @@ import { verifyStripeSignature } from '../billing/stripe.js';
 import { isPlainObject, field, objectBody } from '../lib/body.js';
 import { HttpError, badRequest, notFound } from '../lib/errors.js';
 
-export const WEBHOOK_BODY_LIMIT = 1024 * 1024;
+/** Stripe events of the handled types are a few KB; 256 KB leaves ample headroom. */
+export const WEBHOOK_BODY_LIMIT = 256 * 1024;
 const EVENT_ID_RE = /^evt_[A-Za-z0-9_]{1,250}$/;
 
 function parsePaidSites(v: unknown, min: number): number {
@@ -56,12 +57,18 @@ export async function billingRoutes(app: FastifyInstance, opts: { ctx: AppContex
 
 /**
  * POST /api/billing/webhook — encapsulated: the raw-body JSON parser (needed for the
- * signature) and the 1 MB limit only apply here. No session, no CSRF header (exempted by
+ * signature) and the 256 KB limit only apply here. With billing disabled every request is
+ * answered 404 in onRequest, before any body is read. No session, no CSRF header (exempted by
  * route in security.ts); authenticity comes from the Stripe signature alone.
  */
 export async function billingWebhookRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
   const secret = ctx.config.cloud.stripeWebhookSecret;
+
+  app.addHook('onRequest', async (_request, reply) => {
+    if (!ctx.billing.enabled || secret === null) return reply.code(404).send({ error: 'not found' });
+    return undefined;
+  });
 
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: WEBHOOK_BODY_LIMIT }, (_req, body, done) => {

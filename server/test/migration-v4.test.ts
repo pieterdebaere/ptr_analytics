@@ -1,8 +1,8 @@
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { openDatabase } from '../src/db/index.js';
-import { MIGRATIONS } from '../src/db/migrations.js';
+import { migrate, openDatabase } from '../src/db/index.js';
+import { MIGRATIONS, type RebuildMigration } from '../src/db/migrations.js';
 import { tmpDir } from './helpers.js';
 
 /** A database created and filled by the v3 server. */
@@ -65,6 +65,41 @@ describe('migration v4 (hosted mode)', () => {
     } finally {
       db.close();
     }
+  });
+
+  it('upgrades despite pre-existing, unrelated foreign-key orphans and reports them', () => {
+    const file = path.join(tmpDir(), 'orphans.db');
+    v3Database(file);
+    const raw = new Database(file);
+    raw.pragma('foreign_keys = OFF');
+    // left over from an old crash / manual edit: an event of a deleted site, a session of a deleted user
+    raw.exec(`
+      INSERT INTO events (site_id, ts, type, visitor_id, session_id, hostname, path) VALUES ('zzzzzzzzzzzz', 2, 'pageview', 'v', 's9', 'z.com', '/');
+      INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) VALUES ('orphan', 99, 1, 2);
+    `);
+    raw.close();
+    const warnings: string[] = [];
+    const db = openDatabase(file, { warn: (m) => warnings.push(m) });
+    try {
+      expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM events WHERE site_id = 'zzzzzzzzzzzz'`).get()).toEqual({ n: 1 });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/pre-existing row\(s\) in auth_sessions/);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM users').get()).toEqual({ n: 2 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still refuses a rebuild that would create new orphans', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`CREATE TABLE p (id INTEGER PRIMARY KEY); CREATE TABLE c (pid INTEGER REFERENCES p(id)); INSERT INTO p VALUES (1); INSERT INTO c VALUES (1);`);
+    const rebuild: RebuildMigration = { foreignKeysOff: true, rebuilds: ['p'], sql: 'CREATE TABLE p2 (id INTEGER PRIMARY KEY); DROP TABLE p; ALTER TABLE p2 RENAME TO p;' };
+    expect(() => migrate(db, { warn: () => {} }, [rebuild])).toThrow(/violate foreign keys/);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM p').get()).toEqual({ n: 1 });
+    expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+    db.close();
   });
 
   it('rolls back and keeps foreign keys on when the migration fails', () => {

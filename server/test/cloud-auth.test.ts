@@ -9,6 +9,7 @@ import {
   CLOUD_URL,
   DAY,
   HOUR,
+  MIN,
   api,
   cookieFrom,
   createCloudApp,
@@ -114,7 +115,7 @@ describe('sign-up and verification', () => {
     });
   });
 
-  it('signs up an unverified member, mails a single-use link, verifies and logs in', async () => {
+  it('signs up an unverified member, mails a single-use link, verifies with the password and logs in', async () => {
     t = await createCloudApp();
     const res = await post(t.app, '/api/auth/signup', { email: '  New@Example.com ', password: PASSWORD, acceptTerms: true });
     expect(res.statusCode).toBe(202);
@@ -123,11 +124,6 @@ describe('sign-up and verification', () => {
     const user = t.ctx.users.byEmail('new@example.com');
     expect(user).toMatchObject({ role: 'member', emailVerified: false });
 
-    // unverified: correct password -> 403, wrong password -> 401 (nothing revealed)
-    expect((await post(t.app, '/api/auth/login', { email: 'new@example.com', password: PASSWORD })).statusCode).toBe(403);
-    expect((await post(t.app, '/api/auth/login', { email: 'new@example.com', password: PASSWORD })).json()).toEqual({ error: 'email not verified' });
-    expect((await post(t.app, '/api/auth/login', { email: 'new@example.com', password: 'wrong password 123' })).statusCode).toBe(401);
-
     await t.ctx.mailer?.idle();
     expect(t.mail.sent).toHaveLength(1);
     const mail = t.mail.sent[0]!;
@@ -135,20 +131,105 @@ describe('sign-up and verification', () => {
     expect(mail.from).toBe(CLOUD_ENV['MAIL_FROM']);
     expect(mail.subject).toMatch(/Confirm/);
     const token = tokenFromMail(mail, 'verify');
-    expect(mail.html).toContain(`${CLOUD_URL}/verify?token=${token}`);
+    // the token travels in the URL fragment (never sent to servers, logs or Referer)
+    expect(mail.html).toContain(`${CLOUD_URL}/verify#token=${token}`);
+    expect(mail.text).not.toContain('?token=');
     // only the hash is stored
     const row = t.ctx.db.prepare('SELECT token_hash, purpose, expires_at FROM user_tokens').get() as Record<string, unknown>;
     expect(row).toEqual({ token_hash: sha256Hex(token), purpose: 'verify', expires_at: t.clock.t + DAY });
 
-    const v = await post(t.app, '/api/auth/verify', { token });
+    // the link alone is not enough: the password chosen at sign-up is required
+    expect((await post(t.app, '/api/auth/verify', { token })).statusCode).toBe(400);
+    const wrong = await post(t.app, '/api/auth/verify', { token, password: 'wrong password 123' });
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json()).toEqual({ error: 'this link is invalid or has expired' });
+    expect(wrong.headers['set-cookie']).toBeUndefined();
+    expect(t.ctx.users.byEmail('new@example.com')?.emailVerified).toBe(false);
+
+    // a wrong password did not use up the link
+    const v = await post(t.app, '/api/auth/verify', { token, password: PASSWORD });
     expect(v.statusCode).toBe(200);
     expect(v.json()).toMatchObject({ user: { email: 'new@example.com', role: 'member', emailVerified: true } });
     const cookie = cookieFrom(v);
     expect(cookie).toMatch(/^__Host-pa_session=/);
     expect((await api(t.app, cookie, 'GET', '/api/auth/me')).json()).toMatchObject({ user: { emailVerified: true } });
     // single use
-    expect((await post(t.app, '/api/auth/verify', { token })).statusCode).toBe(400);
+    expect((await post(t.app, '/api/auth/verify', { token, password: PASSWORD })).statusCode).toBe(400);
+    expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM user_tokens').get()).toEqual({ n: 0 });
     expect((await post(t.app, '/api/auth/login', { email: 'new@example.com', password: PASSWORD })).statusCode).toBe(200);
+  });
+
+  it('unverified login answers exactly like a wrong password and re-sends the verification mail (rate limited)', async () => {
+    t = await createCloudApp();
+    await post(t.app, '/api/auth/signup', { email: 'pending@example.com', password: PASSWORD });
+    await t.ctx.mailer?.idle();
+    expect(t.mail.sent).toHaveLength(1);
+    const right = await post(t.app, '/api/auth/login', { email: 'pending@example.com', password: PASSWORD });
+    const wrong = await post(t.app, '/api/auth/login', { email: 'pending@example.com', password: 'wrong password 123' });
+    const unknown = await post(t.app, '/api/auth/login', { email: 'nobody@example.com', password: PASSWORD });
+    for (const r of [right, wrong, unknown]) {
+      expect(r.statusCode).toBe(401);
+      expect(r.json()).toEqual({ error: 'invalid email or password' });
+      expect(r.headers['set-cookie']).toBeUndefined();
+    }
+    expect(Object.keys(right.headers).sort()).toEqual(Object.keys(wrong.headers).sort());
+    await t.ctx.mailer?.idle();
+    // the correct password re-sent the verification mail; the wrong one did not
+    expect(t.mail.sent).toHaveLength(2);
+    const resent = tokenFromMail(t.mail.sent[1], 'verify');
+    // the first link still works too (several links may be outstanding)
+    expect(t.ctx.userTokens.peek(tokenFromMail(t.mail.sent[0], 'verify'), 'verify', t.clock.t)).not.toBeNull();
+    // at most once per 10 minutes ...
+    await post(t.app, '/api/auth/login', { email: 'pending@example.com', password: PASSWORD });
+    await t.ctx.mailer?.idle();
+    expect(t.mail.sent).toHaveLength(2);
+    // ... and 3 times per day
+    for (let i = 0; i < 4; i++) {
+      t.clock.t += 11 * MIN;
+      await post(t.app, '/api/auth/login', { email: 'pending@example.com', password: PASSWORD });
+    }
+    await t.ctx.mailer?.idle();
+    expect(t.mail.sent).toHaveLength(4);
+    // only the newest 3 links are kept
+    expect(t.ctx.userTokens.peek(tokenFromMail(t.mail.sent[0], 'verify'), 'verify', t.clock.t)).toBeNull();
+    expect((await post(t.app, '/api/auth/verify', { token: resent, password: PASSWORD })).statusCode).toBe(200);
+  });
+
+  it('a verification link cannot activate or log into an account whose password the clicker does not know', async () => {
+    t = await createCloudApp();
+    // Pre-registration: the attacker signs up the victim's address with a password they know.
+    await post(t.app, '/api/auth/signup', { email: 'victim@example.com', password: 'attacker password 1' }, '203.0.113.60');
+    await t.ctx.mailer?.idle();
+    const victimLink = tokenFromMail(t.mail.sent[0], 'verify');
+    // The victim clicks the genuine mail and enters their own password: nothing happens.
+    const res = await post(t.app, '/api/auth/verify', { token: victimLink, password: 'victim password 12' }, '198.51.100.9');
+    expect(res.statusCode).toBe(400);
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(t.ctx.users.byEmail('victim@example.com')?.emailVerified).toBe(false);
+    // The attacker still cannot log in (unverified looks like a wrong password).
+    expect((await post(t.app, '/api/auth/login', { email: 'victim@example.com', password: 'attacker password 1' }, '203.0.113.60')).statusCode).toBe(401);
+
+    // Login CSRF: the attacker's own verification link sent to someone else is useless without the password.
+    await post(t.app, '/api/auth/signup', { email: 'attacker@example.com', password: 'attacker password 1' }, '203.0.113.61');
+    await t.ctx.mailer?.idle();
+    const attackerLink = tokenFromMail(t.mail.sent.find((m) => m.to === 'attacker@example.com'), 'verify');
+    const csrf = await post(t.app, '/api/auth/verify', { token: attackerLink, password: 'victim password 12' }, '198.51.100.9');
+    expect(csrf.statusCode).toBe(400);
+    expect(csrf.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('password checks on verify go through the login rate limits; every submission counts per IP', async () => {
+    t = await createCloudApp();
+    await post(t.app, '/api/auth/signup', { email: 'brute@example.com', password: PASSWORD });
+    await t.ctx.mailer?.idle();
+    const token = tokenFromMail(t.mail.sent[0], 'verify');
+    const codes: number[] = [];
+    for (let i = 0; i < 11; i++) codes.push((await post(t.app, '/api/auth/verify', { token, password: `guess number ${i}xx` }, '192.0.2.10')).statusCode);
+    expect(codes.slice(0, 10)).toEqual(Array(10).fill(400));
+    expect(codes[10]).toBe(429);
+    // even the right password is refused while limited
+    expect((await post(t.app, '/api/auth/verify', { token, password: PASSWORD }, '192.0.2.10')).statusCode).toBe(429);
+    expect((await post(t.app, '/api/auth/verify', { token, password: PASSWORD }, '192.0.2.11')).statusCode).toBe(200);
   });
 
   it('rejects expired, malformed and wrong-purpose tokens', async () => {
@@ -157,12 +238,12 @@ describe('sign-up and verification', () => {
     await t.ctx.mailer?.idle();
     const token = tokenFromMail(t.mail.sent[0], 'verify');
     for (const bad of ['', 'x', 'A'.repeat(43), 42, null, token + 'A']) {
-      expect((await post(t.app, '/api/auth/verify', { token: bad })).statusCode).toBe(400);
+      expect((await post(t.app, '/api/auth/verify', { token: bad, password: PASSWORD })).statusCode).toBe(400);
     }
     // a verify token cannot reset a password
     expect((await post(t.app, '/api/auth/reset', { token, password: 'another password 1' })).statusCode).toBe(400);
     t.clock.t += DAY + 1;
-    expect((await post(t.app, '/api/auth/verify', { token })).json()).toEqual({ error: 'this link is invalid or has expired' });
+    expect((await post(t.app, '/api/auth/verify', { token, password: PASSWORD })).json()).toEqual({ error: 'this link is invalid or has expired' });
   });
 
   it('requires acceptTerms when terms are configured and validates input', async () => {
@@ -190,14 +271,19 @@ describe('sign-up and verification', () => {
     await t.ctx.mailer?.idle();
     const already = t.mail.sent.find((m) => m.to === 'victim@example.com' && /already/.test(m.subject));
     expect(already).toBeDefined();
-    expect(already!.text).not.toContain('/verify?');
+    expect(already!.text).not.toContain('/verify');
     tokenFromMail(already, 'reset');
     // the existing account is untouched
     expect((await post(t.app, '/api/auth/login', { email: 'victim@example.com', password: attackerPassword })).statusCode).toBe(401);
     expect((await api(t.app, victim.cookie, 'GET', '/api/auth/me')).statusCode).toBe(200);
-    // admin addresses too
+    // admin addresses too, but operator accounts never get a reset link by mail
     expect((await post(t.app, '/api/auth/signup', { email: ADMIN_EMAIL, password: attackerPassword }, '203.0.113.51')).statusCode).toBe(202);
     expect(t.ctx.users.byEmail(ADMIN_EMAIL)?.role).toBe('admin');
+    await t.ctx.mailer?.idle();
+    const operatorMail = t.mail.sent.find((m) => m.to === ADMIN_EMAIL);
+    expect(operatorMail?.subject).toMatch(/already/);
+    expect(operatorMail?.text).not.toContain('token=');
+    expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM user_tokens WHERE user_id = ?').get(t.ctx.users.byEmail(ADMIN_EMAIL)!.id)).toEqual({ n: 0 });
   });
 
   it('pre-registration by someone else is defused by the owner resetting the password', async () => {
@@ -212,7 +298,7 @@ describe('sign-up and verification', () => {
     expect(t.ctx.users.byEmail('owner@example.com')?.emailVerified).toBe(true);
     // the attacker's password and the original verify link are dead
     expect((await post(t.app, '/api/auth/login', { email: 'owner@example.com', password: 'attacker password 1' })).statusCode).toBe(401);
-    expect((await post(t.app, '/api/auth/verify', { token: tokenFromMail(t.mail.sent[0], 'verify') })).statusCode).toBe(400);
+    expect((await post(t.app, '/api/auth/verify', { token: tokenFromMail(t.mail.sent[0], 'verify'), password: 'attacker password 1' })).statusCode).toBe(400);
     expect((await post(t.app, '/api/auth/login', { email: 'owner@example.com', password: 'owner password 123' })).statusCode).toBe(200);
   });
 
@@ -267,17 +353,48 @@ describe('password reset', () => {
     expect((await post(t.app, '/api/auth/login', { email: 'forgot@example.com', password: 'brand new password' })).statusCode).toBe(200);
   });
 
-  it('expires reset links after 1 hour and only the newest link works', async () => {
+  it('keeps up to 3 outstanding reset links (a third party cannot void the owner\'s link); all die on reset', async () => {
+    t = await createCloudApp();
+    await signupMember(t, 'exp@example.com');
+    for (let i = 0; i < 4; i++) {
+      t.clock.t += 1000;
+      await post(t.app, '/api/auth/forgot', { email: 'exp@example.com' }, `192.0.2.${i + 1}`);
+      if (i === 2) t.ctx.limits.forgotEmail.reset('exp@example.com');
+    }
+    await t.ctx.mailer?.idle();
+    const links = t.mail.sent.filter((m) => /Reset/.test(m.subject)).map((m) => tokenFromMail(m, 'reset'));
+    expect(links).toHaveLength(4);
+    // the oldest is dropped beyond 3; the others are all still valid
+    expect(t.ctx.userTokens.peek(links[0], 'reset', t.clock.t)).toBeNull();
+    for (const l of links.slice(1)) expect(t.ctx.userTokens.peek(l, 'reset', t.clock.t)).not.toBeNull();
+    expect((await post(t.app, '/api/auth/reset', { token: links[1], password: 'brand new password' })).statusCode).toBe(204);
+    // every other link died with the successful reset
+    for (const l of links) expect((await post(t.app, '/api/auth/reset', { token: l, password: 'another password 12' })).statusCode).toBe(400);
+  });
+
+  it('expires reset links after 1 hour', async () => {
     t = await createCloudApp();
     await signupMember(t, 'exp@example.com');
     await post(t.app, '/api/auth/forgot', { email: 'exp@example.com' });
-    await post(t.app, '/api/auth/forgot', { email: 'exp@example.com' });
     await t.ctx.mailer?.idle();
-    const first = tokenFromMail(t.mail.sent[t.mail.sent.length - 2], 'reset');
     const latest = tokenFromMail(t.mail.sent[t.mail.sent.length - 1], 'reset');
-    expect((await post(t.app, '/api/auth/reset', { token: first, password: 'brand new password' })).statusCode).toBe(400);
     t.clock.t += HOUR + 1;
     expect((await post(t.app, '/api/auth/reset', { token: latest, password: 'brand new password' })).statusCode).toBe(400);
+  });
+
+  it('never resets operator accounts by mail: same 202, nothing sent, operator tokens refused', async () => {
+    t = await createCloudApp();
+    const res = await post(t.app, '/api/auth/forgot', { email: ADMIN_EMAIL });
+    const unknown = await post(t.app, '/api/auth/forgot', { email: 'nobody@example.com' });
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toBe(unknown.body);
+    await t.ctx.mailer?.idle();
+    expect(t.mail.sent).toHaveLength(0);
+    // even a token that exists (e.g. issued before the account became an admin) is refused
+    const admin = t.ctx.users.byEmail(ADMIN_EMAIL)!;
+    const token = t.ctx.userTokens.issue(admin.id, 'reset', t.clock.t);
+    expect((await post(t.app, '/api/auth/reset', { token, password: 'hijacked password 1' })).statusCode).toBe(400);
+    expect((await post(t.app, '/api/auth/login', { email: ADMIN_EMAIL, password: 'correct horse battery' })).statusCode).toBe(200);
   });
 
   it('rate limits forgot-password per email and token guesses per IP', async () => {
@@ -285,7 +402,7 @@ describe('password reset', () => {
     for (let i = 0; i < 3; i++) expect((await post(t.app, '/api/auth/forgot', { email: 'x@example.com' }, `192.0.2.${i}`)).statusCode).toBe(202);
     expect((await post(t.app, '/api/auth/forgot', { email: 'x@example.com' }, '192.0.2.50')).statusCode).toBe(429);
     let last = 0;
-    for (let i = 0; i < 31; i++) last = (await post(t.app, '/api/auth/verify', { token: 'A'.repeat(43) }, '192.0.2.77')).statusCode;
+    for (let i = 0; i < 31; i++) last = (await post(t.app, '/api/auth/verify', { token: 'A'.repeat(43), password: PASSWORD }, '192.0.2.77')).statusCode;
     expect(last).toBe(429);
   });
 });

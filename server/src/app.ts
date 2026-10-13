@@ -22,6 +22,7 @@ import { siteRoutes } from './routes/sites.js';
 import { staticRoutes } from './routes/static.js';
 import { statsRoutes } from './routes/stats.js';
 import { userRoutes } from './routes/users.js';
+import { statsService, type StatsServiceOptions } from './stats/service.js';
 import { applySecurityHeaders, registerCsrfCheck, registerSecurityHeaders } from './security.js';
 
 export interface BuildOptions {
@@ -41,6 +42,8 @@ export interface BuildOptions {
   mailTransport?: MailTransport;
   /** Stripe client instead of the REST client (tests; no network). */
   stripe?: StripeClient;
+  /** Overrides for the stats service limits (tests). */
+  statsOptions?: Partial<StatsServiceOptions>;
 }
 
 declare module 'fastify' {
@@ -131,8 +134,22 @@ export function startupMessages(config: Config): { warn: string[]; info: string[
       `Hosted mode: public sign-up is enabled${config.cloud.billingEnabled ? ' with Stripe billing' : ''} ` +
         `(members get ${config.cloud.billingEnabled ? `${config.cloud.freeSites} free site(s)` : `up to ${config.cloud.memberSiteLimit} site(s)`}).`,
     );
-    if (config.trustProxy === false && config.production) {
-      warn.push('SIGNUP_ENABLED without TRUST_PROXY: behind a reverse proxy all clients share one rate-limit bucket.');
+    if (config.trustProxy === false) {
+      warn.push(
+        'SIGNUP_ENABLED with TRUST_PROXY=false: if this server runs behind a reverse proxy, ALL clients share ONE ' +
+          'rate-limit bucket (the proxy address), so one abusive client can block sign-up, login and password reset ' +
+          'for everybody. Set TRUST_PROXY to your proxy (hop count or IPs/CIDRs).',
+      );
+    }
+    const smtp = config.cloud.smtpUrl?.toLowerCase() ?? '';
+    if (smtp.startsWith('smtp:') && config.cloud.smtpAllowInsecure) {
+      warn.push(
+        'SMTP_URL uses smtp:// and SMTP_ALLOW_INSECURE=true: mail (with verification and password-reset links) and the ' +
+          'SMTP password may travel in cleartext. Use smtps:// or remove SMTP_ALLOW_INSECURE (STARTTLS is then required).',
+      );
+    }
+    if (config.cloud.allowInsecurePublicUrl && !config.publicUrl?.startsWith('https://')) {
+      warn.push('ALLOW_INSECURE_PUBLIC_URL=true: hosted mode over plain http is for local development only.');
     }
   }
   if (typeof config.trustProxy === 'number') {
@@ -230,7 +247,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   const dbPath = options.dbPath ?? path.join(config.dataDir, 'analytics.db');
   let db: DB;
   try {
-    db = openDatabase(dbPath);
+    db = openDatabase(dbPath, { warn: (msg) => app.log.warn(msg) });
   } catch (err) {
     await app.close();
     throw err;
@@ -278,6 +295,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   for (const m of messages.warn) ctx.log.warn(m);
   for (const m of messages.info) ctx.log.info(m);
 
+  if (options.statsOptions) statsService(ctx, options.statsOptions);
   await app.register(ingestRoutes, { ctx });
   await app.register(authRoutes, { ctx });
   await app.register(accountRoutes, { ctx });

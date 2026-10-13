@@ -75,3 +75,15 @@ export function rateLimitKey(ip: string): string {
   if (!g) return ip;
   return `${g.slice(0, 4).map((x) => x.toString(16)).join(':')}::/64`;
 }
+
+/**
+ * Wider bucket for abuse-prone endpoints (sign-up): the IPv6 /48 a site or small ISP
+ * customer typically gets, so rotating through /64s does not multiply the limit. Null for
+ * IPv4 (the per-address bucket of `rateLimitKey()` already applies).
+ */
+export function rateLimitKey48(ip: string): string | null {
+  if (isIP(ip) !== 6) return null;
+  const g = expandIPv6(ip);
+  if (!g) return null;
+  return `${g.slice(0, 3).map((x) => x.toString(16)).join(':')}::/48`;
+}

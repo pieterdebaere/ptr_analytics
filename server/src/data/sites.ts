@@ -40,31 +40,44 @@ const toSite = (r: SiteRow): Site => ({
 });
 
 const COLUMNS = 'id, name, domains, created_at, owner_id, suspended';
+/** Soft-deleted sites (v5) are invisible everywhere until the purge job removes them. */
+const LIVE = 'deleted_at IS NULL';
 
 export class SiteRepo {
   constructor(private readonly db: DB) {}
 
   list(): Site[] {
-    return (this.db.prepare(`SELECT ${COLUMNS} FROM sites ORDER BY name COLLATE NOCASE, id`).all() as SiteRow[]).map(toSite);
+    return (this.db.prepare(`SELECT ${COLUMNS} FROM sites WHERE ${LIVE} ORDER BY name COLLATE NOCASE, id`).all() as SiteRow[]).map(
+      toSite,
+    );
   }
 
   listByOwner(ownerId: number): Site[] {
     return (
-      this.db.prepare(`SELECT ${COLUMNS} FROM sites WHERE owner_id = ? ORDER BY name COLLATE NOCASE, id`).all(ownerId) as SiteRow[]
+      this.db
+        .prepare(`SELECT ${COLUMNS} FROM sites WHERE owner_id = ? AND ${LIVE} ORDER BY name COLLATE NOCASE, id`)
+        .all(ownerId) as SiteRow[]
     ).map(toSite);
   }
 
   countByOwner(ownerId: number): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM sites WHERE owner_id = ?').get(ownerId) as { n: number }).n;
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM sites WHERE owner_id = ? AND ${LIVE}`).get(ownerId) as { n: number }).n;
   }
 
   byId(id: string): Site | null {
-    const r = this.db.prepare(`SELECT ${COLUMNS} FROM sites WHERE id = ?`).get(id) as SiteRow | undefined;
+    const r = this.db.prepare(`SELECT ${COLUMNS} FROM sites WHERE id = ? AND ${LIVE}`).get(id) as SiteRow | undefined;
     return r ? toSite(r) : null;
   }
 
   ids(): string[] {
-    return (this.db.prepare('SELECT id FROM sites').all() as Array<{ id: string }>).map((r) => r.id);
+    return (this.db.prepare(`SELECT id FROM sites WHERE ${LIVE}`).all() as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  /** Soft-deleted sites still waiting for their data to be purged (oldest first). */
+  deletedIds(): string[] {
+    return (
+      this.db.prepare('SELECT id FROM sites WHERE deleted_at IS NOT NULL ORDER BY deleted_at, rowid').all() as Array<{ id: string }>
+    ).map((r) => r.id);
   }
 
   create(name: string, domains: string[], now: number, ownerId: number | null = null): Site {
@@ -83,12 +96,22 @@ export class SiteRepo {
     if (!site) return null;
     const name = patch.name ?? site.name;
     const domains = patch.domains ?? site.domains;
-    this.db.prepare('UPDATE sites SET name = ?, domains = ? WHERE id = ?').run(name, JSON.stringify(domains), id);
+    this.db.prepare(`UPDATE sites SET name = ?, domains = ? WHERE id = ? AND ${LIVE}`).run(name, JSON.stringify(domains), id);
     return { ...site, name, domains };
   }
 
-  delete(id: string): boolean {
-    return this.db.prepare('DELETE FROM sites WHERE id = ?').run(id).changes > 0;
+  /**
+   * Soft delete: the site disappears immediately (access checks, lists, stats, ingest); its
+   * analytics data is removed in the background by `purgeDeletedSites()`, which deletes the
+   * row last. Never a synchronous cascade over millions of rows on the main thread.
+   */
+  delete(id: string, now: number): boolean {
+    return this.db.prepare(`UPDATE sites SET deleted_at = ?, suspended = 0 WHERE id = ? AND ${LIVE}`).run(now, id).changes > 0;
+  }
+
+  /** Remove the row of a soft-deleted site whose data has been purged. */
+  removeDeleted(id: string): boolean {
+    return this.db.prepare('DELETE FROM sites WHERE id = ? AND deleted_at IS NOT NULL').run(id).changes > 0;
   }
 
   /**
@@ -97,15 +120,15 @@ export class SiteRepo {
    */
   applyAllowance(ownerId: number, allowance: number | null): void {
     if (allowance === null) {
-      this.db.prepare('UPDATE sites SET suspended = 0 WHERE owner_id = ? AND suspended <> 0').run(ownerId);
+      this.db.prepare(`UPDATE sites SET suspended = 0 WHERE owner_id = ? AND suspended <> 0 AND ${LIVE}`).run(ownerId);
       return;
     }
     this.db
       .prepare(
         `UPDATE sites SET suspended = CASE WHEN rowid IN (
-            SELECT rowid FROM sites WHERE owner_id = ? ORDER BY created_at, rowid LIMIT ?
+            SELECT rowid FROM sites WHERE owner_id = ? AND ${LIVE} ORDER BY created_at, rowid LIMIT ?
           ) THEN 0 ELSE 1 END
-         WHERE owner_id = ?`,
+         WHERE owner_id = ? AND ${LIVE}`,
       )
       .run(ownerId, Math.max(0, allowance), ownerId);
   }

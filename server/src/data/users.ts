@@ -124,8 +124,26 @@ export class UserRepo {
     this.db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ? AND email_verified_at IS NULL').run(now, id);
   }
 
-  delete(id: number): boolean {
-    return this.db.prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
+  /**
+   * Delete a user. Its sites are soft-deleted and detached first (in the same transaction),
+   * so the `sites.owner_id ON DELETE CASCADE` never fires: a cascade into the sites would
+   * delete all their analytics rows synchronously. The purge job removes the data later.
+   * Login sessions and email tokens still cascade (a handful of rows).
+   */
+  delete(id: number, now: number): boolean {
+    return this.db.transaction(() => {
+      this.db
+        .prepare('UPDATE sites SET deleted_at = COALESCE(deleted_at, ?), owner_id = NULL, suspended = 0 WHERE owner_id = ?')
+        .run(now, id);
+      return this.db.prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
+    })();
+  }
+
+  /** Self-service sign-ups that have not verified their address yet. */
+  countUnverified(): number {
+    return (
+      this.db.prepare(`SELECT COUNT(*) AS n FROM users WHERE email_verified_at IS NULL AND role = 'member'`).get() as { n: number }
+    ).n;
   }
 
   // ---- billing ----
@@ -172,7 +190,7 @@ export class UserRepo {
     return this.db
       .prepare(
         `DELETE FROM users WHERE email_verified_at IS NULL AND role = 'member' AND created_at < ?
-           AND stripe_customer_id IS NULL`,
+           AND stripe_customer_id IS NULL AND NOT EXISTS (SELECT 1 FROM sites WHERE sites.owner_id = users.id)`,
       )
       .run(olderThan).changes;
   }

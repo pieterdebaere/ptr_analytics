@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { hashPassword } from '../src/lib/password.js';
 import {
   MIN,
   api,
@@ -31,9 +32,8 @@ async function createSite(cookie: string, name: string, domain: string): Promise
 beforeEach(async () => {
   t = await createCloudApp({ env: { MEMBER_SITE_LIMIT: '3' } });
   admin = await login(t.app);
-  expect(
-    (await api(t.app, admin, 'POST', '/api/users', { email: 'viewer@example.com', password: VIEWER_PASSWORD, role: 'viewer' })).statusCode,
-  ).toBe(201);
+  // Hosted mode no longer creates viewers; one from before SIGNUP_ENABLED still works.
+  t.ctx.users.create('viewer@example.com', await hashPassword(VIEWER_PASSWORD), 'viewer', t.clock.t);
   viewer = await login(t.app, 'viewer@example.com', VIEWER_PASSWORD);
   a = await signupMember(t, 'alice@example.com');
   b = await signupMember(t, 'bob@example.com');
@@ -138,6 +138,35 @@ describe('site authorization', () => {
     expect(t.ctx.users.byId(a.id)?.role).toBe('member');
   });
 
+  it('hosted mode creates no new viewers (they would read every tenant)', async () => {
+    const created = await api(t.app, admin, 'POST', '/api/users', { email: 'v2@example.com', password: 'viewer password 123', role: 'viewer' });
+    expect(created.statusCode).toBe(400);
+    expect(created.json()).toEqual({ error: expect.stringMatching(/viewer accounts are not available in hosted mode/) });
+    expect((await api(t.app, admin, 'POST', '/api/users', { email: 'v2@example.com', password: 'viewer password 123' })).statusCode).toBe(400);
+    expect(t.ctx.users.byEmail('v2@example.com')).toBeNull();
+    expect((await api(t.app, admin, 'PATCH', `/api/users/${a.id}`, { role: 'viewer' })).statusCode).toBe(400);
+    expect(t.ctx.users.byId(a.id)?.role).toBe('member');
+    // the existing viewer can still be changed / kept
+    const viewerId = t.ctx.users.byEmail('viewer@example.com')!.id;
+    expect((await api(t.app, admin, 'PATCH', `/api/users/${viewerId}`, { role: 'viewer' })).statusCode).toBe(200);
+  });
+
+  it('members get at most 5 domains per site and no wildcard over shared hosting suffixes', async () => {
+    const six = ['a.example', 'b.example', 'c.example', 'd.example', 'e.example', 'f.example'];
+    expect((await api(t.app, a.cookie, 'POST', '/api/sites', { name: 'Six', domains: six })).statusCode).toBe(400);
+    expect((await api(t.app, a.cookie, 'PATCH', `/api/sites/${siteA}`, { domains: six })).statusCode).toBe(400);
+    expect((await api(t.app, a.cookie, 'PATCH', `/api/sites/${siteA}`, { domains: six.slice(0, 5) })).statusCode).toBe(200);
+    for (const d of ['*.github.io', '*.Vercel.app', '*.netlify.app', '*.pages.dev', '*.herokuapp.com', '*.web.app', '*.appspot.com']) {
+      const res = await api(t.app, a.cookie, 'POST', '/api/sites', { name: 'W', domains: [d] });
+      expect(res.statusCode, d).toBe(400);
+      expect(res.json()).toEqual({ error: expect.stringMatching(/shared hosting/) });
+    }
+    // their own subdomain of a shared host (or a wildcard below it) is fine
+    expect((await api(t.app, a.cookie, 'PATCH', `/api/sites/${siteA}`, { domains: ['alice.github.io', '*.alice.vercel.app'] })).statusCode).toBe(200);
+    // admins are unaffected
+    expect((await api(t.app, admin, 'POST', '/api/sites', { name: 'Op', domains: ['*.github.io', ...six] })).statusCode).toBe(201);
+  });
+
   it('admins can create verified members; deleting a member cascades its sites', async () => {
     const res = await api(t.app, admin, 'POST', '/api/users', { email: 'carol@example.com', password: 'carol password 12', role: 'member' });
     expect(res.statusCode).toBe(201);
@@ -189,7 +218,7 @@ describe('member site allowance (billing disabled)', () => {
     // invalid payloads for suspended sites are still rejected as before
     expect((await sendEvent(t.app, pageview(extra[2]!, 'https://evil.example/'))).statusCode).toBe(400);
 
-    expect((await api(t.app, admin, 'PATCH', `/api/users/${a.id}`, { role: 'viewer' })).statusCode).toBe(200);
+    expect((await api(t.app, admin, 'PATCH', `/api/users/${a.id}`, { role: 'admin' })).statusCode).toBe(200);
     expect(t.ctx.sites.byId(extra[2]!)?.suspended).toBe(false);
   });
 });

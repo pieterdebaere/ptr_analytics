@@ -210,7 +210,7 @@ export class StatsQueries {
     // distinct visitors. The site IN (...) lets every site use the (site_id, ts) index.
     const scope =
       siteIds === null
-        ? { sql: 'site_id IN (SELECT id FROM sites)', params: [] as unknown[] }
+        ? { sql: 'site_id IN (SELECT id FROM sites WHERE deleted_at IS NULL)', params: [] as unknown[] }
         : { sql: `site_id IN (${siteIds.map(() => '?').join(', ')})`, params: [...siteIds] as unknown[] };
     const perSite = this.all<{ id: string; visitors: number }>(
       `SELECT site_id AS id, COUNT(DISTINCT visitor_id) AS visitors FROM events

@@ -18,6 +18,16 @@ export interface StatsServiceOptions {
   maxInFlightPerUser: number;
   maxExports: number;
   maxExportsPerUser: number;
+  /**
+   * Global query slots kept free for users with nothing in flight: a user's second and further
+   * concurrent requests are refused once fewer than this many slots are left (at most a
+   * quarter of maxInFlight), so a few busy tenants cannot lock everybody else out.
+   */
+  reservedInFlight: number;
+  /** An export whose client reads nothing for this long is aborted (slot freed). */
+  exportIdleTimeoutMs: number;
+  /** No export runs longer than this. */
+  exportMaxDurationMs: number;
 }
 
 export const DEFAULT_STATS_OPTIONS: StatsServiceOptions = {
@@ -29,6 +39,9 @@ export const DEFAULT_STATS_OPTIONS: StatsServiceOptions = {
   maxInFlightPerUser: 6,
   maxExports: 2,
   maxExportsPerUser: 1,
+  reservedInFlight: 8,
+  exportIdleTimeoutMs: 30_000,
+  exportMaxDurationMs: 10 * 60_000,
 };
 
 function intEnv(env: NodeJS.ProcessEnv, key: string, def: number, min: number, max: number): number {
@@ -44,6 +57,8 @@ export function statsOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Stats
     workers: intEnv(env, 'STATS_WORKERS', DEFAULT_STATS_OPTIONS.workers, 0, 16),
     queryTimeoutMs: intEnv(env, 'STATS_QUERY_TIMEOUT_MS', DEFAULT_STATS_OPTIONS.queryTimeoutMs, 100, 600_000),
     cacheTtlMs: intEnv(env, 'STATS_CACHE_TTL_MS', DEFAULT_STATS_OPTIONS.cacheTtlMs, 0, 600_000),
+    exportIdleTimeoutMs: intEnv(env, 'STATS_EXPORT_IDLE_TIMEOUT_MS', DEFAULT_STATS_OPTIONS.exportIdleTimeoutMs, 1000, 3_600_000),
+    exportMaxDurationMs: intEnv(env, 'STATS_EXPORT_MAX_DURATION_MS', DEFAULT_STATS_OPTIONS.exportMaxDurationMs, 1000, 24 * 3_600_000),
   };
 }
 
@@ -144,20 +159,28 @@ class ResultCache {
   }
 }
 
-/** Concurrency counter: global + per key. */
-class Limiter {
+/**
+ * Concurrency counter: global + per key, with `reserved` global slots that only a key with
+ * nothing in flight may take (fairness between tenants).
+ */
+export class Limiter {
   private total = 0;
   private readonly perKey = new Map<string, number>();
+  private readonly reserved: number;
 
   constructor(
     private readonly max: number,
     private readonly maxPerKey: number,
-  ) {}
+    reserved = 0,
+  ) {
+    this.reserved = Math.max(0, Math.min(reserved, Math.floor(max / 4)));
+  }
 
   /** Returns a release function, or null when a limit is reached. */
   tryAcquire(key: string): (() => void) | null {
     const mine = this.perKey.get(key) ?? 0;
     if (this.total >= this.max || mine >= this.maxPerKey) return null;
+    if (mine > 0 && this.total >= this.max - this.reserved) return null;
     this.total++;
     this.perKey.set(key, mine + 1);
     let released = false;
@@ -176,34 +199,87 @@ class Limiter {
   }
 }
 
-/** One running export: keyset cursor on one connection. */
+export type ExportAbortReason = 'idle' | 'duration';
+
+/**
+ * One running export: keyset cursor on one connection. A watchdog aborts it (freeing the
+ * export slot and the cursor) when the client stops reading — no page requested for
+ * `idleMs` while none is being fetched — or when it has run for `maxMs` in total, so a
+ * slow or stalled client can never hold one of the few export slots indefinitely.
+ */
 export class ExportSession {
   private closed = false;
+  private idleTimer: NodeJS.Timeout | null = null;
+  private readonly maxTimer: NodeJS.Timeout;
+  private abortHandler: ((reason: ExportAbortReason) => void) | null = null;
+  /** Why the watchdog stopped this export, or null. */
+  aborted: ExportAbortReason | null = null;
 
   constructor(
     private readonly executor: StatsExecutor,
     private readonly handle: number,
     private readonly pin: Pin,
     private readonly release: () => void,
-  ) {}
+    private readonly owner: string = '',
+    private readonly limits: { idleMs: number; maxMs: number } = {
+      idleMs: DEFAULT_STATS_OPTIONS.exportIdleTimeoutMs,
+      maxMs: DEFAULT_STATS_OPTIONS.exportMaxDurationMs,
+    },
+  ) {
+    this.maxTimer = setTimeout(() => this.abort('duration'), limits.maxMs);
+    this.maxTimer.unref();
+    this.armIdle();
+  }
+
+  /** Called (once) when the watchdog aborts the export; the caller ends the response. */
+  onAbort(fn: (reason: ExportAbortReason) => void): void {
+    this.abortHandler = fn;
+    if (this.aborted !== null) fn(this.aborted);
+  }
 
   async next(): Promise<ExportBatch> {
     if (this.closed) return { csv: '', rows: 0, done: true };
-    const { value } = await this.executor.run<'exportNext'>({ kind: 'exportNext', handle: this.handle }, this.pin);
-    if (value.done) this.close(false);
-    return value;
+    this.disarmIdle();
+    try {
+      const { value } = await this.executor.run<'exportNext'>({ kind: 'exportNext', handle: this.handle }, this.pin, this.owner);
+      if (value.done) this.close(false);
+      return value;
+    } finally {
+      this.armIdle();
+    }
   }
 
   /** Idempotent; frees the export slot and the cursor (and its TEMP table). */
   close(dropCursor = true): void {
     if (this.closed) return;
     this.closed = true;
+    this.disarmIdle();
+    clearTimeout(this.maxTimer);
     this.release();
     if (dropCursor) {
-      this.executor.run<'exportClose'>({ kind: 'exportClose', handle: this.handle }, this.pin).catch(() => {
+      this.executor.run<'exportClose'>({ kind: 'exportClose', handle: this.handle }, this.pin, this.owner).catch(() => {
         // worker gone or closing: its cursors are gone with it
       });
     }
+  }
+
+  private abort(reason: ExportAbortReason): void {
+    if (this.closed) return;
+    this.aborted = reason;
+    this.close();
+    this.abortHandler?.(reason);
+  }
+
+  private armIdle(): void {
+    this.disarmIdle();
+    if (this.closed) return;
+    this.idleTimer = setTimeout(() => this.abort('idle'), this.limits.idleMs);
+    this.idleTimer.unref();
+  }
+
+  private disarmIdle(): void {
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 }
 
@@ -223,7 +299,8 @@ export class StatsService {
   ) {
     this.executor = createExecutor(ctx.db, options, ctx.log);
     this.cache = new ResultCache(options.cacheTtlMs, options.cacheMaxEntries);
-    this.requests = new Limiter(options.maxInFlight, options.maxInFlightPerUser);
+    this.requests = new Limiter(options.maxInFlight, options.maxInFlightPerUser, options.reservedInFlight);
+    // maxExportsPerUser (1) of maxExports (2): one user can never hold every export slot.
     this.exports = new Limiter(options.maxExports, options.maxExportsPerUser);
   }
 
@@ -237,7 +314,7 @@ export class StatsService {
     }
     const release = this.requests.tryAcquire(userKey);
     if (!release) throw tooManyRequests();
-    const p = this.executor.run<K>(op).then((r) => r.value);
+    const p = this.executor.run<K>(op, undefined, userKey).then((r) => r.value);
     if (useCache) this.cache.set(key, p);
     try {
       return await p;
@@ -251,11 +328,11 @@ export class StatsService {
     const release = this.exports.tryAcquire(userKey);
     if (!release) throw tooManyRequests();
     try {
-      const { value, pin } = await this.executor.run<'exportOpen'>({
-        kind: 'exportOpen',
-        spec,
+      const { value, pin } = await this.executor.run<'exportOpen'>({ kind: 'exportOpen', spec }, undefined, userKey);
+      return new ExportSession(this.executor, value, pin, release, userKey, {
+        idleMs: this.options.exportIdleTimeoutMs,
+        maxMs: this.options.exportMaxDurationMs,
       });
-      return new ExportSession(this.executor, value, pin, release);
     } catch (err) {
       release();
       throw err;
@@ -283,10 +360,10 @@ export class StatsService {
 const services = new WeakMap<object, StatsService>();
 
 /** The StatsService of an app context (created on first use, one per context). */
-export function statsService(ctx: AppContext): StatsService {
+export function statsService(ctx: AppContext, options?: Partial<StatsServiceOptions>): StatsService {
   let s = services.get(ctx);
   if (!s) {
-    s = new StatsService(ctx);
+    s = new StatsService(ctx, { ...statsOptionsFromEnv(), ...options });
     services.set(ctx, s);
   }
   return s;

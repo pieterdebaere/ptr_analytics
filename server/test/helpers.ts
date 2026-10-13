@@ -171,7 +171,7 @@ export function captureMail(): MailCapture {
 /** Extract the token from the (only) link in a captured mail. */
 export function tokenFromMail(mail: OutgoingMail | undefined, page: 'verify' | 'reset'): string {
   if (!mail) throw new Error('no mail');
-  const m = new RegExp(`${CLOUD_URL.replace(/[.]/g, '\\.')}/${page}\\?token=([A-Za-z0-9_-]{43})`).exec(mail.text);
+  const m = new RegExp(`${CLOUD_URL.replace(/[.]/g, '\\.')}/${page}#token=([A-Za-z0-9_-]{43})`).exec(mail.text);
   if (!m) throw new Error(`no ${page} link in mail: ${mail.text}`);
   return m[1] as string;
 }
@@ -203,7 +203,7 @@ export async function signupMember(t: CloudTestApp, email: string, password = 'm
   if (res.statusCode !== 202) throw new Error(`signup failed: ${res.statusCode} ${res.body}`);
   await t.ctx.mailer?.idle();
   const token = tokenFromMail(t.mail.sent[t.mail.sent.length - 1], 'verify');
-  const v = await post(t.app, '/api/auth/verify', { token });
+  const v = await post(t.app, '/api/auth/verify', { token, password });
   if (v.statusCode !== 200) throw new Error(`verify failed: ${v.statusCode} ${v.body}`);
   return { cookie: cookieFrom(v), id: (v.json() as { user: { id: number } }).user.id };
 }

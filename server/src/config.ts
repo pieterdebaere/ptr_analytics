@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import addressparser from 'nodemailer/lib/addressparser';
 
 export type LogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
 export type TrustProxy = boolean | number | string[];
@@ -35,7 +36,15 @@ export interface CloudConfig {
   signupEnabled: boolean;
   /** nodemailer connection URL (contains credentials: never log it). */
   smtpUrl: string | null;
+  /** SMTP_ALLOW_INSECURE: allow smtp:// without STARTTLS (default: STARTTLS is required). */
+  smtpAllowInsecure: boolean;
   mailFrom: string | null;
+  /** ALLOW_INSECURE_PUBLIC_URL: development only, allows SIGNUP_ENABLED with an http PUBLIC_URL. */
+  allowInsecurePublicUrl: boolean;
+  /** Global caps (abuse / mail-bombing protection). */
+  signupMaxPerHour: number;
+  mailMaxPerHour: number;
+  maxUnverifiedAccounts: number;
   memberSiteLimit: number;
   billingEnabled: boolean;
   /** Secrets: never log them. */
@@ -272,6 +281,7 @@ export function loadCloudConfig(env: Env, publicUrl: string | null): CloudConfig
   const smtpUrl = smtpRaw === undefined ? null : parseSmtpUrl(smtpRaw);
   const fromRaw = str(env, 'MAIL_FROM');
   const mailFrom = fromRaw === undefined ? null : parseMailFrom(fromRaw);
+  const allowInsecurePublicUrl = optBool(env, 'ALLOW_INSECURE_PUBLIC_URL', false);
 
   if (signupEnabled) {
     const missing = [smtpUrl ? null : 'SMTP_URL', mailFrom ? null : 'MAIL_FROM', publicUrl ? null : 'PUBLIC_URL'].filter(
@@ -279,6 +289,12 @@ export function loadCloudConfig(env: Env, publicUrl: string | null): CloudConfig
     );
     if (missing.length > 0) {
       throw new ConfigError(`SIGNUP_ENABLED=true requires ${missing.join(', ')} (email verification is mandatory)`);
+    }
+    // Session cookies, verification and reset links must not travel in cleartext.
+    if (!publicUrl?.startsWith('https://') && !allowInsecurePublicUrl) {
+      throw new ConfigError(
+        'SIGNUP_ENABLED=true requires an https:// PUBLIC_URL (set ALLOW_INSECURE_PUBLIC_URL=true for local development only)',
+      );
     }
   }
 
@@ -310,7 +326,12 @@ export function loadCloudConfig(env: Env, publicUrl: string | null): CloudConfig
   return {
     signupEnabled,
     smtpUrl,
+    smtpAllowInsecure: optBool(env, 'SMTP_ALLOW_INSECURE', false),
     mailFrom,
+    allowInsecurePublicUrl,
+    signupMaxPerHour: parseInt10('SIGNUP_MAX_PER_HOUR', str(env, 'SIGNUP_MAX_PER_HOUR') ?? '200', 1, 1_000_000),
+    mailMaxPerHour: parseInt10('MAIL_MAX_PER_HOUR', str(env, 'MAIL_MAX_PER_HOUR') ?? '500', 1, 1_000_000),
+    maxUnverifiedAccounts: parseInt10('MAX_UNVERIFIED_ACCOUNTS', str(env, 'MAX_UNVERIFIED_ACCOUNTS') ?? '5000', 1, 10_000_000),
     memberSiteLimit: parseInt10('MEMBER_SITE_LIMIT', str(env, 'MEMBER_SITE_LIMIT') ?? '10', 0, 100_000),
     billingEnabled,
     stripeSecretKey,
@@ -325,7 +346,26 @@ export function loadCloudConfig(env: Env, publicUrl: string | null): CloudConfig
   };
 }
 
+/**
+ * A plain mailbox `local@domain` and nothing else: no display names, comments, quoting,
+ * groups or lists (`a<victim@x>`, `"x"<victim@x>`, `a@x,b@y`), which mail libraries would
+ * happily deliver to an address other than the one that was validated and rate limited.
+ * No whitespace, control (Cc) or format (Cf, e.g. bidi overrides) characters either.
+ */
+const PLAIN_EMAIL_RE = /^[^\s@<>()",;:[\]\\\p{Cc}\p{Cf}]{1,64}@[^\s@<>()",;:[\]\\\p{Cc}\p{Cf}]+\.[^\s@<>()",;:[\]\\\p{Cc}\p{Cf}]+$/u;
+
 export function isValidEmail(email: string): boolean {
-  // No whitespace, control (Cc) or format (Cf, e.g. bidi overrides) characters.
-  return email.length <= 254 && /^[^\s@\p{Cc}\p{Cf}]+@[^\s@\p{Cc}\p{Cf}]+\.[^\s@\p{Cc}\p{Cf}]+$/u.test(email);
+  if (typeof email !== 'string' || email.length > 254 || !PLAIN_EMAIL_RE.test(email)) return false;
+  // Defence in depth: the mail library must read exactly this one address.
+  try {
+    const parsed = addressparser(email, { flatten: true });
+    return parsed.length === 1 && parsed[0]?.address === email && parsed[0]?.name === '';
+  } catch {
+    return false;
+  }
+}
+
+/** Rate-limit / dedupe key for a mailbox (addresses are compared case-insensitively). */
+export function mailboxKey(email: string): string {
+  return email.trim().toLowerCase();
 }

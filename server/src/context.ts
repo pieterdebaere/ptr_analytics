@@ -42,7 +42,14 @@ export interface AppContext {
     loginEmail: RateLimiter;
     /** Sign-up / forgot-password requests per client IP and per email address. */
     signupIp: RateLimiter;
+    /** Sign-ups per IPv6 /48 (in addition to the /64 bucket of signupIp). */
+    signupIp48: RateLimiter;
+    /** Sign-ups per hour over all clients (SIGNUP_MAX_PER_HOUR); key "all". */
+    signupGlobal: RateLimiter;
     signupEmail: RateLimiter;
+    /** Re-sent verification mails (login of an unverified member) per account. */
+    verifyResend: RateLimiter;
+    verifyResendDaily: RateLimiter;
     forgotIp: RateLimiter;
     forgotEmail: RateLimiter;
     /** verify / reset token submissions per client IP. */
@@ -93,7 +100,12 @@ export function createContext(
   const cloud = config.cloud;
   let mailer: Mailer | null = null;
   if (cloud.signupEnabled && cloud.smtpUrl && cloud.mailFrom) {
-    mailer = new Mailer(options.mailTransport ?? smtpTransport(cloud.smtpUrl), cloud.mailFrom, log);
+    mailer = new Mailer(
+      options.mailTransport ?? smtpTransport(cloud.smtpUrl, { allowInsecure: cloud.smtpAllowInsecure }),
+      cloud.mailFrom,
+      log,
+      { maxPerHour: cloud.mailMaxPerHour, now },
+    );
   }
   const stripe = options.stripe ?? (cloud.stripeSecretKey ? new HttpStripeClient(cloud.stripeSecretKey) : null);
   return {
@@ -119,7 +131,11 @@ export function createContext(
       loginEmailIp: new RateLimiter(LOGIN_MAX_PER_EMAIL_IP, LOGIN_WINDOW_MS, now, 20_000),
       loginEmail: new RateLimiter(LOGIN_MAX_PER_EMAIL, LOGIN_WINDOW_MS, now, 20_000),
       signupIp: new RateLimiter(10, HOUR_MS, now, 20_000),
+      signupIp48: new RateLimiter(30, HOUR_MS, now, 20_000),
+      signupGlobal: new RateLimiter(cloud.signupMaxPerHour, HOUR_MS, now, 1),
       signupEmail: new RateLimiter(3, HOUR_MS, now, 20_000),
+      verifyResend: new RateLimiter(1, 10 * 60_000, now, 20_000),
+      verifyResendDaily: new RateLimiter(3, 24 * HOUR_MS, now, 20_000),
       forgotIp: new RateLimiter(10, HOUR_MS, now, 20_000),
       forgotEmail: new RateLimiter(3, HOUR_MS, now, 20_000),
       tokenIp: new RateLimiter(30, 15 * 60_000, now, 20_000),

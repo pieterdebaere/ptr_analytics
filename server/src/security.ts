@@ -10,6 +10,9 @@ const PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=(), payment=()
 /** Routes that are embedded on third-party sites. */
 const CROSS_ORIGIN_PATHS = new Set(['/script.js', '/api/event']);
 
+/** Dashboard pages opened from mailed links carrying a token: never leak anything via Referer. */
+const NO_REFERRER_PATHS = new Set(['/verify', '/reset']);
+
 export function pathOf(url: string): string {
   const q = url.indexOf('?');
   return q === -1 ? url : url.slice(0, q);
@@ -23,7 +26,7 @@ export function isApiPath(path: string): boolean {
 export function applySecurityHeaders(request: FastifyRequest, reply: FastifyReply, config: Config): void {
   reply.header('Content-Security-Policy', CSP);
   reply.header('X-Content-Type-Options', 'nosniff');
-  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  reply.header('Referrer-Policy', NO_REFERRER_PATHS.has(pathOf(request.url)) ? 'no-referrer' : 'strict-origin-when-cross-origin');
   reply.header('X-Frame-Options', 'DENY');
   reply.header('Cross-Origin-Opener-Policy', 'same-origin');
   reply.header('Permissions-Policy', PERMISSIONS_POLICY);

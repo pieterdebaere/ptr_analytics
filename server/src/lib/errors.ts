@@ -20,3 +20,5 @@ export const tooMany = (message = 'too many requests'): HttpError => new HttpErr
 export const upgradeRequired = (): HttpError => new HttpError(402, 'site limit reached', 'upgrade_required');
 /** A payment-provider (Stripe) failure; details are logged, never sent to the client. */
 export const badGateway = (): HttpError => new HttpError(502, 'payment provider unavailable, try again later');
+/** Temporarily over a global capacity limit (mail queue, sign-up caps). */
+export const tryLater = (): HttpError => new HttpError(503, 'please try again later');

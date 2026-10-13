@@ -21,7 +21,8 @@ export interface Ran<T> {
 
 export interface StatsExecutor {
   readonly mode: 'inline' | 'workers';
-  run<K extends StatsOpKind>(op: OpOf<K>, pin?: Pin): Promise<Ran<StatsResults[K]>>;
+  /** `owner` (the requesting user) is used for fair queueing between users. */
+  run<K extends StatsOpKind>(op: OpOf<K>, pin?: Pin, owner?: string): Promise<Ran<StatsResults[K]>>;
   close(): Promise<void>;
 }
 
@@ -56,6 +57,7 @@ interface Task {
   id: number;
   op: OpOf<StatsOpKind>;
   pin: Pin | undefined;
+  owner: string;
   resolve: (r: Ran<unknown>) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
@@ -73,6 +75,8 @@ interface Slot {
 }
 
 /** How to start a worker: a module URL (compiled JS), or bootstrap code to `eval`. */
+const MAX_TRACKED_OWNERS = 10_000;
+
 export interface WorkerEntry {
   url: URL;
   /** Bootstrap that loads the tsx loader and then imports `url` (TS sources). */
@@ -108,7 +112,9 @@ export function resolveWorkerEntry(): WorkerEntry | null {
 
 /**
  * A small pool of worker threads, each with its own read-only connection. One op per worker
- * at a time; ops wait in a FIFO queue. Every op has a time budget (from enqueue): when it
+ * at a time. Waiting ops are served fairly between owners (users): a free worker takes the
+ * oldest op of the owner served least recently, so one tenant queueing many slow queries
+ * delays another tenant's query by at most one op per worker. Every op has a time budget (from enqueue): when it
  * runs out the op fails with 503 and its worker is terminated and replaced. The slot stays
  * occupied until the terminated thread has actually exited, so runaway queries can never
  * pile up more threads than the pool size.
@@ -117,6 +123,9 @@ export class WorkerPool implements StatsExecutor {
   readonly mode = 'workers' as const;
   private readonly slots: Slot[];
   private readonly queue: Task[] = [];
+  /** Dispatch sequence number of each owner's last op. */
+  private readonly lastServed = new Map<string, number>();
+  private served = 0;
   private nextId = 1;
   private started = false;
   private closed = false;
@@ -147,7 +156,7 @@ export class WorkerPool implements StatsExecutor {
     return this.slots.filter((s) => s.worker !== null).length;
   }
 
-  run<K extends StatsOpKind>(op: OpOf<K>, pin?: Pin): Promise<Ran<StatsResults[K]>> {
+  run<K extends StatsOpKind>(op: OpOf<K>, pin?: Pin, owner = ''): Promise<Ran<StatsResults[K]>> {
     if (this.closed) return Promise.reject(unavailable());
     if (!this.started) {
       this.started = true;
@@ -161,6 +170,7 @@ export class WorkerPool implements StatsExecutor {
         id: this.nextId++,
         op,
         pin,
+        owner,
         resolve: resolve as (r: Ran<unknown>) => void,
         reject,
         timer: setTimeout(() => this.timeout(task), this.timeoutMs),
@@ -240,12 +250,36 @@ export class WorkerPool implements StatsExecutor {
     });
   }
 
+  /** Bounded memory: drop owners with nothing queued (they rank like new owners again). */
+  private forgetIdleOwners(): void {
+    const queued = new Set(this.queue.map((t) => t.owner));
+    for (const owner of this.lastServed.keys()) if (!queued.has(owner)) this.lastServed.delete(owner);
+  }
+
+  /** Index of the next task for a slot: oldest task of the least recently served owner. */
+  private pick(slot: Slot): number {
+    let best = -1;
+    let bestServed = Infinity;
+    for (let i = 0; i < this.queue.length; i++) {
+      const t = this.queue[i] as Task;
+      if (t.pin && t.pin.slot !== slot.index) continue;
+      const last = this.lastServed.get(t.owner) ?? -1;
+      if (last < bestServed) {
+        best = i;
+        bestServed = last;
+      }
+    }
+    return best;
+  }
+
   private dispatch(): void {
     for (const slot of this.slots) {
       if (slot.task || slot.dying || !slot.worker) continue;
-      const i = this.queue.findIndex((t) => !t.pin || t.pin.slot === slot.index);
+      const i = this.pick(slot);
       if (i === -1) continue;
       const task = this.queue.splice(i, 1)[0] as Task;
+      this.lastServed.set(task.owner, ++this.served);
+      if (this.lastServed.size > MAX_TRACKED_OWNERS) this.forgetIdleOwners();
       if (task.pin && task.pin.gen !== slot.gen) {
         this.fail(task, new Error('stats worker was restarted'));
         this.dispatch();

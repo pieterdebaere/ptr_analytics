@@ -1,11 +1,15 @@
 /**
  * A migration that rebuilds a table (SQLite cannot alter CHECK constraints). It runs with
  * `foreign_keys = OFF` (otherwise DROP TABLE would cascade-delete child rows); afterwards
- * `PRAGMA foreign_key_check` must report no violation or the whole migration is rolled back.
+ * the foreign keys pointing at the rebuilt tables are checked: any violation that did not
+ * exist before the migration rolls the whole migration back. Pre-existing orphans elsewhere
+ * (e.g. rows left behind by an old crash) do not block the upgrade; they are only logged.
  */
 export interface RebuildMigration {
   sql: string;
   foreignKeysOff: true;
+  /** Tables dropped and re-created by this migration. */
+  rebuilds: readonly string[];
 }
 
 export type Migration = string | RebuildMigration;
@@ -114,6 +118,7 @@ export const MIGRATIONS: readonly Migration[] = [
   // v4 — hosted ("cloud") mode: member role, email verification, billing, site ownership
   {
     foreignKeysOff: true,
+    rebuilds: ['users'],
     sql: `
   CREATE TABLE users_v4 (
     id INTEGER PRIMARY KEY,
@@ -161,4 +166,10 @@ export const MIGRATIONS: readonly Migration[] = [
   CREATE INDEX stripe_events_received ON stripe_events(received_at);
   `,
   },
+  // v5 — soft-deleted sites: hidden at once, their data is purged in the background in small
+  // chunks (a cascading DELETE of a big site would block the server for seconds).
+  `
+  ALTER TABLE sites ADD COLUMN deleted_at INTEGER;
+  CREATE INDEX sites_deleted ON sites(deleted_at) WHERE deleted_at IS NOT NULL;
+  `,
 ];

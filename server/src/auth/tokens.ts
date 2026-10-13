@@ -8,6 +8,9 @@ export const TOKEN_TTL_MS: Record<TokenPurpose, number> = {
   reset: 3_600_000,
 };
 
+/** Valid tokens kept per user and purpose; issuing more drops the oldest. */
+export const MAX_TOKENS_PER_PURPOSE = 3;
+
 /**
  * Single-use email tokens (verification, password reset): 32 random bytes (base64url) in the
  * link, only sha256(token) is stored. Tokens are looked up by their hash, so the raw value is
@@ -16,14 +19,25 @@ export const TOKEN_TTL_MS: Record<TokenPurpose, number> = {
 export class UserTokenRepo {
   constructor(private readonly db: DB) {}
 
-  /** Issue a token; earlier tokens of the same purpose for that user stop working. */
+  /**
+   * Issue a token. Earlier tokens stay valid (so a third party triggering another mail cannot
+   * invalidate a link the owner is about to use), up to MAX_TOKENS_PER_PURPOSE per purpose:
+   * beyond that the oldest are dropped. Each is single use; a successful reset (or
+   * verification) invalidates all of them.
+   */
   issue(userId: number, purpose: TokenPurpose, now: number): string {
     const token = generateSessionToken();
     this.db.transaction(() => {
-      this.db.prepare('DELETE FROM user_tokens WHERE user_id = ? AND purpose = ?').run(userId, purpose);
       this.db
         .prepare('INSERT INTO user_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
         .run(sha256Hex(token), userId, purpose, now + TOKEN_TTL_MS[purpose], now);
+      this.db
+        .prepare(
+          `DELETE FROM user_tokens WHERE user_id = ? AND purpose = ? AND rowid NOT IN (
+             SELECT rowid FROM user_tokens WHERE user_id = ? AND purpose = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+           )`,
+        )
+        .run(userId, purpose, userId, purpose, MAX_TOKENS_PER_PURPOSE);
     })();
     return token;
   }

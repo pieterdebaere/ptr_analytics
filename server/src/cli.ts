@@ -45,6 +45,9 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         needEmail();
         const role = (args[1] ?? 'admin') as Role;
         if (!ROLES.includes(role)) throw new CliError('Role must be "admin", "viewer" or "member".');
+        if (role === 'viewer' && config.cloud.signupEnabled) {
+          throw new CliError('Viewer accounts are not available in hosted mode (SIGNUP_ENABLED): viewers can read every member\'s sites.');
+        }
         const password = generatePassword();
         const user = users.create(email, await hashPassword(password), role, Date.now());
         if (!user) throw new CliError(`A user with email ${printable(email)} already exists.`);
@@ -74,14 +77,15 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         if (!found) throw new CliError(`No user with email ${printable(email)}.`);
         if (found.user.role === 'admin' && users.countAdmins() <= 1) throw new CliError('The last admin cannot be deleted.');
         const billing = users.billing(found.user.id);
-        if (billing && billing.status !== 'none' && billing.status !== 'canceled') {
+        if (billing?.stripeCustomerId != null) {
           throw new CliError(
-            'This member has a Stripe subscription. Delete the account from the dashboard (Users), which cancels it, ' +
-              'or cancel the subscription in Stripe first.',
+            'This account has a Stripe customer. Delete it from the dashboard (Users) instead: that cancels every ' +
+              'subscription and deletes the Stripe customer before the account is removed.',
           );
         }
-        users.delete(found.user.id);
+        users.delete(found.user.id, Date.now());
         out(`Deleted ${printable(found.user.email)}`);
+        out('Its sites are hidden now; the server purges their data in the background (at the latest on its next start).');
         return;
       }
       default:

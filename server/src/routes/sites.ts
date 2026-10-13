@@ -3,7 +3,9 @@ import type { AppContext } from '../context.js';
 import { accessibleSites, assertCanCreateSites, assertSiteAccess, siteJson } from '../auth/access.js';
 import { currentUser, requireAuth } from '../auth/guard.js';
 import { field, objectBody } from '../lib/body.js';
-import { normalizeDomainList } from '../lib/domains.js';
+import type { User } from '../data/users.js';
+import { memberDomainProblem, normalizeDomainList } from '../lib/domains.js';
+import { schedulePurge } from '../jobs/purge.js';
 import { badRequest, forbidden, notFound, upgradeRequired } from '../lib/errors.js';
 
 // eslint-disable-next-line no-control-regex
@@ -16,10 +18,14 @@ function parseName(v: unknown): string {
   return name;
 }
 
-function parseDomains(v: unknown): string[] {
+function parseDomains(v: unknown, user: User): string[] {
   const d = normalizeDomainList(v);
   if (!d) {
     throw badRequest('domains must be a list of 1..20 hostnames (e.g. example.com, *.example.com, localhost)');
+  }
+  if (user.role === 'member') {
+    const problem = memberDomainProblem(d);
+    if (problem !== null) throw badRequest(problem);
   }
   return d;
 }
@@ -37,7 +43,7 @@ export async function siteRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const user = assertCanCreateSites(request.user);
     const body = objectBody(request.body);
     const name = parseName(field(body, 'name'));
-    const domains = parseDomains(field(body, 'domains'));
+    const domains = parseDomains(field(body, 'domains'), user);
     const site = ctx.db.transaction(() => {
       // Re-read the role inside the transaction (it may have changed since the session lookup).
       const fresh = ctx.users.byId(user.id);
@@ -69,7 +75,7 @@ export async function siteRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const name = field(body, 'name');
     const domains = field(body, 'domains');
     if (name !== undefined) patch.name = parseName(name);
-    if (domains !== undefined) patch.domains = parseDomains(domains);
+    if (domains !== undefined) patch.domains = parseDomains(domains, user);
     const updated = ctx.sites.update(site.id, patch);
     if (!updated) throw notFound('site not found');
     return { site: siteJson(updated, user) };
@@ -79,10 +85,12 @@ export async function siteRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const user = currentUser(request);
     const site = assertSiteAccess(ctx, user, request.params.id, 'manage');
     ctx.db.transaction(() => {
-      ctx.sites.delete(site.id);
+      // Soft delete: gone for every reader at once; the data is purged in the background.
+      ctx.sites.delete(site.id, ctx.now());
       // a previously suspended site of the owner may become active again
       if (site.ownerId !== null) ctx.billing.recompute(site.ownerId);
     })();
+    schedulePurge(ctx);
     return reply.code(204).send();
   });
 }

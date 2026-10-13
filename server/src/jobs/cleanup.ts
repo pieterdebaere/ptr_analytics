@@ -1,15 +1,13 @@
 import type { AppContext } from '../context.js';
+import { drainChunks } from './chunks.js';
+import { purgeDeletedSites } from './purge.js';
+
+export { CLEANUP_CHUNK } from './chunks.js';
 
 const DAY = 86_400_000;
 const UNVERIFIED_TTL_MS = 7 * DAY;
 /** Stripe retries a webhook for up to 3 days; keep processed ids well beyond that. */
 const STRIPE_EVENT_TTL_MS = 30 * DAY;
-/** Initial rows per DELETE; each chunk is its own short write transaction. */
-export const CLEANUP_CHUNK = 1000;
-const MIN_CHUNK = 100;
-const MAX_CHUNK = 5000;
-/** Chunk sizes adapt so one DELETE blocks the event loop for about this long. */
-const TARGET_CHUNK_MS = 25;
 
 export interface CleanupResult {
   authSessions: number;
@@ -18,18 +16,17 @@ export interface CleanupResult {
   events: number;
   vitals: number;
   sessions: number;
+  /** Soft-deleted sites whose data was purged and whose row was removed. */
+  deletedSites: number;
 }
-
-/** Pause between chunks: as long as the chunk took (max 100 ms), i.e. at most ~50% of the main thread. */
-const pause = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, Math.round(ms)))));
 
 /** One cleanup run per context at a time; overlapping calls share the running one. */
 const running = new WeakMap<AppContext, Promise<CleanupResult>>();
 
 /**
  * Hourly maintenance: expired login sessions, salts of past days, analytics data older
- * than RETENTION_DAYS (and the analytics sessions that belong to it), rate limiter sweep.
+ * than RETENTION_DAYS (and the analytics sessions that belong to it), the data of deleted
+ * sites (see purge.ts), rate limiter sweep.
  *
  * Old analytics data is deleted in small chunks, pausing between them,
  * so even the first run after enabling RETENTION_DAYS on years of data never blocks
@@ -45,6 +42,7 @@ export function runCleanup(ctx: AppContext): Promise<CleanupResult> {
     events: 0,
     vitals: 0,
     sessions: 0,
+    deletedSites: 0,
   };
   const p = cleanup(ctx, result)
     .catch((err: unknown) => {
@@ -79,22 +77,7 @@ async function cleanup(c: AppContext, result: CleanupResult): Promise<CleanupRes
     const delSessions = db.prepare(
       'DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM sessions WHERE last_seen_at < ? LIMIT ?)',
     );
-    // Random-keyed indexes (sessions) make some deletes far costlier per row than others:
-    // adapt the chunk size to the measured time instead of using a fixed row count.
-    const drain = async (run: (limit: number) => number, add: (n: number) => void): Promise<void> => {
-      let size = CLEANUP_CHUNK;
-      for (;;) {
-        if (!db.open) return;
-        const started = performance.now();
-        const n = run(size);
-        const ms = performance.now() - started;
-        add(n);
-        if (n < size) return;
-        if (ms > TARGET_CHUNK_MS * 2) size = Math.max(MIN_CHUNK, Math.floor(size / 2));
-        else if (ms < TARGET_CHUNK_MS / 2) size = Math.min(MAX_CHUNK, size * 2);
-        await pause(ms);
-      }
-    };
+    const drain = (run: (limit: number) => number, add: (n: number) => void): Promise<void> => drainChunks(db, run, add);
     for (const siteId of c.sites.ids()) {
       await drain(
         (limit) => delEvents.run(siteId, cutoff, limit).changes,
@@ -111,12 +94,18 @@ async function cleanup(c: AppContext, result: CleanupResult): Promise<CleanupRes
     );
   }
 
+  // Sites deleted while the server was down (or by the CLI), or an interrupted purge.
+  result.deletedSites = await purgeDeletedSites(c);
+
   c.limits.ingest?.sweep();
   c.limits.loginIp.sweep();
   c.limits.loginEmail.sweep();
   c.limits.loginEmailIp.sweep();
   c.limits.signupIp.sweep();
+  c.limits.signupIp48.sweep();
   c.limits.signupEmail.sweep();
+  c.limits.verifyResend.sweep();
+  c.limits.verifyResendDaily.sweep();
   c.limits.forgotIp.sweep();
   c.limits.forgotEmail.sweep();
   c.limits.tokenIp.sweep();
