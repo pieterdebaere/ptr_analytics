@@ -1,17 +1,20 @@
 import type { DB } from '../db/index.js';
 import { randomHex } from '../lib/ids.js';
+import { stripUnsafeChars, truncateCodePoints } from '../lib/text.js';
 import type { ParsedUA } from '../lib/ua.js';
 import type { IngestPayload } from './payload.js';
 
 const SESSION_TIMEOUT_MS = 30 * 60_000;
 const UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'] as const;
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max) : s;
-}
+const truncate = truncateCodePoints;
 
+/**
+ * Lower-case, strip a trailing dot and any control/format characters. (The WHATWG URL
+ * parser already forbids them in hostnames; this is defence in depth.)
+ */
 function cleanHost(h: string): string {
-  let v = h.toLowerCase();
+  let v = stripUnsafeChars(h).toLowerCase();
   if (v.endsWith('.')) v = v.slice(0, -1);
   return v;
 }
@@ -28,7 +31,9 @@ export interface PageContext {
 /** Extract the privacy-preserving page context from the URL / referrer (spec section 2). */
 export function pageContext(payload: IngestPayload): PageContext {
   const hostname = truncate(cleanHost(payload.url.hostname), 253);
-  const path = truncate(payload.url.pathname || '/', 1024);
+  // URL.pathname is percent-encoded (no raw control/non-ASCII characters); stored as is,
+  // minus any raw unsafe character as defence in depth.
+  const path = truncate(stripUnsafeChars(payload.url.pathname) || '/', 1024);
   let referrer: string | null = null;
   if (payload.referrer) {
     const refHost = stripWww(cleanHost(payload.referrer.hostname));
@@ -36,8 +41,10 @@ export function pageContext(payload: IngestPayload): PageContext {
   }
   const utm = {} as PageContext['utm'];
   for (const k of UTM_KEYS) {
-    const v = payload.url.searchParams.get(k)?.trim();
-    utm[k] = v ? truncate(v, 256) : null;
+    // searchParams values are percent-decoded, so they may contain any character.
+    const v = payload.url.searchParams.get(k);
+    const clean = v === null ? '' : stripUnsafeChars(v).trim();
+    utm[k] = clean ? truncate(clean, 256) : null;
   }
   return { hostname, path, referrer, utm };
 }

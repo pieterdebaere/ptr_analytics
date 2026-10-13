@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, errorMessage } from '../api/client';
 import type { Site } from '../api/types';
 import { useAuth } from '../hooks/auth';
+import { displayText } from '../lib/safety';
 import { installSnippet, snippetOrigin } from '../lib/snippet';
 import { DomainsInput } from './DomainsInput';
 import { CodeBlock, Modal } from './ui';
@@ -50,7 +51,7 @@ export function AddSiteModal({ onClose, onCreated }: { onClose: () => void; onCr
         }
       >
         <p>
-          Add this snippet to the <code>&lt;head&gt;</code> of every page of <strong>{created.name}</strong>:
+          Add this snippet to the <code>&lt;head&gt;</code> of every page of <strong className="bidi-isolate">{displayText(created.name)}</strong>:
         </p>
         <CodeBlock code={installSnippet(origin, created.id)} />
         <p className="muted">Data appears within seconds after the first visit.</p>

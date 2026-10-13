@@ -77,15 +77,16 @@ export function SiteAnalyticsPage() {
       </section>
 
       <div className="panels">
-        <BreakdownPanel siteId={site.id} query={query} tabs={PAGES_TABS} pageHost={pageHost} onFilter={onFilter} />
-        <BreakdownPanel siteId={site.id} query={query} tabs={REFERRER_TABS} pageHost={pageHost} onFilter={onFilter} />
-        <BreakdownPanel siteId={site.id} query={query} tabs={COUNTRY_TABS} pageHost={pageHost} onFilter={onFilter} />
-        <BreakdownPanel siteId={site.id} query={query} tabs={DEVICE_TABS} pageHost={pageHost} onFilter={onFilter} />
+        <BreakdownPanel siteId={site.id} query={query} tabs={PAGES_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
+        <BreakdownPanel siteId={site.id} query={query} tabs={REFERRER_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
+        <BreakdownPanel siteId={site.id} query={query} tabs={COUNTRY_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
+        <BreakdownPanel siteId={site.id} query={query} tabs={DEVICE_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
         <BreakdownPanel
           siteId={site.id}
           query={query}
           tabs={EVENT_TABS}
           pageHost={pageHost}
+          siteDomains={site.domains}
           countLabel="Events"
           onFilter={onFilter}
           onSelectRow={(_k, row) => {

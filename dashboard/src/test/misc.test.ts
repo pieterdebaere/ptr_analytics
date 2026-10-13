@@ -35,18 +35,44 @@ describe('dimensions', () => {
     expect(valuePrefix('path', 'BE')).toBe('');
   });
   it('builds safe row links', () => {
-    expect(rowHref('referrer', 'google.com', null)).toBe('https://google.com/');
-    expect(rowHref('referrer', 'javascript:alert(1)', null)).toBeNull();
-    expect(rowHref('hostname', 'www.example.com', null)).toBe('https://www.example.com/');
-    expect(rowHref('path', '/blog', 'example.com')).toBe('https://example.com/blog');
-    expect(rowHref('path', '/blog', null)).toBeNull();
-    expect(rowHref('country', 'BE', 'example.com')).toBeNull();
-    expect(rowHref('referrer', null, null)).toBeNull();
+    const domains = ['example.com', '*.example.org'];
+    expect(rowHref('referrer', 'google.com', null, domains)).toBe('https://google.com/');
+    expect(rowHref('referrer', 'javascript:alert(1)', null, domains)).toBeNull();
+    expect(rowHref('hostname', 'www.example.com', null, domains)).toBe('https://www.example.com/');
+    expect(rowHref('hostname', 'blog.example.org', null, domains)).toBe('https://blog.example.org/');
+    expect(rowHref('path', '/blog', 'example.com', domains)).toBe('https://example.com/blog');
+    expect(rowHref('path', '/blog', null, domains)).toBeNull();
+    expect(rowHref('country', 'BE', 'example.com', domains)).toBeNull();
+    expect(rowHref('referrer', null, null, domains)).toBeNull();
+  });
+  it('only links hostname rows that belong to the site', () => {
+    const domains = ['example.com', '*.example.org'];
+    expect(rowHref('hostname', 'evil.com', null, domains)).toBeNull();
+    expect(rowHref('hostname', 'example.com.evil.com', null, domains)).toBeNull();
+    expect(rowHref('hostname', 'blog.example.com', null, domains)).toBeNull();
+    expect(rowHref('hostname', 'www.example.com', null, [])).toBeNull();
   });
   it('picks a link hostname', () => {
     expect(linkHostname(undefined, ['*.example.com', 'localhost', 'example.org'])).toBe('example.org');
-    expect(linkHostname('blog.example.com', ['example.org'])).toBe('blog.example.com');
+    expect(linkHostname('', ['example.org'])).toBe('example.org');
+    expect(linkHostname('blog.example.com', ['*.example.com'])).toBe('blog.example.com');
+    expect(linkHostname('example.com', ['*.example.com'])).toBe('example.com');
+    expect(linkHostname('www.example.org', ['example.org'])).toBe('www.example.org');
+    expect(linkHostname('example.org', ['www.example.org'])).toBe('example.org');
     expect(linkHostname('javascript:x', ['*.example.com'])).toBeNull();
+  });
+  it('does not build page links for a hostname filter outside the site domains', () => {
+    // a crafted dashboard link like ?hostname=evil.com must not retarget page links
+    expect(linkHostname('evil.com', ['example.com'])).toBeNull();
+    expect(linkHostname('blog.example.com', ['example.org'])).toBeNull();
+    expect(linkHostname('example.com.evil.com', ['example.com', '*.example.com'])).toBeNull();
+    expect(linkHostname('notexample.com', ['*.example.com'])).toBeNull();
+    expect(rowHref('path', '/blog', linkHostname('evil.com', ['example.com']), ['example.com'])).toBeNull();
+  });
+  it('makes labels display-safe', () => {
+    expect(displayValue('path', '/a\u202Egpj.exe')).toBe('/a\uFFFDgpj.exe');
+    expect(displayValue('referrer', 'x\u0000y\u009bz')).toBe('x\uFFFDy\uFFFDz');
+    expect(displayValue('path', '/\u05e9\u05dc\u05d5\u05dd')).toBe('/\u05e9\u05dc\u05d5\u05dd');
   });
 });
 

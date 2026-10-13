@@ -1,5 +1,6 @@
 import { field as own, isPlainObject } from '../lib/body.js';
 import { SITE_ID_RE } from '../lib/ids.js';
+import { cleanText, hasUnsafeChars } from '../lib/text.js';
 import { VITAL_METRICS, type VitalMetric } from '../stats/vitals-score.js';
 
 export type PropValue = string | number | boolean | null;
@@ -21,9 +22,6 @@ const MAX_PROPS = 30;
 const MAX_PROP_KEY = 100;
 const MAX_PROP_STRING = 500;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-// eslint-disable-next-line no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
-
 
 function parseHttpUrl(v: string): URL | null {
   try {
@@ -43,9 +41,11 @@ function parseProps(v: unknown): Record<string, PropValue> | null | false {
   if (keys.length > MAX_PROPS) return false;
   const out = Object.create(null) as Record<string, PropValue>;
   for (const key of keys) {
-    if (key.length < 1 || key.length > MAX_PROP_KEY || FORBIDDEN_KEYS.has(key)) return false;
+    // Keys with control/format characters (bidi overrides, zero-width, lone surrogates) are rejected.
+    if (key.length < 1 || key.length > MAX_PROP_KEY || FORBIDDEN_KEYS.has(key) || hasUnsafeChars(key)) return false;
     const val = v[key];
-    if (typeof val === 'string') out[key] = val.slice(0, MAX_PROP_STRING);
+    // String values: such characters are stripped; truncation never splits a surrogate pair.
+    if (typeof val === 'string') out[key] = cleanText(val, MAX_PROP_STRING);
     else if (typeof val === 'number') {
       if (!Number.isFinite(val)) return false;
       out[key] = val;
@@ -110,7 +110,7 @@ export function parseIngestPayload(body: unknown): IngestPayload | null {
     const rawName = own(body, 'name');
     if (typeof rawName !== 'string') return null;
     const name = rawName.trim();
-    if (name.length < 1 || name.length > 100 || CONTROL_RE.test(name)) return null;
+    if (name.length < 1 || name.length > 100 || hasUnsafeChars(name)) return null;
     const props = parseProps(own(body, 'props'));
     if (props === false) return null;
     return { ...common, type, name, props };

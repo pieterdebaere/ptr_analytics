@@ -191,6 +191,44 @@ h3 {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+/* Untrusted values (analytics data, site names): never let bidi controls
+   inside them reorder the surrounding text. */
+bdi,
+.bidi-isolate,
+.row-label,
+.chip-value,
+.props-key,
+.cell-label,
+.modal-title,
+.site-domains,
+.site-card-name,
+.site-card-domains {
+  unicode-bidi: isolate;
+}
+
+/* ---------- error boundary ---------- */
+
+.crash {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 48px 16px;
+  text-align: center;
+}
+.crash-page {
+  min-height: 100vh;
+  align-content: center;
+  background: var(--bg);
+  color: var(--text);
+}
+.crash h1,
+.crash h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.crash p {
+  margin: 0;
+}
 .nowrap {
   white-space: nowrap;
 }

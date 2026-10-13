@@ -1,4 +1,5 @@
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Route, Routes, useLocation } from 'react-router-dom';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { AppLayout } from './components/Layout';
 import { EmptyState } from './components/ui';
 import { AuthProvider } from './hooks/auth';
@@ -24,21 +25,30 @@ function NotFound() {
 
 /** Routes; must be rendered inside a Router. */
 export function App() {
+  const { pathname } = useLocation();
   return (
-    <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route element={<AppLayout />}>
-          <Route index element={<OverviewPage />} />
-          <Route path="sites/:id" element={<SiteLayout />}>
-            <Route index element={<SiteAnalyticsPage />} />
-            <Route path="speed" element={<SpeedInsightsPage />} />
-            <Route path="settings" element={<SiteSettingsPage />} />
-          </Route>
-          <Route path="settings" element={<AccountPage />} />
-          <Route path="*" element={<NotFound />} />
+    <ErrorBoundary variant="app" resetKey={pathname}>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </ErrorBoundary>
+  );
+}
+
+function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<AppLayout />}>
+        <Route index element={<OverviewPage />} />
+        <Route path="sites/:id" element={<SiteLayout />}>
+          <Route index element={<SiteAnalyticsPage />} />
+          <Route path="speed" element={<SpeedInsightsPage />} />
+          <Route path="settings" element={<SiteSettingsPage />} />
         </Route>
-      </Routes>
-    </AuthProvider>
+        <Route path="settings" element={<AccountPage />} />
+        <Route path="*" element={<NotFound />} />
+      </Route>
+    </Routes>
   );
 }

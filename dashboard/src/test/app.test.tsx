@@ -46,7 +46,8 @@ function routes(url: string): unknown {
 
 let container: HTMLDivElement;
 let root: Root;
-const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(routes(url)), { status: 200 }));
+const defaultFetch = async (url: string) => new Response(JSON.stringify(routes(url)), { status: 200 });
+const fetchMock = vi.fn(defaultFetch);
 
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);
@@ -63,6 +64,7 @@ afterEach(() => {
   container.remove();
   vi.unstubAllGlobals();
   fetchMock.mockClear();
+  fetchMock.mockImplementation(defaultFetch);
 });
 
 async function renderAt(path: string) {
@@ -114,6 +116,36 @@ describe('App smoke tests', () => {
       '<script defer src="https://analytics.example.com/script.js" data-site="abc123def456"></script>',
     );
     expect(container.textContent).toContain('Danger zone');
+  });
+
+  it('does not blank the login page for a next= that normalises to //host', async () => {
+    for (const next of ['/.//evil.example', '/%2e//evil.example', '/a/..//evil.example', '/sites/../..//evil.example']) {
+      await renderAt(`/login?next=${encodeURIComponent(next)}`);
+      expect(container.textContent, next).toContain('All sites');
+      expect(container.textContent, next).not.toContain('Something went wrong');
+      act(() => root.unmount());
+      root = createRoot(container);
+    }
+  });
+
+  it('keeps the shell when a page crashes', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // malformed API response that makes the overview page throw while rendering
+    fetchMock.mockImplementation(async (url: string) => {
+      const body = new URL(url, 'http://localhost').pathname === '/api/overview' ? { sites: 'xy' } : routes(url);
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    await renderAt('/');
+    expect(container.textContent).toContain('Something went wrong');
+    expect(container.querySelector('.navbar')).not.toBeNull();
+    expect(container.textContent).toContain('All sites');
+    expect(container.querySelector('a[href="/"]')).not.toBeNull();
+  });
+
+  it('isolates site names', async () => {
+    await renderAt('/');
+    const name = container.querySelector('.site-card-name');
+    expect(name?.classList.contains('bidi-isolate')).toBe(true);
   });
 
   it('renders account & users', async () => {

@@ -2,9 +2,11 @@ import { useEffect } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Site } from '../api/types';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { EmptyState, ErrorState, Skeleton } from '../components/ui';
 import { useApi } from '../hooks/useApi';
 import { isSiteId, periodSearch } from '../lib/query';
+import { displayText } from '../lib/safety';
 
 export interface SiteContext {
   site: Site;
@@ -24,7 +26,7 @@ export function SiteLayout() {
   const site = sites?.find((s) => s.id === id);
 
   useEffect(() => {
-    if (site) document.title = `${site.name} – PTR Analytics`;
+    if (site) document.title = `${displayText(site.name)} – PTR Analytics`;
     return () => {
       document.title = 'PTR Analytics';
     };
@@ -73,11 +75,11 @@ export function SiteLayout() {
           >
             {(sites ?? []).map((s) => (
               <option key={s.id} value={s.id}>
-                {s.name}
+                {displayText(s.name)}
               </option>
             ))}
           </select>
-          <span className="muted site-domains truncate">{site.domains.join(', ')}</span>
+          <span className="muted site-domains truncate bidi-isolate">{displayText(site.domains.join(', '))}</span>
         </div>
         <nav className="site-tabs" aria-label="Site sections">
           <NavLink end to={`${base}${search}`} className={({ isActive }) => `site-tab${isActive ? ' site-tab-active' : ''}`}>
@@ -91,7 +93,9 @@ export function SiteLayout() {
           </NavLink>
         </nav>
       </div>
-      <Outlet context={ctx} />
+      <ErrorBoundary resetKey={location.pathname}>
+        <Outlet context={ctx} />
+      </ErrorBoundary>
     </div>
   );
 }

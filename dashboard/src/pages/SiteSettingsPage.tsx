@@ -13,6 +13,7 @@ import {
   installSnippet,
   snippetOrigin,
 } from '../lib/snippet';
+import { displayText } from '../lib/safety';
 import { useSite } from './SiteLayout';
 
 export function SiteSettingsPage() {
@@ -190,11 +191,11 @@ function DangerZone() {
           }
         >
           <p>
-            This deletes <strong className="break-all">{site.name}</strong> and all of its data. This cannot be undone.
+            This deletes <strong className="break-all bidi-isolate">{displayText(site.name)}</strong> and all of its data. This cannot be undone.
           </p>
           <label className="field">
             <span className="field-label">
-              Type <strong className="break-all">{site.name}</strong> to confirm
+              Type <strong className="break-all bidi-isolate">{displayText(site.name)}</strong> to confirm
             </span>
             <input
               className="input"

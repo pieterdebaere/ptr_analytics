@@ -5,6 +5,8 @@ import { MIGRATIONS } from './migrations.js';
 
 export type DB = Database.Database;
 
+const JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024;
+
 /** Open (and create if needed) the SQLite database and run pending migrations. */
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') {
@@ -22,6 +24,10 @@ export function openDatabase(file: string): DB {
     }
   }
   db.pragma('journal_mode = WAL');
+  // Zero deleted content instead of leaving it in free space (daily salts must really be
+  // gone once deleted), and cap the size the WAL is left at after a checkpoint.
+  db.pragma('secure_delete = ON');
+  db.pragma(`journal_size_limit = ${JOURNAL_SIZE_LIMIT}`);
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');

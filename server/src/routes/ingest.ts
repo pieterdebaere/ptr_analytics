@@ -1,5 +1,6 @@
 import type { FastifyError, FastifyInstance, FastifyReply } from 'fastify';
 import type { AppContext } from '../context.js';
+import { clientIp, rateLimitKey } from '../lib/client-ip.js';
 import { hostnameAllowed } from '../lib/domains.js';
 import { visitorId } from '../lib/salts.js';
 import { isBot, parseUserAgent } from '../lib/ua.js';
@@ -25,8 +26,14 @@ export async function ingestRoutes(app: FastifyInstance, opts: { ctx: AppContext
   const jsonParser = app.getDefaultJsonParser('error', 'error');
   app.addContentTypeParser('text/plain', { parseAs: 'string', bodyLimit: INGEST_BODY_LIMIT }, jsonParser);
 
-  app.addHook('onRequest', async (_request, reply) => {
+  app.addHook('onRequest', async (request, reply) => {
     cors(reply);
+    // Rate limit before the body is read or parsed: rejected requests cost no parsing, and
+    // requests whose body fails to parse (400/413/415) still count towards the limit.
+    if (request.method === 'POST' && ctx.limits.ingest && !ctx.limits.ingest.hit(rateLimitKey(clientIp(request)))) {
+      return reply.code(429).send({ error: 'too many requests' });
+    }
+    return undefined;
   });
 
   app.setErrorHandler((err: FastifyError, request, reply) => {
@@ -42,10 +49,8 @@ export async function ingestRoutes(app: FastifyInstance, opts: { ctx: AppContext
 
   app.post('/api/event', { bodyLimit: INGEST_BODY_LIMIT }, async (request, reply) => {
     const now = ctx.now();
-    const ip = request.ip;
-    if (ctx.limits.ingest && !ctx.limits.ingest.hit(ip)) {
-      return reply.code(429).send({ error: 'too many requests' });
-    }
+    // Full normalised address for the visitor hash / GeoIP (rate limiting used the /64 for IPv6).
+    const ip = clientIp(request);
 
     const payload = parseIngestPayload(request.body);
     if (!payload) return invalid(reply);

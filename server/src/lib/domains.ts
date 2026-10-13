@@ -1,6 +1,7 @@
 /**
  * Site domain entries (spec 4.4): a lowercase hostname (punycode), `localhost`, or a
- * wildcard `*.example.com`.
+ * wildcard `*.example.com`. Bare IP addresses and wildcards over a single label
+ * (`*.com`, which would accept every site on a TLD) are rejected.
  */
 
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -13,9 +14,18 @@ export function normalizeHostname(host: string): string {
   return h;
 }
 
+/**
+ * A last label that is numeric (decimal or 0x-hex) makes the WHATWG URL parser treat the
+ * whole host as an IPv4 address (`127.0.0.1`, `0x7f.1`, `2130706433`), so such entries are
+ * not domain names.
+ */
+const NUMERIC_LABEL_RE = /^(?:\d+|0x[0-9a-f]*)$/;
+
 function isValidHostname(h: string): boolean {
   if (h.length === 0 || h.length > 253) return false;
-  return h.split('.').every((label) => LABEL_RE.test(label));
+  const labels = h.split('.');
+  if (!labels.every((label) => LABEL_RE.test(label))) return false;
+  return !NUMERIC_LABEL_RE.test(labels[labels.length - 1] as string);
 }
 
 /**
@@ -44,7 +54,8 @@ export function normalizeDomainEntry(input: unknown): string | null {
   if (s === 'localhost') return s;
   if (s.startsWith('*.')) {
     const base = s.slice(2);
-    return isValidHostname(base) ? `*.${base}` : null;
+    // At least two labels: `*.com` / `*.localhost` would match far too much.
+    return isValidHostname(base) && base.includes('.') ? `*.${base}` : null;
   }
   return isValidHostname(s) ? s : null;
 }

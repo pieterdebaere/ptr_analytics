@@ -12,6 +12,7 @@ import { useApi } from '../hooks/useApi';
 import { useStatsQuery } from '../hooks/useStatsQuery';
 import { formatCompact, formatNumber, percentChange } from '../lib/format';
 import { PERIOD_LABELS, periodSearch } from '../lib/query';
+import { displayText } from '../lib/safety';
 
 export function OverviewPage() {
   const isAdmin = useIsAdmin();
@@ -96,11 +97,11 @@ function SiteCard({ site, href }: { site: OverviewSite; href: string }) {
   return (
     <Link to={href} className="card site-card">
       <div className="site-card-main">
-        <div className="site-card-name truncate">{site.name}</div>
-        <div className="site-card-domains muted truncate">{site.domains.join(', ')}</div>
+        <div className="site-card-name truncate bidi-isolate">{displayText(site.name)}</div>
+        <div className="site-card-domains muted truncate bidi-isolate">{displayText(site.domains.join(', '))}</div>
       </div>
       <div className="site-card-spark">
-        <Sparkline values={site.series} label={`Visitors trend for ${site.name}`} />
+        <Sparkline values={site.series} label={`Visitors trend for ${displayText(site.name)}`} />
       </div>
       <div className="site-card-stats">
         <div className="stat">

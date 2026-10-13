@@ -1,5 +1,5 @@
 import { useId, useState, type KeyboardEvent } from 'react';
-import { normalizeDomain } from '../lib/safety';
+import { displayText, normalizeDomain } from '../lib/safety';
 import { CloseIcon } from './Icons';
 
 export const MAX_DOMAINS = 20;
@@ -64,12 +64,12 @@ export function DomainsInput({
       <div className={`chips-input${disabled ? ' is-disabled' : ''}`}>
         {value.map((d) => (
           <span key={d} className="chip">
-            <span>{d}</span>
+            <bdi className="bidi-isolate">{displayText(d)}</bdi>
             {!disabled ? (
               <button
                 type="button"
                 className="chip-remove"
-                aria-label={`Remove ${d}`}
+                aria-label={`Remove ${displayText(d)}`}
                 onClick={() => onChange(value.filter((x) => x !== d))}
               >
                 <CloseIcon size={12} />

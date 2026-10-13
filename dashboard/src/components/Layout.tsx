@@ -3,6 +3,7 @@ import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/auth';
 import { useTheme } from '../hooks/useTheme';
 import { loginUrl } from '../lib/safety';
+import { ErrorBoundary } from './ErrorBoundary';
 import { ChevronDownIcon, LogoIcon, MoonIcon, SunIcon, UserIcon } from './Icons';
 import { ErrorState, Spinner, useDismiss } from './ui';
 
@@ -95,7 +96,9 @@ export function AppLayout() {
         </div>
       </header>
       <main className="container main">
-        <Outlet />
+        <ErrorBoundary resetKey={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
       <footer className="footer container">
         <span>PTR Analytics{config?.version ? ` v${config.version}` : ''}</span>

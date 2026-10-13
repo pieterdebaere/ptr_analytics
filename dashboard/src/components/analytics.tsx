@@ -6,6 +6,7 @@ import { useApi } from '../hooks/useApi';
 import { usePageVisible } from '../hooks/usePageVisible';
 import { DIMENSION_LABELS, displayValue, filterValueFor, rowHref, valuePrefix } from '../lib/dimensions';
 import { formatCompact, formatNumber } from '../lib/format';
+import { displayText } from '../lib/safety';
 import { CloseIcon, ExternalIcon, SearchIcon } from './Icons';
 import { EmptyState, ErrorState, Modal, SkeletonRows, Tabs } from './ui';
 
@@ -69,7 +70,7 @@ export function FilterChips({
           <span key={k} className="chip chip-filter">
             <span className="chip-key">{DIMENSION_LABELS[k]}</span>
             <span className="chip-op">is</span>
-            <span className="chip-value truncate">
+            <span className="chip-value truncate bidi-isolate">
               {prefix ? `${prefix} ` : ''}
               {displayValue(k, value)}
             </span>
@@ -97,12 +98,15 @@ export function BreakdownRows({
   rows,
   metric,
   pageHost,
+  siteDomains,
   onSelect,
 }: {
   dimension: FilterKey;
   rows: readonly BreakdownRow[];
   metric: RowMetric;
   pageHost: string | null;
+  /** the site's configured domains; hostname rows only link to these */
+  siteDomains: readonly string[];
   onSelect: (row: BreakdownRow) => void;
 }) {
   const sorted = useMemo(
@@ -115,7 +119,7 @@ export function BreakdownRows({
       {sorted.map((row, i) => {
         const label = displayValue(dimension, row.value);
         const prefix = valuePrefix(dimension, row.value);
-        const href = rowHref(dimension, row.value, pageHost);
+        const href = rowHref(dimension, row.value, pageHost, siteDomains);
         const v = row[metric];
         return (
           <li key={`${row.value ?? '\u0000null'}-${i}`} className="row">
@@ -123,7 +127,7 @@ export function BreakdownRows({
               <span className="row-bar" style={{ width: `${Math.max(0, Math.min(100, (v / max) * 100))}%` }} />
               <span className="row-label">
                 {prefix ? <span className="row-flag">{prefix}</span> : null}
-                <span className={`truncate${row.value === null ? ' muted' : ''}`}>{label}</span>
+                <span className={`truncate bidi-isolate${row.value === null ? ' muted' : ''}`}>{label}</span>
               </span>
             </button>
             {href ? (
@@ -160,6 +164,7 @@ export function BreakdownPanel({
   query,
   tabs,
   pageHost,
+  siteDomains,
   countLabel = 'Page views',
   onFilter,
   onSelectRow,
@@ -168,6 +173,7 @@ export function BreakdownPanel({
   query: StatsQuery;
   tabs: readonly PanelTab[];
   pageHost: string | null;
+  siteDomains: readonly string[];
   countLabel?: string;
   onFilter: (key: FilterKey, value: string) => void;
   /** overrides the default click behaviour (filtering) */
@@ -215,7 +221,14 @@ export function BreakdownPanel({
           <EmptyState title="No data for this period" />
         ) : (
           <div className={loading ? 'is-loading' : undefined}>
-            <BreakdownRows dimension={tab} rows={rows} metric={metric} pageHost={pageHost} onSelect={select} />
+            <BreakdownRows
+              dimension={tab}
+              rows={rows}
+              metric={metric}
+              pageHost={pageHost}
+              siteDomains={siteDomains}
+              onSelect={select}
+            />
           </div>
         )}
       </div>
@@ -237,6 +250,7 @@ export function BreakdownPanel({
           title={title}
           metric={metric}
           pageHost={pageHost}
+          siteDomains={siteDomains}
           countLabel={countLabel}
           onClose={() => setViewAll(false)}
           onSelect={(row) => {
@@ -258,6 +272,7 @@ export function ViewAllModal({
   title,
   metric: initialMetric,
   pageHost,
+  siteDomains,
   countLabel,
   onClose,
   onSelect,
@@ -268,6 +283,7 @@ export function ViewAllModal({
   title: string;
   metric: RowMetric;
   pageHost: string | null;
+  siteDomains: readonly string[];
   countLabel: string;
   onClose: () => void;
   onSelect: (row: BreakdownRow) => void;
@@ -319,7 +335,14 @@ export function ViewAllModal({
         ) : rows.length === 0 ? (
           <EmptyState title={search ? 'No matches' : 'No data for this period'} />
         ) : (
-          <BreakdownRows dimension={dimension} rows={rows} metric={metric} pageHost={pageHost} onSelect={onSelect} />
+          <BreakdownRows
+            dimension={dimension}
+            rows={rows}
+            metric={metric}
+            pageHost={pageHost}
+            siteDomains={siteDomains}
+            onSelect={onSelect}
+          />
         )}
       </div>
     </Modal>
@@ -359,7 +382,7 @@ export function EventDetailModal({
     <Modal
       title={
         <>
-          <span className="muted">Event</span> <span className="break-all">{event}</span>
+          <span className="muted">Event</span> <bdi className="break-all bidi-isolate">{displayText(event)}</bdi>
         </>
       }
       onClose={onClose}
@@ -390,7 +413,9 @@ export function EventDetailModal({
         <div className="props">
           {groups.map(([key, rows]) => (
             <div key={key} className="props-group">
-              <h3 className="props-key break-all">{key}</h3>
+              <h3 className="props-key break-all">
+                <bdi className="bidi-isolate">{displayText(key)}</bdi>
+              </h3>
               <table className="table">
                 <thead>
                   <tr>
@@ -406,7 +431,13 @@ export function EventDetailModal({
                 <tbody>
                   {rows.map((r, i) => (
                     <tr key={`${r.value ?? '\u0000'}-${i}`}>
-                      <td className="break-all">{r.value === null ? <span className="muted">(none)</span> : r.value}</td>
+                      <td className="break-all">
+                        {r.value === null ? (
+                          <span className="muted">(none)</span>
+                        ) : (
+                          <bdi className="bidi-isolate">{displayText(r.value)}</bdi>
+                        )}
+                      </td>
                       <td className="num">{formatNumber(r.visitors)}</td>
                       <td className="num">{formatNumber(r.count)}</td>
                     </tr>

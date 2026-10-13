@@ -1,7 +1,8 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BreakdownRows, FilterChips } from '../components/analytics';
+import { BreakdownRows, EventDetailModal, FilterChips } from '../components/analytics';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { AreaChart, RingGauge, Sparkline } from '../components/charts';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -28,6 +29,7 @@ describe('BreakdownRows', () => {
           dimension="referrer"
           metric="visitors"
           pageHost={null}
+          siteDomains={['example.com']}
           onSelect={onSelect}
           rows={[
             { value: 'google.com', visitors: 10, count: 12 },
@@ -57,6 +59,7 @@ describe('BreakdownRows', () => {
           dimension="country"
           metric="count"
           pageHost={null}
+          siteDomains={['example.com']}
           onSelect={() => {}}
           rows={[{ value: 'BE', visitors: 1, count: 1 }]}
         />,
@@ -64,6 +67,65 @@ describe('BreakdownRows', () => {
     );
     expect(container.textContent).toContain('\u{1F1E7}\u{1F1EA}');
     expect(container.textContent).toMatch(/Belgi/);
+  });
+});
+
+describe('BreakdownRows links and bidi', () => {
+  it('only links hostname rows that belong to the site domains', () => {
+    act(() =>
+      root.render(
+        <BreakdownRows
+          dimension="hostname"
+          metric="visitors"
+          pageHost="example.com"
+          siteDomains={['example.com', '*.example.org']}
+          onSelect={() => {}}
+          rows={[
+            { value: 'www.example.com', visitors: 3, count: 3 },
+            { value: 'blog.example.org', visitors: 2, count: 2 },
+            { value: 'evil.com', visitors: 1, count: 1 },
+          ]}
+        />,
+      ),
+    );
+    const hrefs = Array.from(container.querySelectorAll('a')).map((a) => a.getAttribute('href'));
+    expect(hrefs).toEqual(['https://www.example.com/', 'https://blog.example.org/']);
+  });
+
+  it('does not link page rows when the page host is not trusted', () => {
+    act(() =>
+      root.render(
+        <BreakdownRows
+          dimension="path"
+          metric="visitors"
+          pageHost={null}
+          siteDomains={['example.com']}
+          onSelect={() => {}}
+          rows={[{ value: '/blog', visitors: 3, count: 3 }]}
+        />,
+      ),
+    );
+    expect(container.querySelectorAll('a')).toHaveLength(0);
+  });
+
+  it('isolates and neutralises bidi overrides in row labels', () => {
+    act(() =>
+      root.render(
+        <BreakdownRows
+          dimension="path"
+          metric="visitors"
+          pageHost="example.com"
+          siteDomains={['example.com']}
+          onSelect={() => {}}
+          rows={[{ value: '/\u202Egnp.exe', visitors: 3, count: 3 }]}
+        />,
+      ),
+    );
+    expect(container.textContent).not.toContain('\u202E');
+    expect(container.textContent).toContain('/\uFFFDgnp.exe');
+    const label = container.querySelector('.row-label .truncate')!;
+    expect(label.classList.contains('bidi-isolate')).toBe(true);
+    expect(container.innerHTML).not.toContain('\u202E');
   });
 });
 
@@ -112,5 +174,79 @@ describe('charts', () => {
     );
     expect(container.querySelector('.sparkline-line')).not.toBeNull();
     expect(container.querySelector('.gauge-text')!.textContent).toBe('92');
+  });
+});
+
+describe('FilterChips bidi', () => {
+  it('isolates chip values', () => {
+    act(() => root.render(<FilterChips filters={{ path: '/x\u202Ey', utm_source: 'a\u0007b' }} onRemove={() => {}} onClear={() => {}} />));
+    const values = Array.from(container.querySelectorAll('.chip-value'));
+    expect(values.every((v) => v.classList.contains('bidi-isolate'))).toBe(true);
+    expect(container.textContent).not.toContain('\u202E');
+    expect(container.textContent).toContain('/x\uFFFDy');
+    expect(container.textContent).toContain('a\uFFFDb');
+  });
+});
+
+describe('EventDetailModal bidi', () => {
+  it('renders the event name, prop keys and values isolated', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ rows: [{ key: 'k\u202Eey', value: 'v\u2067al', visitors: 1, count: 1 }] }), { status: 200 }),
+      ),
+    );
+    await act(async () => {
+      root.render(
+        <EventDetailModal siteId="abc123def456" query={{ period: '7d', tz: 'UTC' }} event={'Sign\u202Eup'} onClose={() => {}} onFilter={() => {}} />,
+      );
+    });
+    for (let i = 0; i < 3; i++) await act(async () => new Promise((r) => setTimeout(r, 0)));
+    vi.unstubAllGlobals();
+    const title = document.querySelector('.modal-title bdi');
+    expect(title?.textContent).toBe('Sign\uFFFDup');
+    expect(document.querySelector('.props-key bdi')?.textContent).toBe('k\uFFFDey');
+    expect(document.querySelector('.props td bdi')?.textContent).toBe('v\uFFFDal');
+    expect(document.body.textContent).not.toMatch(/[\u202E\u2067]/);
+  });
+});
+
+describe('ErrorBoundary', () => {
+  function Boom(): never {
+    throw new Error('boom');
+  }
+
+  it('shows a friendly message with a reload link instead of a blank page', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    act(() =>
+      root.render(
+        <ErrorBoundary variant="app">
+          <Boom />
+        </ErrorBoundary>,
+      ),
+    );
+    expect(container.textContent).toContain('Something went wrong');
+    const link = Array.from(container.querySelectorAll('a')).find((a) => a.textContent === 'Reload the page');
+    expect(link).toBeDefined();
+    expect(link!.getAttribute('href')!.startsWith('/')).toBe(true);
+    expect(container.textContent).not.toContain('boom');
+  });
+
+  it('keeps sibling content and resets when the reset key changes', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const view = (key: string, crash: boolean) => (
+      <div>
+        <header>Shell</header>
+        <ErrorBoundary resetKey={key}>{crash ? <Boom /> : <p>Page content</p>}</ErrorBoundary>
+      </div>
+    );
+    act(() => root.render(view('/a', true)));
+    expect(container.textContent).toContain('Shell');
+    expect(container.textContent).toContain('Something went wrong');
+    act(() => root.render(view('/a', false)));
+    expect(container.textContent).toContain('Something went wrong');
+    act(() => root.render(view('/b', false)));
+    expect(container.textContent).toContain('Page content');
+    expect(container.textContent).not.toContain('Something went wrong');
   });
 });

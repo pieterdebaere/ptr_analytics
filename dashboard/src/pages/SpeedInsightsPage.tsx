@@ -17,6 +17,7 @@ import { useApi } from '../hooks/useApi';
 import { useStatsQuery } from '../hooks/useStatsQuery';
 import { displayValue, linkHostname, rowHref, valuePrefix } from '../lib/dimensions';
 import { formatNumber } from '../lib/format';
+import { displayText } from '../lib/safety';
 import { parseVitalDevice } from '../lib/query';
 import {
   METRIC_INFO,
@@ -94,7 +95,7 @@ export function SpeedInsightsPage() {
           <span className="chip chip-filter">
             <span className="chip-key">Page</span>
             <span className="chip-op">is</span>
-            <span className="chip-value truncate">{path || 'Unknown'}</span>
+            <span className="chip-value truncate bidi-isolate">{path ? displayText(path) : 'Unknown'}</span>
             <button type="button" className="chip-remove" aria-label="Remove page filter" onClick={() => setParam('path', null)}>
               <CloseIcon size={12} />
             </button>
@@ -133,6 +134,7 @@ export function SpeedInsightsPage() {
             qKey={qKey}
             metric={metric}
             pageHost={linkHostname(undefined, site.domains)}
+            siteDomains={site.domains}
             onFilterPath={(p) => setParam('path', p)}
           />
         </>
@@ -270,6 +272,7 @@ function VitalBreakdown({
   qKey,
   metric,
   pageHost,
+  siteDomains,
   onFilterPath,
 }: {
   siteId: string;
@@ -277,6 +280,7 @@ function VitalBreakdown({
   qKey: string;
   metric: VitalMetric;
   pageHost: string | null;
+  siteDomains: readonly string[];
   onFilterPath: (path: string) => void;
 }) {
   const [dim, setDim] = useState<VitalDimension>('path');
@@ -316,17 +320,17 @@ function VitalBreakdown({
                   const rating = isRating(r.rating) ? r.rating : rateValue(metric, r.p75);
                   const label = displayValue(dim, r.value);
                   const prefix = valuePrefix(dim, r.value);
-                  const href = rowHref(dim, r.value, pageHost);
+                  const href = rowHref(dim, r.value, pageHost, siteDomains);
                   return (
                     <tr key={`${r.value ?? '\u0000'}-${i}`}>
                       <td>
                         <div className="cell-label">
                         {dim === 'path' && r.value !== null ? (
-                          <button type="button" className="link-btn truncate" title={`Show only ${label}`} onClick={() => onFilterPath(r.value ?? '')}>
+                          <button type="button" className="link-btn truncate bidi-isolate" title={`Show only ${label}`} onClick={() => onFilterPath(r.value ?? '')}>
                             {label}
                           </button>
                         ) : (
-                          <span className={`truncate${r.value === null ? ' muted' : ''}`}>
+                          <span className={`truncate bidi-isolate${r.value === null ? ' muted' : ''}`}>
                             {prefix ? `${prefix} ` : ''}
                             {label}
                           </span>

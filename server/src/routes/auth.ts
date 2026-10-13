@@ -5,6 +5,7 @@ import { sessionToken } from '../auth/cookie.js';
 import { currentUser, requireAuth } from '../auth/guard.js';
 import { SESSION_TTL_MS, sessionCookieName } from '../auth/sessions.js';
 import { field, objectBody } from '../lib/body.js';
+import { clientIp, rateLimitKey } from '../lib/client-ip.js';
 import { HttpError, badRequest } from '../lib/errors.js';
 import { dummyVerify, hashPassword, verifyPassword } from '../lib/password.js';
 
@@ -37,7 +38,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const email = emailRaw.trim().toLowerCase();
     // Count the attempt *before* the (async) password check: checking first and counting
     // afterwards lets a burst of concurrent requests slip past the limit.
-    const ipKey = request.ip;
+    const ipKey = rateLimitKey(clientIp(request));
     const ipOk = ctx.limits.loginIp.hit(ipKey);
     const pairOk = ctx.limits.loginEmailIp.hit(`${email}\n${ipKey}`);
     const emailOk = ctx.limits.loginEmail.hit(email);
@@ -77,7 +78,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     if (!validPassword(newPassword)) {
       throw badRequest(`new password must be ${PASSWORD_MIN}..${PASSWORD_MAX} characters`);
     }
-    const ipKey = request.ip;
+    const ipKey = rateLimitKey(clientIp(request));
     const ipOk = ctx.limits.loginIp.hit(ipKey);
     const pairOk = ctx.limits.loginEmailIp.hit(`${user.email}\n${ipKey}`);
     if (!ipOk || !pairOk) {
