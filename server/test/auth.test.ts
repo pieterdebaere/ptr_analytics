@@ -93,9 +93,10 @@ describe('login / logout / me', () => {
 
   it('rate limits failed logins per IP and per email', async () => {
     for (let i = 0; i < 10; i++) expect((await loginReq(ADMIN_EMAIL, `wrong password ${i}`, '192.0.2.50')).statusCode).toBe(401);
-    // even the correct password is refused now (per IP and per email)
+    // even the correct password is refused now from that IP...
     expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '192.0.2.50')).statusCode).toBe(429);
-    expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '192.0.2.51')).statusCode).toBe(429);
+    // ...but the real owner on another IP is not locked out
+    expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '192.0.2.51')).statusCode).toBe(200);
     // different email from a fresh IP is fine
     expect((await loginReq('other@example.com', 'whatever whatever', '192.0.2.52')).statusCode).toBe(401);
     // per-IP: 30 attempts (any email) from one IP
@@ -105,6 +106,11 @@ describe('login / logout / me', () => {
     // window expires after 15 minutes
     t.clock.t += 15 * 60_000 + 1;
     expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '192.0.2.50')).statusCode).toBe(200);
+  });
+
+  it('limits a distributed brute force per email across IPs', async () => {
+    for (let i = 0; i < 100; i++) await loginReq(ADMIN_EMAIL, 'wrong password!!', `198.51.100.${i}`);
+    expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '203.0.113.9')).statusCode).toBe(429);
   });
 
   it('counts concurrent login attempts before verifying (no race past the limit)', async () => {
@@ -347,5 +353,47 @@ describe('API errors', () => {
     const res = await api(t.app, cookie, 'GET', `/api/sites/${id}/vitals/summary`);
     expect(res.statusCode).toBe(500);
     expect(res.json()).toEqual({ error: 'internal error' });
+  });
+});
+
+describe('hardening', () => {
+  it('uses a __Host- prefixed cookie when Secure and ignores duplicated session cookies', async () => {
+    await t.app.close();
+    t = await createTestApp({ env: { PUBLIC_URL: 'https://analytics.example.com' } });
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      headers: { 'x-pa-request': '1' },
+      payload: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+    });
+    expect(String(res.headers['set-cookie'])).toMatch(/^__Host-pa_session=[A-Za-z0-9_-]{43};.*Secure/);
+    const cookie = cookieFrom(res);
+    expect((await api(t.app, cookie, 'GET', '/api/auth/me')).statusCode).toBe(200);
+    const dup = `${cookie}; ${cookie.replace(/=.*/, '=' + 'A'.repeat(43))}`;
+    expect((await api(t.app, dup, 'GET', '/api/auth/me')).statusCode).toBe(401);
+  });
+
+  it('refuses changing your own password via the users API (needs current password)', async () => {
+    const cookie = await login(t.app);
+    const me = (await api(t.app, cookie, 'GET', '/api/auth/me')).json() as { user: { id: number } };
+    const res = await api(t.app, cookie, 'PATCH', `/api/users/${me.user.id}`, { password: 'a brand new password' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('marks API responses no-store and handles malformed URLs with headers', async () => {
+    const cookie = await login(t.app);
+    expect((await api(t.app, cookie, 'GET', '/api/sites')).headers['cache-control']).toBe('no-store');
+    const bad = await t.app.inject({ method: 'GET', url: '/%zz' });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json()).toEqual({ error: 'bad request' });
+    expect(bad.headers['content-security-policy']).toBeDefined();
+  });
+
+  it('rejects emails with control or bidi characters', async () => {
+    const cookie = await login(t.app);
+    for (const email of ['\u001b[31mevil@x.com', 'a‮@x.com', 'a@x']) {
+      const res = await api(t.app, cookie, 'POST', '/api/users', { email, password: 'long enough password', role: 'viewer' });
+      expect(res.statusCode).toBe(400);
+    }
   });
 });

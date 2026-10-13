@@ -19,6 +19,11 @@ The database location is taken from DATA_DIR (default ./data).`;
 
 class CliError extends Error {}
 
+/** Make stored values safe to print to a terminal (no escape sequences / bidi tricks). */
+function printable(s: string): string {
+  return s.replace(/[\p{Cc}\p{Cf}]/gu, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, '0')}`);
+}
+
 export async function runCli(argv: string[], env: Record<string, string | undefined> = process.env, out: (s: string) => void = console.log): Promise<void> {
   const [command, ...args] = argv;
   if (command === undefined || command === 'help' || command === '--help' || command === '-h') {
@@ -41,38 +46,38 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         if (!ROLES.includes(role)) throw new CliError('Role must be "admin" or "viewer".');
         const password = generatePassword();
         const user = users.create(email, await hashPassword(password), role, Date.now());
-        if (!user) throw new CliError(`A user with email ${email} already exists.`);
-        out(`Created ${role} ${user.email}`);
+        if (!user) throw new CliError(`A user with email ${printable(email)} already exists.`);
+        out(`Created ${role} ${printable(user.email)}`);
         out(`Password (shown only once): ${password}`);
         return;
       }
       case 'reset-password': {
         needEmail();
         const found = users.byEmailWithHash(email);
-        if (!found) throw new CliError(`No user with email ${email}.`);
+        if (!found) throw new CliError(`No user with email ${printable(email)}.`);
         const password = generatePassword();
         users.setPasswordHash(found.user.id, await hashPassword(password));
         sessions.deleteForUser(found.user.id);
-        out(`New password for ${found.user.email} (shown only once): ${password}`);
+        out(`New password for ${printable(found.user.email)} (shown only once): ${password}`);
         return;
       }
       case 'list-users': {
         const list = users.list();
         if (list.length === 0) out('No users.');
-        for (const u of list) out(`${String(u.id).padStart(4)}  ${u.role.padEnd(6)}  ${u.email}  (created ${new Date(u.createdAt).toISOString()})`);
+        for (const u of list) out(`${String(u.id).padStart(4)}  ${u.role.padEnd(6)}  ${printable(u.email)}  (created ${new Date(u.createdAt).toISOString()})`);
         return;
       }
       case 'delete-user': {
         needEmail();
         const found = users.byEmailWithHash(email);
-        if (!found) throw new CliError(`No user with email ${email}.`);
+        if (!found) throw new CliError(`No user with email ${printable(email)}.`);
         if (found.user.role === 'admin' && users.countAdmins() <= 1) throw new CliError('The last admin cannot be deleted.');
         users.delete(found.user.id);
-        out(`Deleted ${found.user.email}`);
+        out(`Deleted ${printable(found.user.email)}`);
         return;
       }
       default:
-        throw new CliError(`Unknown command "${command}".\n\n${USAGE}`);
+        throw new CliError(`Unknown command "${printable(command)}".\n\n${USAGE}`);
     }
   } finally {
     db.close();
@@ -81,6 +86,7 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
 
 const isMain = process.argv[1] !== undefined && /cli\.(js|ts)$/.test(process.argv[1]);
 if (isMain) {
+  process.umask(0o077);
   runCli(process.argv.slice(2)).catch((err: unknown) => {
     if (err instanceof CliError || err instanceof ConfigError) console.error(err.message);
     else console.error('Error:', err instanceof Error ? err.message : err);

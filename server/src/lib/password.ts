@@ -58,8 +58,8 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const r = Number(parts[2]);
   const p = Number(parts[3]);
   // Guard against absurd parameters (DoS) in a tampered/corrupted hash.
-  if (!Number.isInteger(n) || n < 2 || n > 2 ** 20 || (n & (n - 1)) !== 0) return false;
-  if (!Number.isInteger(r) || r < 1 || r > 32 || !Number.isInteger(p) || p < 1 || p > 16) return false;
+  if (!Number.isInteger(n) || n < 2 || n > 2 ** 17 || (n & (n - 1)) !== 0) return false;
+  if (!Number.isInteger(r) || r < 1 || r > 16 || !Number.isInteger(p) || p < 1 || p > 4) return false;
   const salt = Buffer.from(parts[4] ?? '', 'base64');
   const expected = Buffer.from(parts[5] ?? '', 'base64');
   if (salt.length === 0 || expected.length < 16 || expected.length > 128) return false;

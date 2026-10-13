@@ -19,20 +19,27 @@ export function isApiPath(path: string): boolean {
   return path === '/api' || path.startsWith('/api/');
 }
 
-/** Security headers for every response (spec 4.6). */
+/** Set the security headers (spec 4.6) on a reply. */
+export function applySecurityHeaders(request: FastifyRequest, reply: FastifyReply, config: Config): void {
+  reply.header('Content-Security-Policy', CSP);
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  reply.header('X-Frame-Options', 'DENY');
+  reply.header('Cross-Origin-Opener-Policy', 'same-origin');
+  reply.header('Permissions-Policy', PERMISSIONS_POLICY);
+  reply.header(
+    'Cross-Origin-Resource-Policy',
+    CROSS_ORIGIN_PATHS.has(pathOf(request.url)) ? 'cross-origin' : 'same-origin',
+  );
+  if (config.cookieSecure) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  // Authenticated API data must never be stored by browsers or shared caches.
+  if (isApiPath(pathOf(request.url)) && !reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
+}
+
+/** Security headers for every response. */
 export function registerSecurityHeaders(app: FastifyInstance, config: Config): void {
   app.addHook('onSend', async (request: FastifyRequest, reply: FastifyReply, payload) => {
-    reply.header('Content-Security-Policy', CSP);
-    reply.header('X-Content-Type-Options', 'nosniff');
-    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
-    reply.header('X-Frame-Options', 'DENY');
-    reply.header('Cross-Origin-Opener-Policy', 'same-origin');
-    reply.header('Permissions-Policy', PERMISSIONS_POLICY);
-    reply.header(
-      'Cross-Origin-Resource-Policy',
-      CROSS_ORIGIN_PATHS.has(pathOf(request.url)) ? 'cross-origin' : 'same-origin',
-    );
-    if (config.cookieSecure) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    applySecurityHeaders(request, reply, config);
     return payload;
   });
 }
@@ -64,7 +71,7 @@ function originAllowed(request: FastifyRequest, config: Config): boolean {
   if (config.publicUrl !== null) return origin === config.publicUrl;
   try {
     const u = new URL(origin);
-    return (u.protocol === 'http:' || u.protocol === 'https:') && u.host === request.host;
+    return `${u.protocol}//${u.host}` === `${request.protocol}://${request.host}`;
   } catch {
     return false;
   }

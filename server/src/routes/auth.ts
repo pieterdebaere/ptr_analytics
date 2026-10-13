@@ -3,7 +3,7 @@ import { PASSWORD_MAX, PASSWORD_MIN } from '../config.js';
 import type { AppContext } from '../context.js';
 import { sessionToken } from '../auth/cookie.js';
 import { currentUser, requireAuth } from '../auth/guard.js';
-import { SESSION_COOKIE, SESSION_TTL_MS } from '../auth/sessions.js';
+import { SESSION_TTL_MS, sessionCookieName } from '../auth/sessions.js';
 import { field, objectBody } from '../lib/body.js';
 import { HttpError, badRequest } from '../lib/errors.js';
 import { dummyVerify, hashPassword, verifyPassword } from '../lib/password.js';
@@ -15,6 +15,7 @@ export function validPassword(v: unknown): v is string {
 export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
   const auth = requireAuth(ctx);
+  const SESSION_COOKIE = sessionCookieName(ctx.config.cookieSecure);
 
   const setSessionCookie = (reply: FastifyReply, token: string): void => {
     reply.setCookie(SESSION_COOKIE, token, {
@@ -38,8 +39,9 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     // afterwards lets a burst of concurrent requests slip past the limit.
     const ipKey = request.ip;
     const ipOk = ctx.limits.loginIp.hit(ipKey);
+    const pairOk = ctx.limits.loginEmailIp.hit(`${email}\n${ipKey}`);
     const emailOk = ctx.limits.loginEmail.hit(email);
-    if (!ipOk || !emailOk) {
+    if (!ipOk || !pairOk || !emailOk) {
       throw new HttpError(429, 'too many login attempts, try again later');
     }
 
@@ -51,7 +53,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     if (!found || !ok) {
       throw new HttpError(401, 'invalid email or password');
     }
-    ctx.limits.loginEmail.reset(email);
+    ctx.limits.loginEmailIp.reset(`${email}\n${ipKey}`);
     const { token } = ctx.authSessions.create(found.user.id, ctx.now());
     setSessionCookie(reply, token);
     return { user: found.user };
@@ -77,15 +79,15 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     }
     const ipKey = request.ip;
     const ipOk = ctx.limits.loginIp.hit(ipKey);
-    const emailOk = ctx.limits.loginEmail.hit(user.email);
-    if (!ipOk || !emailOk) {
+    const pairOk = ctx.limits.loginEmailIp.hit(`${user.email}\n${ipKey}`);
+    if (!ipOk || !pairOk) {
       throw new HttpError(429, 'too many failed attempts, try again later');
     }
     const hash = ctx.users.passwordHash(user.id);
     if (hash === null || !(await verifyPassword(currentPassword, hash))) {
       throw badRequest('current password is incorrect');
     }
-    ctx.limits.loginEmail.reset(user.email);
+    ctx.limits.loginEmailIp.reset(`${user.email}\n${ipKey}`);
     ctx.users.setPasswordHash(user.id, await hashPassword(newPassword));
     ctx.authSessions.deleteForUser(user.id, request.authTokenHash ?? undefined);
     return reply.code(204).send();

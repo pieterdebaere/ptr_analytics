@@ -2,7 +2,16 @@ import type { DB } from '../db/index.js';
 import type { User } from '../data/users.js';
 import { SESSION_TOKEN_RE, generateSessionToken, sha256Hex } from '../lib/ids.js';
 
-export const SESSION_COOKIE = 'pa_session';
+const SESSION_COOKIE_BASE = 'pa_session';
+
+/**
+ * With `Secure` cookies we use the `__Host-` prefix: browsers then refuse the cookie unless
+ * it is Secure, host-only (no Domain) and Path=/, so a sibling subdomain cannot plant or
+ * shadow a session cookie (session fixation / login CSRF).
+ */
+export function sessionCookieName(secure: boolean): string {
+  return secure ? `__Host-${SESSION_COOKIE_BASE}` : SESSION_COOKIE_BASE;
+}
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface Row {

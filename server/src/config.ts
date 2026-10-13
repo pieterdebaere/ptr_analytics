@@ -186,5 +186,6 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
 }
 
 export function isValidEmail(email: string): boolean {
-  return email.length <= 254 && /^[^\s@]+@[^\s@]+$/.test(email);
+  // No whitespace, control (Cc) or format (Cf, e.g. bidi overrides) characters.
+  return email.length <= 254 && /^[^\s@\p{Cc}\p{Cf}]+@[^\s@\p{Cc}\p{Cf}]+\.[^\s@\p{Cc}\p{Cf}]+$/u.test(email);
 }

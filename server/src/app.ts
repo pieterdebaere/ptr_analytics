@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import fastifyCookie from '@fastify/cookie';
-import Fastify, { LogController, type FastifyError, type FastifyInstance } from 'fastify';
+import Fastify, { LogController, type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { PACKAGE_DIR, type Config } from './config.js';
 import { createContext, type AppContext, type Clock } from './context.js';
 import { openDatabase, type DB } from './db/index.js';
@@ -17,7 +17,7 @@ import { siteRoutes } from './routes/sites.js';
 import { staticRoutes } from './routes/static.js';
 import { statsRoutes } from './routes/stats.js';
 import { userRoutes } from './routes/users.js';
-import { registerCsrfCheck, registerSecurityHeaders } from './security.js';
+import { applySecurityHeaders, registerCsrfCheck, registerSecurityHeaders } from './security.js';
 
 export interface BuildOptions {
   /** Database file; defaults to `<DATA_DIR>/analytics.db`. Use ':memory:' in tests. */
@@ -106,6 +106,14 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
     onConstructorPoisoning: 'error',
     return503OnClosing: true,
     routerOptions: { maxParamLength: 200 },
+    // Malformed URLs / content-type errors raised by the router: generic JSON body,
+    // and the onSend hook still adds the security headers.
+    frameworkErrors: (_err, request, reply) => {
+      // Runs before routing, so the onSend hook does not apply: set the headers here.
+      const r = reply as unknown as FastifyReply;
+      applySecurityHeaders(request as unknown as FastifyRequest, r, config);
+      void r.code(400).send({ error: 'bad request' });
+    },
   });
 
   const dbPath = options.dbPath ?? path.join(config.dataDir, 'analytics.db');

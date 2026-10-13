@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import { buildApp } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 
+// Files we create (database, WAL, GeoIP database) are readable by the owner only.
+process.umask(0o077);
+
 async function main(): Promise<void> {
   let config: Config;
   try {
@@ -15,7 +18,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  fs.mkdirSync(config.dataDir, { recursive: true });
+  fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   const app = await buildApp(config, { backgroundJobs: true });
 
   let closing = false;

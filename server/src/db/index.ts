@@ -7,8 +7,20 @@ export type DB = Database.Database;
 
 /** Open (and create if needed) the SQLite database and run pending migrations. */
 export function openDatabase(file: string): DB {
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ':memory:') {
+    // The database holds password hashes, session hashes and the daily salt: owner-only.
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  }
   const db = new Database(file);
+  if (file !== ':memory:') {
+    for (const f of [file, `${file}-wal`, `${file}-shm`]) {
+      try {
+        fs.chmodSync(f, 0o600);
+      } catch {
+        // -wal/-shm may not exist yet; they inherit the process umask (set to 077 at startup).
+      }
+    }
+  }
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
