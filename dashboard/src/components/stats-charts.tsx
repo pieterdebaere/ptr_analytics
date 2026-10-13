@@ -13,6 +13,7 @@ import { labelIndices } from '@/lib/chart';
 import { axisDateFormat, tooltipDateFormat } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { EmptyState } from './common';
+import { Skeleton } from '@/components/ui/skeleton';
 
 /** Lets the page scroll vertically over a chart on touch devices (Bklit sets `none`). */
 const TOUCH_STYLE: CSSProperties = { touchAction: 'pan-y' };
@@ -165,7 +166,10 @@ export function TimeSeriesChart({
   );
   const tipFmt = useMemo(() => tooltipDateFormat(interval, undefined, timeZone), [interval]);
 
-  if (!loading && data.length === 0) {
+  if (data.length === 0) {
+    if (loading) {
+      return <Skeleton className={cn('min-h-56 w-full rounded-lg opacity-60', className)} style={{ aspectRatio }} aria-busy="true" aria-label="Loading" />;
+    }
     return <EmptyState title="No data for this period" className={cn('min-h-56', className)} />;
   }
 
@@ -175,7 +179,6 @@ export function TimeSeriesChart({
         data={data}
         aspectRatio={aspectRatio}
         margin={{ top: 16, right: 12, bottom: 32, left: 48 }}
-        status={loading && data.length === 0 ? 'loading' : 'ready'}
         animationDuration={900}
         style={TOUCH_STYLE}
         className="min-h-56"

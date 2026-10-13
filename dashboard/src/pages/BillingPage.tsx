@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangleIcon, CheckCircle2Icon, CreditCardIcon, ExternalLinkIcon, MinusIcon, PlusIcon, ReceiptIcon } from 'lucide-react';
+import { AlertTriangleIcon, CheckCircle2Icon, CreditCardIcon, ExternalLinkIcon, InfoIcon, MinusIcon, PlusIcon, ReceiptIcon } from 'lucide-react';
 import { api, errorMessage } from '@/api/client';
 import type { Billing } from '@/api/types';
 import { EmptyState, ErrorState, PageHeader } from '@/components/common';
@@ -53,6 +53,7 @@ export function BillingPage() {
   const [billing, setBilling] = useState<Billing | undefined>(undefined);
   useEffect(() => setBilling(data), [data]);
   const checkoutDone = params.get('checkout') === 'success';
+  const checkoutCancelled = params.get('checkout') === 'cancel';
 
   // After returning from Stripe Checkout the webhook may lag a few seconds: refresh once more.
   useEffect(() => {
@@ -83,6 +84,13 @@ export function BillingPage() {
           <CheckCircle2Icon className="text-good" aria-hidden="true" />
           <AlertTitle>Thank you!</AlertTitle>
           <AlertDescription>Your payment was received. It can take a few seconds until your plan below is updated.</AlertDescription>
+        </Alert>
+      ) : null}
+      {checkoutCancelled ? (
+        <Alert>
+          <InfoIcon aria-hidden="true" />
+          <AlertTitle>Checkout cancelled</AlertTitle>
+          <AlertDescription>Nothing was charged. You can add paid sites whenever you need them.</AlertDescription>
         </Alert>
       ) : null}
 
@@ -162,6 +170,11 @@ function PlanOverview({ billing }: { billing: Billing }) {
           <Badge variant="outline" className={cn(TONE_CLASS[tone])} data-slot="billing-status">
             {BILLING_STATUS_LABELS[billing.status] ?? billing.status}
           </Badge>
+          {billing.cancelAtPeriodEnd ? (
+            <Badge variant="outline" className="ml-1.5 text-muted-foreground">
+              Ends at period end
+            </Badge>
+          ) : null}
         </CardContent>
       </Card>
       <Card className="gap-3">

@@ -27,6 +27,8 @@ export interface PublicConfig {
   currency: string;
   termsUrl: string | null;
   privacyUrl: string | null;
+  /** max sites per member when billing is disabled */
+  memberSiteLimit?: number;
 }
 
 export interface AppConfig {
@@ -42,6 +44,8 @@ export interface Site {
   createdAt: number;
   /** Hosted mode: beyond the member's allowance -> events are dropped. */
   suspended?: boolean;
+  /** Only sent to admins: owning member, null = operator site. */
+  ownerId?: number | null;
 }
 
 /* ---------- Billing (hosted mode) ---------- */
@@ -59,6 +63,8 @@ export interface Billing {
   paidSites: number;
   status: BillingStatus;
   hasCustomer: boolean;
+  /** the subscription ends at the end of the current period (quantity set to 0 / cancelled in the portal) */
+  cancelAtPeriodEnd?: boolean;
 }
 
 /* ---------- Stats query parameters ---------- */
@@ -201,6 +207,7 @@ export interface SiteLiveResponse {
 export interface LiveOverviewResponse {
   visitors: number;
   countries: LiveCountry[];
+  /** only sites with visitors in the last 5 minutes, sorted desc */
   sites: Array<{ id: string; name: string; visitors: number }>;
 }
 
