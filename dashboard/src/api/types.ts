@@ -1,13 +1,32 @@
-// Types for the PTR Analytics dashboard API (docs/SPEC.md section 4.7).
+// Types for the PTR Analytics dashboard API (docs/SPEC.md sections 4.7 and 6).
 // All string values coming from analytics data are untrusted.
 
-export type Role = 'admin' | 'viewer';
+/**
+ * admin = operator (all sites, user management), viewer = read-only access to all
+ * sites, member = self-service (hosted mode) account that only sees its own sites.
+ */
+export type Role = 'admin' | 'viewer' | 'member';
+export const ROLES: readonly Role[] = ['admin', 'viewer', 'member'];
 
 export interface User {
   id: number;
   email: string;
   role: Role;
   createdAt: number;
+  /** Hosted mode: false until the sign-up verification link was used. */
+  emailVerified?: boolean;
+}
+
+/** `GET /api/public-config` (no auth) — hosted ("cloud") mode switches. */
+export interface PublicConfig {
+  signupEnabled: boolean;
+  billingEnabled: boolean;
+  freeSites: number;
+  pricePerSiteCents: number;
+  /** ISO 4217, lower case (e.g. "eur") */
+  currency: string;
+  termsUrl: string | null;
+  privacyUrl: string | null;
 }
 
 export interface AppConfig {
@@ -21,6 +40,25 @@ export interface Site {
   name: string;
   domains: string[];
   createdAt: number;
+  /** Hosted mode: beyond the member's allowance -> events are dropped. */
+  suspended?: boolean;
+}
+
+/* ---------- Billing (hosted mode) ---------- */
+
+export const BILLING_STATUSES = ['none', 'active', 'trialing', 'past_due', 'canceled', 'unpaid', 'incomplete'] as const;
+export type BillingStatus = (typeof BILLING_STATUSES)[number];
+
+export interface Billing {
+  enabled: boolean;
+  freeSites: number;
+  pricePerSiteCents: number;
+  currency: string;
+  sitesUsed: number;
+  sitesAllowed: number;
+  paidSites: number;
+  status: BillingStatus;
+  hasCustomer: boolean;
 }
 
 /* ---------- Stats query parameters ---------- */
@@ -136,6 +174,36 @@ export interface RealtimeResponse {
   visitors: number;
 }
 
+/* ---------- Live map (globe) ---------- */
+
+export interface LiveCountry {
+  /** ISO 3166-1 alpha-2 or null (unknown) — untrusted */
+  country: string | null;
+  visitors: number;
+}
+
+export interface LiveRecentPageview {
+  ts: number;
+  country: string | null;
+  /** untrusted */
+  path: string;
+}
+
+/** `GET /api/sites/:id/stats/live` (last 5 minutes, never cached) */
+export interface SiteLiveResponse {
+  visitors: number;
+  countries: LiveCountry[];
+  /** newest first, max 50 */
+  recent: LiveRecentPageview[];
+}
+
+/** `GET /api/live` — aggregated over all sites the user can access */
+export interface LiveOverviewResponse {
+  visitors: number;
+  countries: LiveCountry[];
+  sites: Array<{ id: string; name: string; visitors: number }>;
+}
+
 /* ---------- Speed Insights ---------- */
 
 export const VITAL_METRICS = ['LCP', 'INP', 'CLS', 'FCP', 'TTFB'] as const;
@@ -192,4 +260,6 @@ export interface VitalsQuery extends PeriodSelection {
 
 export interface ApiErrorBody {
   error: string;
+  /** machine readable reason, e.g. "upgrade_required" (402) */
+  code?: string;
 }

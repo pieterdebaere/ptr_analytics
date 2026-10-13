@@ -1,4 +1,4 @@
-// Typed client for the PTR Analytics dashboard API (docs/SPEC.md 4.7).
+// Typed client for the PTR Analytics dashboard API (docs/SPEC.md 4.7 and 6).
 // - cookies are sent same-origin only
 // - mutating requests carry `X-PA-Request: 1` (CSRF) and a JSON body
 // - 401 responses trigger the unauthorized handler (redirect to /login?next=…)
@@ -6,14 +6,18 @@ import { loginUrl } from '../lib/safety';
 import { statsParams, vitalsParams } from '../lib/query';
 import type {
   AppConfig,
+  Billing,
   BreakdownDimension,
   BreakdownResponse,
   EventPropsResponse,
+  LiveOverviewResponse,
   OverviewResponse,
   PeriodSelection,
+  PublicConfig,
   RealtimeResponse,
   Role,
   Site,
+  SiteLiveResponse,
   StatsQuery,
   SummaryResponse,
   TimeseriesResponse,
@@ -29,11 +33,19 @@ import type {
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** machine readable error code from the body (e.g. "upgrade_required"), if any */
+  readonly code: string | undefined;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
+}
+
+/** 402 from POST /api/sites: the member reached the site allowance. */
+export function isUpgradeRequired(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 402;
 }
 
 type UnauthorizedHandler = () => void;
@@ -66,6 +78,7 @@ const API_BASE = '/api';
 function friendlyStatus(status: number): string {
   if (status === 401) return 'You are not logged in.';
   if (status === 403) return 'You do not have permission to do this.';
+  if (status === 402) return 'Your plan does not include more sites.';
   if (status === 404) return 'Not found.';
   if (status === 429) return 'Too many requests. Please try again later.';
   if (status >= 500) return 'Server error. Please try again.';
@@ -95,17 +108,20 @@ export async function request<T>(method: Method, path: string, opts: RequestOpti
 
   if (!res.ok) {
     let message = friendlyStatus(res.status);
+    let code: string | undefined;
     try {
       const data: unknown = await res.json();
-      if (data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string') {
-        const e = (data as { error: string }).error;
+      if (data && typeof data === 'object') {
+        const e = (data as { error?: unknown }).error;
         // keep server messages short and plain text
-        if (e.length > 0 && e.length <= 200) message = e;
+        if (typeof e === 'string' && e.length > 0 && e.length <= 200) message = e;
+        const c = (data as { code?: unknown }).code;
+        if (typeof c === 'string' && /^[a-z_]{1,64}$/.test(c)) code = c;
       }
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, code);
   }
 
   if (res.status === 204) return undefined as T;
@@ -130,8 +146,36 @@ export const api = {
   changePassword: (currentPassword: string, newPassword: string) =>
     request<void>('POST', '/auth/password', { body: { currentPassword, newPassword } }),
 
+  /* ---------- hosted mode: sign-up, verification, password reset ---------- */
+  signup: (email: string, password: string) =>
+    request<{ ok: true }>('POST', '/auth/signup', {
+      body: { email, password, acceptTerms: true },
+      redirectOn401: false,
+    }),
+  verifyEmail: (token: string) =>
+    request<{ user: User }>('POST', '/auth/verify', { body: { token }, redirectOn401: false }).then((r) => r.user),
+  forgotPassword: (email: string) =>
+    request<{ ok: true }>('POST', '/auth/forgot', { body: { email }, redirectOn401: false }),
+  resetPassword: (token: string, password: string) =>
+    request<void>('POST', '/auth/reset', { body: { token, password }, redirectOn401: false }),
+  /** Members only: deletes the account, its sites and all data. */
+  deleteAccount: (password: string) => request<void>('DELETE', '/account', { body: { password } }),
+
   /* ---------- config ---------- */
   config: (signal?: AbortSignal) => request<AppConfig>('GET', '/config', { signal }),
+  /** No auth required. */
+  publicConfig: (signal?: AbortSignal) =>
+    request<PublicConfig>('GET', '/public-config', { signal, redirectOn401: false }),
+
+  /* ---------- billing (members, hosted mode) ---------- */
+  billing: (signal?: AbortSignal) => request<Billing>('GET', '/billing', { signal }),
+  /** Returns the Stripe Checkout URL — validate with `safeStripeUrl` before navigating. */
+  billingCheckout: (paidSites: number) =>
+    request<{ url: string }>('POST', '/billing/checkout', { body: { paidSites } }).then((r) => r.url),
+  billingQuantity: (paidSites: number) =>
+    request<{ billing: Billing }>('POST', '/billing/quantity', { body: { paidSites } }).then((r) => r.billing),
+  /** Returns the Stripe customer portal URL — validate with `safeStripeUrl` before navigating. */
+  billingPortal: () => request<{ url: string }>('POST', '/billing/portal').then((r) => r.url),
 
   /* ---------- users (admin) ---------- */
   listUsers: (signal?: AbortSignal) => request<{ users: User[] }>('GET', '/users', { signal }).then((r) => r.users),
@@ -174,6 +218,11 @@ export const api = {
       query: new URLSearchParams({ tz }),
       signal,
     }),
+
+  /* ---------- live map ---------- */
+  siteLive: (id: string, signal?: AbortSignal) =>
+    request<SiteLiveResponse>('GET', `${sitePath(id)}/stats/live`, { signal }),
+  live: (signal?: AbortSignal) => request<LiveOverviewResponse>('GET', '/live', { signal }),
 
   /* ---------- speed insights ---------- */
   vitalsSummary: (id: string, q: VitalsQuery, signal?: AbortSignal) =>

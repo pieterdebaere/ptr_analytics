@@ -1,13 +1,33 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, api, setUnauthorizedHandler } from '../api/client';
-import type { AppConfig, User } from '../api/types';
+import type { AppConfig, PublicConfig, Role, User } from '../api/types';
 import { loginUrl } from '../lib/safety';
+
+/** Hosted mode is off unless /api/public-config says otherwise (self-hosted default). */
+export const DEFAULT_PUBLIC_CONFIG: PublicConfig = {
+  signupEnabled: false,
+  billingEnabled: false,
+  freeSites: 1,
+  pricePerSiteCents: 100,
+  currency: 'eur',
+  termsUrl: null,
+  privacyUrl: null,
+};
+
+/** Routes that work without a session (never redirected to /login on 401). */
+export const PUBLIC_PATHS = ['/login', '/signup', '/verify', '/forgot', '/reset'] as const;
+
+export function isPublicPath(pathname: string): boolean {
+  return (PUBLIC_PATHS as readonly string[]).includes(pathname);
+}
 
 interface AuthState {
   /** undefined = still checking the session */
   user: User | null | undefined;
   config: AppConfig | null;
+  /** hosted-mode switches (defaults until loaded) */
+  publicConfig: PublicConfig;
   /** network/server error while checking the session */
   error: string | null;
   setUser: (u: User | null) => void;
@@ -17,9 +37,27 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
+/** Normalises the untrusted public config (wrong types fall back to the defaults). */
+export function normalizePublicConfig(raw: unknown): PublicConfig {
+  if (!raw || typeof raw !== 'object') return DEFAULT_PUBLIC_CONFIG;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
+  const url = (v: unknown) => (typeof v === 'string' && /^https?:\/\//i.test(v) && v.length <= 2048 ? v : null);
+  return {
+    signupEnabled: r.signupEnabled === true,
+    billingEnabled: r.billingEnabled === true,
+    freeSites: Math.floor(num(r.freeSites, DEFAULT_PUBLIC_CONFIG.freeSites)),
+    pricePerSiteCents: num(r.pricePerSiteCents, DEFAULT_PUBLIC_CONFIG.pricePerSiteCents),
+    currency: typeof r.currency === 'string' && /^[a-z]{3}$/i.test(r.currency) ? r.currency.toLowerCase() : 'eur',
+    termsUrl: url(r.termsUrl),
+    privacyUrl: url(r.privacyUrl),
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [publicConfig, setPublicConfig] = useState<PublicConfig>(DEFAULT_PUBLIC_CONFIG);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const navigate = useNavigate();
@@ -40,7 +78,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => ctrl.abort();
   }, [nonce]);
 
-  // Load the public config once logged in (it requires a session).
+  // Hosted-mode switches (no auth). Older servers answer 404: keep the defaults.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api.publicConfig(ctrl.signal).then(
+      (c) => setPublicConfig(normalizePublicConfig(c)),
+      () => {
+        /* optional */
+      },
+    );
+    return () => ctrl.abort();
+  }, []);
+
+  // Load the instance config once logged in (it requires a session).
   useEffect(() => {
     if (!user) return;
     const ctrl = new AbortController();
@@ -55,7 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setUnauthorizedHandler(() => {
       setUser(null);
-      if (location.pathname !== '/login') navigate(loginUrl(path), { replace: true });
+      if (!isPublicPath(location.pathname)) navigate(loginUrl(path), { replace: true });
     });
     return () => setUnauthorizedHandler(null);
   }, [navigate, path, location.pathname]);
@@ -73,8 +123,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const retry = useCallback(() => setNonce((n) => n + 1), []);
 
   const value = useMemo<AuthState>(
-    () => ({ user, config, error, setUser, logout, retry }),
-    [user, config, error, logout, retry],
+    () => ({ user, config, publicConfig, error, setUser, logout, retry }),
+    [user, config, publicConfig, error, logout, retry],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
@@ -85,6 +135,29 @@ export function useAuth(): AuthState {
   return ctx;
 }
 
+export const ROLE_LABELS: Record<Role, string> = {
+  admin: 'Admin',
+  viewer: 'Viewer',
+  member: 'Member',
+};
+
+export function roleLabel(role: unknown): string {
+  return role === 'admin' || role === 'viewer' || role === 'member' ? ROLE_LABELS[role] : 'User';
+}
+
+/** Admins manage users and every site. */
 export function useIsAdmin(): boolean {
   return useAuth().user?.role === 'admin';
+}
+
+/** Admins and members (their own sites) can add, edit and delete sites; viewers are read-only. */
+export function useCanManageSites(): boolean {
+  const role = useAuth().user?.role;
+  return role === 'admin' || role === 'member';
+}
+
+/** Members see billing when the instance charges per site. */
+export function useShowBilling(): boolean {
+  const { user, publicConfig } = useAuth();
+  return user?.role === 'member' && publicConfig.billingEnabled;
 }

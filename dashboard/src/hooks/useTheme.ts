@@ -1,69 +1,99 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
 
-export type Theme = 'light' | 'dark';
-const STORAGE_KEY = 'pa_theme';
+export type ThemePreference = 'light' | 'dark' | 'system';
+export type ResolvedTheme = 'light' | 'dark';
 
-function readStored(): Theme | null {
+/** The only thing the dashboard keeps in localStorage. */
+export const THEME_STORAGE_KEY = 'pa_theme';
+
+export function isThemePreference(v: unknown): v is ThemePreference {
+  return v === 'light' || v === 'dark' || v === 'system';
+}
+
+export function readThemePreference(): ThemePreference {
   try {
-    const v = window.localStorage.getItem(STORAGE_KEY);
-    return v === 'light' || v === 'dark' ? v : null;
+    const v = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return v === 'light' || v === 'dark' ? v : 'system';
   } catch {
-    return null;
+    return 'system';
   }
 }
 
-function systemTheme(): Theme {
+function systemPrefersDark(): boolean {
   try {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
   } catch {
-    return 'light';
+    return false;
   }
 }
 
-/** Applies a stored theme preference as early as possible (called from main.tsx). */
+export function resolveTheme(pref: ThemePreference, systemDark: boolean): ResolvedTheme {
+  if (pref === 'system') return systemDark ? 'dark' : 'light';
+  return pref;
+}
+
+/** Sets / removes the `dark` class on <html> (Tailwind `dark:` variant + theme tokens). */
+export function applyTheme(theme: ResolvedTheme): void {
+  const root = document.documentElement;
+  root.classList.toggle('dark', theme === 'dark');
+}
+
+/** Applies the stored preference as early as possible (called from main.tsx, no inline script). */
 export function applyStoredTheme(): void {
-  const stored = readStored();
-  if (stored) document.documentElement.dataset.theme = stored;
+  applyTheme(resolveTheme(readThemePreference(), systemPrefersDark()));
 }
 
-/**
- * Theme follows prefers-color-scheme unless the user picked one manually
- * (saved in localStorage — the only thing the dashboard stores there).
- */
-export function useTheme(): { theme: Theme; toggle: () => void } {
-  const [stored, setStored] = useState<Theme | null>(readStored);
-  const [system, setSystem] = useState<Theme>(systemTheme);
+/* A tiny store so every toggle on the page stays in sync. */
+const listeners = new Set<() => void>();
+let preference: ThemePreference | null = null;
 
+function getPreference(): ThemePreference {
+  if (preference === null) preference = readThemePreference();
+  return preference;
+}
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb);
+  let mq: MediaQueryList | null = null;
+  try {
+    mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener?.('change', cb);
+  } catch {
+    mq = null;
+  }
+  return () => {
+    listeners.delete(cb);
+    mq?.removeEventListener?.('change', cb);
+  };
+}
+
+export function setThemePreference(next: ThemePreference): void {
+  preference = next;
+  try {
+    if (next === 'system') window.localStorage.removeItem(THEME_STORAGE_KEY);
+    else window.localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch {
+    /* storage unavailable: still applies for this page view */
+  }
+  applyTheme(resolveTheme(next, systemPrefersDark()));
+  for (const l of listeners) l();
+}
+
+/** Theme preference (light / dark / system) and the resolved theme. */
+export function useTheme(): {
+  preference: ThemePreference;
+  resolved: ResolvedTheme;
+  setPreference: (p: ThemePreference) => void;
+} {
+  const pref = useSyncExternalStore(subscribe, getPreference, () => 'system' as ThemePreference);
+  const systemDark = useSyncExternalStore(subscribe, systemPrefersDark, () => false);
+  const resolved = resolveTheme(pref, systemDark);
+
+  // Follow OS changes while on "system".
   useEffect(() => {
-    let mq: MediaQueryList;
-    try {
-      mq = window.matchMedia('(prefers-color-scheme: dark)');
-    } catch {
-      return;
-    }
-    const onChange = () => setSystem(mq.matches ? 'dark' : 'light');
-    mq.addEventListener?.('change', onChange);
-    return () => mq.removeEventListener?.('change', onChange);
-  }, []);
+    applyTheme(resolved);
+  }, [resolved]);
 
-  useEffect(() => {
-    const root = document.documentElement;
-    if (stored) root.dataset.theme = stored;
-    else delete root.dataset.theme;
-  }, [stored]);
-
-  const theme = stored ?? system;
-  const toggle = useCallback(() => {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark';
-    try {
-      // Going back to the system theme clears the preference.
-      if (next === systemTheme()) window.localStorage.removeItem(STORAGE_KEY);
-      else window.localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      /* storage unavailable */
-    }
-    setStored(next === systemTheme() ? null : next);
-  }, [theme]);
-
-  return { theme, toggle };
+  const setPreference = useCallback((p: ThemePreference) => setThemePreference(p), []);
+  return { preference: pref, resolved, setPreference };
 }

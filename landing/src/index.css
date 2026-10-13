@@ -1,2 +1,272 @@
 @import "../../dashboard/src/index.css";
 @source "../../dashboard/src/components";
+
+/* ------------------------------------------------------------------ */
+/* Landing page design tokens (on top of the shared shadcn/Bklit theme) */
+/* ------------------------------------------------------------------ */
+
+@theme inline {
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-poor: var(--poor);
+  --color-surface: var(--surface);
+  --color-legend-foreground: var(--legend-foreground);
+  --color-legend-muted-foreground: var(--legend-muted-foreground);
+  --color-legend-track: var(--legend-track);
+  --color-legend-muted: var(--legend-muted);
+  /* The shared dashboard/src/index.css maps these to `var(----chart-…)` (four dashes, an
+     upstream shadcn-CLI artefact) which never resolves; re-map them for the landing page. */
+  --color-chart-background: var(--chart-background);
+  --color-chart-foreground: var(--chart-foreground);
+  --color-chart-foreground-muted: var(--chart-foreground-muted);
+  --color-chart-crosshair: var(--chart-crosshair);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-label: var(--chart-label);
+  --color-chart-tooltip-background: var(--chart-tooltip-background);
+  --color-chart-tooltip-foreground: var(--chart-tooltip-foreground);
+  --color-chart-tooltip-muted: var(--chart-tooltip-muted);
+  --color-chart-marker-background: var(--chart-marker-background);
+  --color-chart-marker-border: var(--chart-marker-border);
+  --color-chart-marker-foreground: var(--chart-marker-foreground);
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+:root {
+  color-scheme: light;
+  --brand: oklch(0.55 0.2 258);
+  --brand-foreground: oklch(0.985 0 0);
+  --good: oklch(0.53 0.15 150);
+  --warn: oklch(0.58 0.15 55);
+  --poor: oklch(0.55 0.21 25);
+  --surface: oklch(0.985 0 0);
+  --grid-line: oklch(0.145 0 0 / 6%);
+  --glow-1: oklch(0.7 0.16 255 / 22%);
+  --glow-2: oklch(0.75 0.14 190 / 16%);
+
+  /* Bklit chart tokens used by the demos */
+  --chart-line-primary: var(--brand);
+  --chart-line-secondary: oklch(0.7 0 0);
+  --chart-crosshair: oklch(0.55 0.02 260);
+  --chart-indicator-color: var(--brand);
+  --chart-indicator-secondary-color: oklch(0.7 0 0);
+  --chart-marker-badge-background: var(--brand);
+  --chart-marker-badge-foreground: oklch(0.985 0 0);
+  --chart-segment-background: oklch(0.55 0.2 258 / 8%);
+  --chart-segment-line: oklch(0.55 0.2 258 / 40%);
+  --legend-foreground: var(--foreground);
+  --legend-muted-foreground: var(--muted-foreground);
+  --legend-track: var(--muted);
+  --legend-muted: color-mix(in oklch, var(--foreground) 6%, transparent);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.13 0 0);
+  --card: oklch(0.165 0 0);
+  --popover: oklch(0.18 0 0);
+  --muted: oklch(0.22 0 0);
+  --secondary: oklch(0.22 0 0);
+  --accent: oklch(0.22 0 0);
+  --muted-foreground: oklch(0.72 0 0);
+  --surface: oklch(0.155 0 0);
+  --brand: oklch(0.74 0.14 238);
+  --brand-foreground: oklch(0.16 0.02 250);
+  --good: oklch(0.76 0.16 152);
+  --warn: oklch(0.82 0.15 78);
+  --poor: oklch(0.7 0.19 25);
+  --grid-line: oklch(1 0 0 / 5.5%);
+  --glow-1: oklch(0.62 0.17 255 / 26%);
+  --glow-2: oklch(0.68 0.13 195 / 14%);
+
+  --chart-background: oklch(0.165 0 0);
+  --chart-line-primary: var(--brand);
+  --chart-line-secondary: oklch(0.5 0 0);
+  --chart-crosshair: oklch(0.6 0.02 260);
+  --chart-grid: oklch(1 0 0 / 7%);
+  --chart-indicator-color: var(--brand);
+  --chart-marker-badge-background: var(--brand);
+  --chart-marker-badge-foreground: oklch(0.16 0.02 250);
+  --chart-segment-background: oklch(0.74 0.14 238 / 10%);
+  --chart-segment-line: oklch(0.74 0.14 238 / 45%);
+}
+
+@layer base {
+  html {
+    background-color: var(--background);
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+  body {
+    min-height: 100dvh;
+    overflow-x: clip;
+  }
+  /* Anchor targets clear the sticky header. */
+  section[id] {
+    scroll-margin-top: 4.5rem;
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--brand) 30%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Decorative backgrounds                                               */
+/* ------------------------------------------------------------------ */
+
+@utility bg-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: center top;
+}
+
+@utility mask-fade-radial {
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 30%, transparent 100%);
+}
+
+@utility mask-fade-y {
+  mask-image: linear-gradient(to bottom, transparent, #000 18%, #000 82%, transparent);
+}
+
+@utility bg-hero-glow {
+  background:
+    radial-gradient(40% 50% at 70% 30%, var(--glow-1), transparent 70%),
+    radial-gradient(35% 45% at 20% 10%, var(--glow-2), transparent 70%);
+}
+
+@utility bg-section-glow {
+  background: radial-gradient(50% 60% at 50% 0%, var(--glow-1), transparent 70%);
+}
+
+@utility text-gradient {
+  background-image: linear-gradient(180deg, var(--foreground) 30%, color-mix(in oklch, var(--foreground) 55%, transparent));
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+@utility card-sheen {
+  background-image: linear-gradient(180deg, color-mix(in oklch, var(--foreground) 3%, transparent), transparent 40%);
+}
+
+/* ------------------------------------------------------------------ */
+/* FAQ (<details>)                                                      */
+/* ------------------------------------------------------------------ */
+
+.faq-item > summary {
+  list-style: none;
+}
+.faq-item > summary::-webkit-details-marker {
+  display: none;
+}
+.faq-item[open] .faq-chevron {
+  transform: rotate(180deg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Range slider (price calculator)                                      */
+/* The filled part is driven by the --fill custom property (0–100%).    */
+/* ------------------------------------------------------------------ */
+
+.range {
+  --fill: 0%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 1.5rem;
+  background: transparent;
+  cursor: pointer;
+}
+.range:focus-visible {
+  outline: none;
+}
+.range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--brand) var(--fill), var(--muted) var(--fill));
+}
+.range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.range::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--brand);
+}
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--background);
+  border: 2px solid var(--brand);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 25%);
+  transition: transform 120ms ease;
+}
+.range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--background);
+  border: 2px solid var(--brand);
+}
+.range:active::-webkit-slider-thumb {
+  transform: scale(1.1);
+}
+.range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--brand) 35%, transparent);
+}
+.range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--brand) 35%, transparent);
+}
+
+/* Hide number input spinners (we render our own −/+ buttons). */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Live "pulse" dot */
+@keyframes live-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+.live-ping {
+  animation: live-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-ping {
+    animation: none;
+  }
+}

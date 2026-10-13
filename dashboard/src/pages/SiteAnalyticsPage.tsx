@@ -1,25 +1,31 @@
-import { useMemo, useState } from 'react';
-import { api } from '../api/client';
-import type { FilterKey, SummaryResponse, TimeseriesResponse } from '../api/types';
-import {
-  BreakdownPanel,
-  EventDetailModal,
-  FilterChips,
-  LiveIndicator,
-  type PanelTab,
-} from '../components/analytics';
-import { AreaChart, type ChartPoint } from '../components/charts';
-import { DownloadIcon } from '../components/Icons';
-import { PeriodSelector } from '../components/PeriodSelector';
-import { ChangeBadge, EmptyState, ErrorState, Skeleton } from '../components/ui';
-import { useApi } from '../hooks/useApi';
-import { useStatsQuery } from '../hooks/useStatsQuery';
-import { linkHostname } from '../lib/dimensions';
-import { formatCompact, formatNumber, formatPercent, percentChange } from '../lib/format';
-import { exportUrl } from '../lib/query';
+import { lazy, Suspense, useMemo, useState } from 'react';
+import { DownloadIcon, MapIcon } from 'lucide-react';
+import { api } from '@/api/client';
+import type { FilterKey, SummaryResponse, TimeseriesResponse } from '@/api/types';
+import { BreakdownPanel, EventDetailDialog, FilterChips, LiveIndicator, type PanelTab } from '@/components/analytics';
+import { ChangeBadge, EmptyState, ErrorState } from '@/components/common';
+import { PeriodSelector } from '@/components/PeriodSelector';
+import { TimeSeriesChart, type SeriesPoint } from '@/components/stats-charts';
+import { buttonVariants } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { useApi } from '@/hooks/useApi';
+import { useStatsQuery } from '@/hooks/useStatsQuery';
+import { linkHostname } from '@/lib/dimensions';
+import { formatCompact, formatNumber, formatPercent, percentChange } from '@/lib/format';
+import { exportUrl } from '@/lib/query';
+import { cn } from '@/lib/utils';
 import { useSite } from './SiteLayout';
 
+const CountryMap = lazy(() => import('@/components/CountryMap'));
+
 type Kpi = 'visitors' | 'pageviews' | 'bounceRate';
+
+const KPI_LABELS: Record<Kpi, string> = {
+  visitors: 'Visitors',
+  pageviews: 'Page Views',
+  bounceRate: 'Bounce Rate',
+};
 
 const PAGES_TABS: PanelTab[] = [
   { key: 'path', label: 'Pages' },
@@ -53,42 +59,51 @@ export function SiteAnalyticsPage() {
   const pageHost = linkHostname(filters.hostname, site.domains);
 
   const onFilter = (key: FilterKey, value: string) => setFilter(key, value);
+  const panelProps = { siteId: site.id, query, pageHost, siteDomains: site.domains, onFilter };
 
   return (
-    <div className="analytics">
-      <div className="toolbar">
-        <div className="toolbar-left">
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <PeriodSelector value={period} onChange={setPeriod} />
-          <LiveIndicator siteId={site.id} tz={tz} />
+          <LiveIndicator siteId={site.id} tz={tz} href={`/sites/${encodeURIComponent(site.id)}/live`} />
         </div>
-        <a className="btn" href={exportUrl(site.id, query)} download>
-          <DownloadIcon />
+        <a className={cn(buttonVariants({ variant: 'outline' }), 'bg-background')} href={exportUrl(site.id, query)} download>
+          <DownloadIcon aria-hidden="true" />
           <span>Export CSV</span>
         </a>
       </div>
 
       <FilterChips filters={filters} onRemove={(k) => setFilter(k, null)} onClear={clearFilters} />
 
-      <section className="card main-chart-card">
+      <Card className="gap-0 py-0">
         <KpiTabs summary={summary.data} loading={summary.loading} error={summary.error} onRetry={summary.reload} kpi={kpi} onSelect={setKpi} />
-        <div className="main-chart">
+        <div className="px-2 pt-4 pb-2 sm:px-4">
           <MainChart data={series.data} loading={series.loading} error={series.error} onRetry={series.reload} kpi={kpi} />
         </div>
-      </section>
+      </Card>
 
-      <div className="panels">
-        <BreakdownPanel siteId={site.id} query={query} tabs={PAGES_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
-        <BreakdownPanel siteId={site.id} query={query} tabs={REFERRER_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
-        <BreakdownPanel siteId={site.id} query={query} tabs={COUNTRY_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
-        <BreakdownPanel siteId={site.id} query={query} tabs={DEVICE_TABS} pageHost={pageHost} siteDomains={site.domains} onFilter={onFilter} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <BreakdownPanel {...panelProps} tabs={PAGES_TABS} />
+        <BreakdownPanel {...panelProps} tabs={REFERRER_TABS} />
         <BreakdownPanel
-          siteId={site.id}
-          query={query}
+          {...panelProps}
+          tabs={COUNTRY_TABS}
+          extraViews={{
+            icon: <MapIcon aria-hidden="true" />,
+            label: 'Map',
+            render: (rows) => (
+              <Suspense fallback={<Skeleton className="mx-2 mt-2 h-64" />}>
+                <CountryMap rows={rows} />
+              </Suspense>
+            ),
+          }}
+        />
+        <BreakdownPanel {...panelProps} tabs={DEVICE_TABS} />
+        <BreakdownPanel
+          {...panelProps}
           tabs={EVENT_TABS}
-          pageHost={pageHost}
-          siteDomains={site.domains}
           countLabel="Events"
-          onFilter={onFilter}
           onSelectRow={(_k, row) => {
             if (row.value !== null) setEventDetail(row.value);
           }}
@@ -96,7 +111,7 @@ export function SiteAnalyticsPage() {
       </div>
 
       {eventDetail !== null ? (
-        <EventDetailModal
+        <EventDetailDialog
           siteId={site.id}
           query={query}
           event={eventDetail}
@@ -126,54 +141,54 @@ function KpiTabs({
   kpi: Kpi;
   onSelect: (k: Kpi) => void;
 }) {
-  if (error) return <ErrorState message={error} onRetry={onRetry} />;
-  const items: { key: Kpi; label: string; value: string; title?: string; change: number | null; lowerIsBetter?: boolean }[] = summary
-    ? [
-        {
-          key: 'visitors',
-          label: 'Visitors',
+  if (error) return <ErrorState message={error} onRetry={onRetry} className="border-b" />;
+  const values: Record<Kpi, { value: string; title?: string; change: number | null; lowerIsBetter?: boolean }> | null = summary
+    ? {
+        visitors: {
           value: formatCompact(summary.visitors),
           title: formatNumber(summary.visitors),
           change: percentChange(summary.visitors, summary.previous?.visitors),
         },
-        {
-          key: 'pageviews',
-          label: 'Page Views',
+        pageviews: {
           value: formatCompact(summary.pageviews),
           title: formatNumber(summary.pageviews),
           change: percentChange(summary.pageviews, summary.previous?.pageviews),
         },
-        {
-          key: 'bounceRate',
-          label: 'Bounce Rate',
+        bounceRate: {
           value: formatPercent(summary.bounceRate),
           change: percentChange(summary.bounceRate, summary.previous?.bounceRate),
           lowerIsBetter: true,
         },
-      ]
-    : [];
+      }
+    : null;
   return (
-    <div className="kpis" role="tablist" aria-label="Metric">
-      {(['visitors', 'pageviews', 'bounceRate'] as const).map((key, i) => {
-        const it = items[i];
-        const label = key === 'visitors' ? 'Visitors' : key === 'pageviews' ? 'Page Views' : 'Bounce Rate';
+    <div className="grid grid-cols-3 border-b" role="tablist" aria-label="Metric">
+      {(['visitors', 'pageviews', 'bounceRate'] as const).map((key) => {
+        const it = values?.[key];
+        const active = kpi === key;
         return (
           <button
             key={key}
             type="button"
             role="tab"
-            aria-selected={kpi === key}
-            className={`kpi${kpi === key ? ' kpi-active' : ''}`}
+            aria-selected={active}
+            className={cn(
+              'relative flex min-w-0 flex-col items-start gap-1 border-r px-3 py-3 text-left outline-none transition-colors last:border-r-0 hover:bg-muted/40 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:ring-inset sm:px-5 sm:py-4',
+              'after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-chart-1 after:opacity-0 after:transition-opacity',
+              active && 'bg-muted/30 after:opacity-100',
+            )}
             onClick={() => onSelect(key)}
           >
-            <span className="kpi-label">{label}</span>
+            <span className={cn('truncate text-xs font-medium text-muted-foreground sm:text-sm', active && 'text-foreground')}>{KPI_LABELS[key]}</span>
             {it && !(loading && !summary) ? (
-              <span className="kpi-value">
-                <span title={it.title}>{it.value}</span>
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-xl font-semibold tracking-tight tabular-nums sm:text-3xl" title={it.title}>
+                  {it.value}
+                </span>
                 <ChangeBadge change={it.change} lowerIsBetter={it.lowerIsBetter} />
               </span>
             ) : (
-              <Skeleton className="skeleton-kpi" />
+              <Skeleton className="h-7 w-20 sm:h-9" />
             )}
           </button>
         );
@@ -195,7 +210,7 @@ function MainChart({
   onRetry: () => void;
   kpi: Kpi;
 }) {
-  const points = useMemo<ChartPoint[]>(() => {
+  const points = useMemo<SeriesPoint[]>(() => {
     if (!data) return [];
     return data.points.map((p) => ({
       t: p.t,
@@ -203,27 +218,25 @@ function MainChart({
     }));
   }, [data, kpi]);
 
-  if (error) return <ErrorState message={error} onRetry={onRetry} />;
-  if (!data) return <Skeleton className="skeleton-chart" />;
-  if (kpi === 'bounceRate' && !data.points.some((p) => p.bounceRate !== undefined)) {
+  if (error) return <ErrorState message={error} onRetry={onRetry} className="min-h-56" />;
+  if (data && kpi === 'bounceRate' && !data.points.some((p) => p.bounceRate !== undefined)) {
     return (
-      <EmptyState title="Bounce rate over time is not available">
+      <EmptyState title="Bounce rate over time is not available" className="min-h-56">
         <p>The total bounce rate for the period is shown above.</p>
       </EmptyState>
     );
   }
   const label = kpi === 'visitors' ? 'Visitors' : kpi === 'pageviews' ? 'Page views' : 'Bounce rate';
   return (
-    <div className={loading ? 'is-loading' : undefined}>
-      <AreaChart
-        points={points}
-        interval={data.interval}
-        label={`${label} over time`}
-        valueLabel={label}
-        integer={kpi !== 'bounceRate'}
-        formatValue={kpi === 'bounceRate' ? (v) => formatPercent(v) : (v) => formatNumber(v)}
-        formatTick={kpi === 'bounceRate' ? (v) => formatPercent(v) : (v) => formatCompact(v)}
-      />
-    </div>
+    <TimeSeriesChart
+      key={kpi}
+      points={points}
+      interval={data?.interval ?? 'day'}
+      loading={loading || !data}
+      label={`${label} over time`}
+      valueLabel={label}
+      formatValue={kpi === 'bounceRate' ? (v) => formatPercent(v) : (v) => formatNumber(v)}
+      formatTick={kpi === 'bounceRate' ? (v) => formatPercent(v) : (v) => formatCompact(v)}
+    />
   );
 }
