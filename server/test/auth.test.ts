@@ -98,12 +98,22 @@ describe('login / logout / me', () => {
     expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '192.0.2.51')).statusCode).toBe(429);
     // different email from a fresh IP is fine
     expect((await loginReq('other@example.com', 'whatever whatever', '192.0.2.52')).statusCode).toBe(401);
-    // per-IP: 10 failures for different emails from one IP
-    for (let i = 0; i < 10; i++) await loginReq(`u${i}@example.com`, 'wrong password!!', '192.0.2.60');
-    expect((await loginReq('fresh@example.com', 'wrong password!!', '192.0.2.60')).statusCode).toBe(429);
+    // per-IP: 30 attempts (any email) from one IP
+    for (let i = 0; i < 29; i++) await loginReq(`u${i}@example.com`, 'wrong password!!', '192.0.2.60');
+    expect((await loginReq('fresh@example.com', 'wrong password!!', '192.0.2.60')).statusCode).toBe(401);
+    expect((await loginReq('fresh2@example.com', 'wrong password!!', '192.0.2.60')).statusCode).toBe(429);
     // window expires after 15 minutes
     t.clock.t += 15 * 60_000 + 1;
     expect((await loginReq(ADMIN_EMAIL, ADMIN_PASSWORD, '192.0.2.50')).statusCode).toBe(200);
+  });
+
+  it('counts concurrent login attempts before verifying (no race past the limit)', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 25 }, (_, i) => loginReq(ADMIN_EMAIL, `wrong password ${i}`, '192.0.2.70')),
+    );
+    const codes = results.map((r) => r.statusCode);
+    expect(codes.filter((c) => c === 401)).toHaveLength(10);
+    expect(codes.filter((c) => c === 429)).toHaveLength(15);
   });
 
   it('logs out and invalidates the session', async () => {
@@ -151,6 +161,15 @@ describe('CSRF', () => {
     expect(login403.statusCode).toBe(403);
     const del = await t.app.inject({ method: 'DELETE', url: '/api/users/2', headers: { cookie, 'x-pa-request': '0' } });
     expect(del.statusCode).toBe(403);
+  });
+
+  it('cannot be bypassed with encoded or non-canonical API paths', async () => {
+    const cookie = await login(t.app);
+    for (const url of ['/%61pi/sites', '/api%2Fsites', '/API/sites', '//api/sites', '/api/sites/', '/api/./sites']) {
+      const res = await t.app.inject({ method: 'POST', url, headers: { cookie }, payload: { name: 'x', domains: ['x.com'] } });
+      expect([403, 404]).toContain(res.statusCode);
+    }
+    expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM sites').get()).toEqual({ n: 0 });
   });
 
   it('checks Origin against the request host when PUBLIC_URL is unset', async () => {

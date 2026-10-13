@@ -1,4 +1,5 @@
 import { randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
+import { HttpError } from './errors.js';
 
 const N = 2 ** 15;
 const R = 8;
@@ -6,10 +7,36 @@ const P = 1;
 const KEYLEN = 64;
 const SALT_BYTES = 16;
 
+// scrypt is deliberately expensive (~32 MB, tens of ms). Cap how many run at once and
+// how many may wait, so a burst of login requests cannot exhaust memory or the libuv pool.
+const MAX_CONCURRENT = 4;
+const MAX_QUEUED = 32;
+let active = 0;
+const waiting: Array<() => void> = [];
+
+async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (active >= MAX_CONCURRENT) {
+    if (waiting.length >= MAX_QUEUED) throw new HttpError(503, 'server busy, try again later');
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  } else {
+    active++;
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = waiting.shift();
+    if (next) next(); // hand the slot over directly
+    else active--;
+  }
+}
+
 function scryptAsync(password: string, salt: Buffer, keylen: number, opts: ScryptOptions): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    scrypt(password, salt, keylen, opts, (err, key) => (err ? reject(err) : resolve(key)));
-  });
+  return withSlot(
+    () =>
+      new Promise<Buffer>((resolve, reject) => {
+        scrypt(password, salt, keylen, opts, (err, key) => (err ? reject(err) : resolve(key)));
+      }),
+  );
 }
 
 function maxmem(n: number, r: number, p: number): number {

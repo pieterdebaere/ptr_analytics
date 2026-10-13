@@ -34,9 +34,13 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
       throw badRequest('email and password are required');
     }
     const email = emailRaw.trim().toLowerCase();
+    // Count the attempt *before* the (async) password check: checking first and counting
+    // afterwards lets a burst of concurrent requests slip past the limit.
     const ipKey = request.ip;
-    if (ctx.limits.loginIp.isLimited(ipKey) || ctx.limits.loginEmail.isLimited(email)) {
-      throw new HttpError(429, 'too many failed login attempts, try again later');
+    const ipOk = ctx.limits.loginIp.hit(ipKey);
+    const emailOk = ctx.limits.loginEmail.hit(email);
+    if (!ipOk || !emailOk) {
+      throw new HttpError(429, 'too many login attempts, try again later');
     }
 
     const found = ctx.users.byEmailWithHash(email);
@@ -45,8 +49,6 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     else await dummyVerify(password);
 
     if (!found || !ok) {
-      ctx.limits.loginIp.hit(ipKey);
-      ctx.limits.loginEmail.hit(email);
       throw new HttpError(401, 'invalid email or password');
     }
     ctx.limits.loginEmail.reset(email);
@@ -74,15 +76,16 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
       throw badRequest(`new password must be ${PASSWORD_MIN}..${PASSWORD_MAX} characters`);
     }
     const ipKey = request.ip;
-    if (ctx.limits.loginIp.isLimited(ipKey) || ctx.limits.loginEmail.isLimited(user.email)) {
+    const ipOk = ctx.limits.loginIp.hit(ipKey);
+    const emailOk = ctx.limits.loginEmail.hit(user.email);
+    if (!ipOk || !emailOk) {
       throw new HttpError(429, 'too many failed attempts, try again later');
     }
     const hash = ctx.users.passwordHash(user.id);
     if (hash === null || !(await verifyPassword(currentPassword, hash))) {
-      ctx.limits.loginIp.hit(ipKey);
-      ctx.limits.loginEmail.hit(user.email);
       throw badRequest('current password is incorrect');
     }
+    ctx.limits.loginEmail.reset(user.email);
     ctx.users.setPasswordHash(user.id, await hashPassword(newPassword));
     ctx.authSessions.deleteForUser(user.id, request.authTokenHash ?? undefined);
     return reply.code(204).send();
