@@ -1,23 +1,31 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ENDPOINT, SITE, bundle, load, setVisibility } from './helpers';
 
+/** The page URL (helpers default) and what is sent for it: origin + path + utm_* only. */
 const URL0 = 'https://example.com/blog/post?utm_source=news&secret=1#top';
+const SENT0 = 'https://example.com/blog/post?utm_source=news';
 
 describe('initial pageview', () => {
-  it('sends one pageview with the documented payload shape via sendBeacon text/plain', () => {
-    const { sent, fetch } = load({ referrer: 'https://www.google.com/search?q=x' });
+  it('sends one pageview with the documented payload shape via fetch keepalive, text/plain, no credentials', () => {
+    const { sent, beacon } = load({ referrer: 'https://www.google.com/search?q=x' });
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.transport).toBe('beacon');
+    expect(sent[0]!.transport).toBe('fetch');
     expect(sent[0]!.url).toBe(ENDPOINT);
-    expect(sent[0]!.contentType).toBe('text/plain');
+    expect(sent[0]!.init).toEqual({
+      method: 'POST',
+      body: expect.any(String),
+      keepalive: true,
+      credentials: 'omit',
+      headers: { 'Content-Type': 'text/plain' }, // CORS-simple request: no preflight
+    });
     expect(sent[0]!.body).toEqual({
       site: SITE,
       type: 'pageview',
-      url: URL0,
+      url: SENT0,
       width: expect.any(Number),
-      referrer: 'https://www.google.com/search?q=x',
+      referrer: 'https://www.google.com/',
     });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(beacon).not.toHaveBeenCalled();
   });
 
   it('omits referrer when there is none', () => {
@@ -25,23 +33,31 @@ describe('initial pageview', () => {
     expect(bodies()[0]).not.toHaveProperty('referrer');
   });
 
-  it('falls back to fetch keepalive without credentials when sendBeacon is missing', () => {
-    const { sent, fetch } = load({ before: (w) => (w.navigator.sendBeacon = undefined) });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(sent[0]!.url).toBe(ENDPOINT);
-    expect(sent[0]!.init).toMatchObject({
-      method: 'POST',
-      keepalive: true,
-      credentials: 'omit',
-      headers: { 'Content-Type': 'text/plain' },
-    });
-    expect(sent[0]!.body.type).toBe('pageview');
+  it.each([
+    ['fetch is missing', (w: { fetch?: unknown }) => (w.fetch = undefined)],
+    ['Request is missing', (w: { Request?: unknown }) => (w.Request = undefined)],
+    ['fetch keepalive is unsupported', (w: { Request: unknown }) => (w.Request = class {})],
+    [
+      'fetch throws synchronously',
+      (w: { fetch: unknown }) =>
+        (w.fetch = () => {
+          throw new TypeError('nope');
+        }),
+    ],
+  ])('falls back to sendBeacon text/plain when %s', (_, before) => {
+    const { sent, beacon } = load({ before });
+    expect(beacon).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!).toMatchObject({ transport: 'beacon', url: ENDPOINT, contentType: 'text/plain' });
+    expect(sent[0]!.body).toMatchObject({ type: 'pageview', url: SENT0 });
   });
 
-  it('falls back to fetch when sendBeacon refuses the payload', () => {
-    const { fetch, beacon } = load({ before: (w) => (w.navigator.sendBeacon = vi.fn(() => false)) });
-    expect(beacon).not.toHaveBeenCalled(); // replaced by the refusing stub
+  it('swallows a rejected fetch without retrying via sendBeacon', async () => {
+    const fetch = vi.fn(() => Promise.reject(new TypeError('network')));
+    const { beacon } = load({ before: (w) => (w.fetch = fetch) });
+    await new Promise((r) => setTimeout(r, 0));
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(beacon).not.toHaveBeenCalled();
   });
 
   it('honours data-endpoint', () => {
@@ -62,6 +78,31 @@ describe('initial pageview', () => {
     expect(sent[0]!.body.site).toBe(SITE);
   });
 
+  it('without currentScript, ignores [data-site] tags that do not load /script.js', () => {
+    const { sent } = load({
+      before: (w) => {
+        // Inert tags injected before the real one (e.g. via HTML injection) must not be used.
+        const head = w.document.head;
+        for (const src of [null, 'https://evil.example/x.js', 'https://evil.example/script.js.map']) {
+          const s = w.document.createElement('script');
+          s.type = 'text/inert';
+          s.setAttribute('data-site', 'zzzzzzzzzzzz');
+          s.setAttribute('data-endpoint', 'https://evil.example/collect');
+          if (src) s.setAttribute('src', src);
+          head.insertBefore(s, head.firstChild);
+        }
+      },
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toBe(ENDPOINT);
+    expect(sent[0]!.body.site).toBe(SITE);
+  });
+
+  it('accepts a relative /script.js src when proxied through the own domain', () => {
+    const { sent } = load({ attrs: { src: '/script.js' } });
+    expect(sent[0]!.url).toBe('https://example.com/api/event');
+  });
+
   it('does nothing without data-site but still exposes a no-op API', () => {
     const { win, sent } = load({ attrs: { 'data-site': '' } });
     expect(() => win.pa.track('x')).not.toThrow();
@@ -78,7 +119,7 @@ describe('SPA navigation', () => {
     win.history.replaceState({}, '', '/pricing?plan=pro'); // same pathname: ignored
     win.history.pushState({}, '', '/about');
     const urls = bodies().map((b) => b.url);
-    expect(urls).toEqual([URL0, 'https://example.com/pricing', 'https://example.com/about']);
+    expect(urls).toEqual([SENT0, 'https://example.com/pricing', 'https://example.com/about']);
     // Referrer only on the first pageview of the page load.
     expect(bodies()[0].referrer).toBe('https://google.com/');
     expect(bodies()[1]).not.toHaveProperty('referrer');
@@ -88,10 +129,10 @@ describe('SPA navigation', () => {
       win.history.back();
     });
     expect(bodies().map((b) => b.url)).toEqual([
-      URL0,
+      SENT0,
       'https://example.com/pricing',
       'https://example.com/about',
-      'https://example.com/pricing?plan=pro',
+      'https://example.com/pricing', // query string (non-utm) dropped
     ]);
   });
 
@@ -237,12 +278,12 @@ describe('custom events', () => {
     expect(bodies()[1]).toEqual({
       site: SITE,
       type: 'event',
-      url: URL0,
+      url: SENT0,
       width: expect.any(Number),
       name: 'Signup',
       props: { plan: 'pro', seats: 3 },
     });
-    expect(bodies()[2]).toEqual({ site: SITE, type: 'event', url: URL0, width: expect.any(Number), name: 'Plain' });
+    expect(bodies()[2]).toEqual({ site: SITE, type: 'event', url: SENT0, width: expect.any(Number), name: 'Plain' });
     expect(bodies()[1]).not.toHaveProperty('referrer');
   });
 
@@ -251,7 +292,7 @@ describe('custom events', () => {
     win.pa('track', 'Signup', { plan: 'pro' });
     win.pa('pageview', '/v');
     expect(bodies().slice(1).map((b) => [b.type, b.name, b.url])).toEqual([
-      ['event', 'Signup', URL0],
+      ['event', 'Signup', SENT0],
       ['pageview', undefined, 'https://example.com/v'],
     ]);
   });
@@ -322,6 +363,32 @@ describe('beforeSend', () => {
     );
   });
 
+  it('receives the full URL and referrer; what it returns is minimised before sending', () => {
+    const hook = vi.fn((e: { url: string }) => ({ ...e, url: e.url.replace('/blog/post', '/blog/:slug') }));
+    const { bodies } = load({
+      referrer: 'https://news.example/a?b=1#c',
+      before: (w) => (w.pa = { beforeSend: hook }),
+    });
+    expect(hook).toHaveBeenCalledWith(
+      expect.objectContaining({ url: URL0, referrer: 'https://news.example/a?b=1#c' }),
+    );
+    expect(bodies()[0]).toMatchObject({ url: 'https://example.com/blog/:slug?utm_source=news', referrer: 'https://news.example/' });
+  });
+
+  it('applies the minimisation to a rewritten url', () => {
+    const { win, bodies } = load();
+    win.pa.beforeSend = (e: object) => ({ ...e, url: 'https://example.com/users/:id?token=abc&utm_medium=m#frag' });
+    win.pa.track('E');
+    expect(bodies()[1].url).toBe('https://example.com/users/:id?utm_medium=m');
+  });
+
+  it.each([['/relative'], [''], [42], [undefined]])('drops the event when it returns url %j', (url) => {
+    const { win, sent } = load();
+    win.pa.beforeSend = (e: object) => ({ ...e, url });
+    win.pa.track('E');
+    expect(sent).toHaveLength(1);
+  });
+
   it.each([[null], [false], [undefined], ['string']])('drops the event when it returns %j', (ret) => {
     const { win, sent } = load();
     win.pa.beforeSend = () => ret;
@@ -341,6 +408,41 @@ describe('beforeSend', () => {
   });
 });
 
+describe('data minimisation', () => {
+  it.each([
+    [
+      'https://example.com/p?token=SECRET&utm_campaign=c%20d&utm_id=1&utm_source=x&utm_term&e=a@b#access_token=xyz',
+      'https://example.com/p?utm_campaign=c%20d&utm_source=x',
+    ],
+    ['https://example.com/p?#x', 'https://example.com/p'],
+    ['https://example.com/p?a=1&b=2', 'https://example.com/p'],
+    ['https://example.com:8443/p/?utm_content=z#y', 'https://example.com:8443/p/?utm_content=z'],
+    ['https://user:pw@example.com/p', 'https://example.com/p'],
+  ])('sends %s as %s', (url, expected) => {
+    const { win, bodies } = load({ url });
+    win.pa.track('E');
+    expect(bodies().map((b) => b.url)).toEqual([expected, expected]);
+  });
+
+  it('minimises manual pageview paths too', () => {
+    const { win, bodies } = load({ attrs: { 'data-auto': 'false' } });
+    win.pa.pageview('/v?token=x&utm_term=t#f');
+    expect(bodies()[0].url).toBe('https://example.com/v?utm_term=t');
+  });
+
+  it.each([
+    ['https://www.google.com/search?q=secret', 'https://www.google.com/'],
+    ['http://other.example:8080/x#y', 'http://other.example:8080/'],
+    ['https://blog.example.com/post', 'https://blog.example.com/'],
+    ['https://example.com/other?session=1', undefined], // same origin
+    ['android-app://com.google.android.gm/', undefined], // not http(s)
+  ])('reduces referrer %s to %s', (referrer, expected) => {
+    const { bodies } = load({ referrer });
+    expect(bodies()[0].referrer).toBe(expected);
+    if (!expected) expect(bodies()[0]).not.toHaveProperty('referrer');
+  });
+});
+
 describe('declarative events', () => {
   it('sends an event for clicks on [data-pa-event] or its descendants, with lower-cased props', () => {
     const { win, bodies } = load({
@@ -352,8 +454,8 @@ describe('declarative events', () => {
     win.document.getElementById('plain').click();
     win.document.getElementById('bare').click();
     expect(bodies().slice(1)).toEqual([
-      { site: SITE, type: 'event', url: URL0, width: expect.any(Number), name: 'Signup', props: { plan: 'pro', seats: '3' } },
-      { site: SITE, type: 'event', url: URL0, width: expect.any(Number), name: 'Bare' },
+      { site: SITE, type: 'event', url: SENT0, width: expect.any(Number), name: 'Signup', props: { plan: 'pro', seats: '3' } },
+      { site: SITE, type: 'event', url: SENT0, width: expect.any(Number), name: 'Bare' },
     ]);
   });
 
@@ -486,7 +588,7 @@ describe('vitals integration', () => {
       {
         site: SITE,
         type: 'vitals',
-        url: URL0,
+        url: SENT0,
         width: expect.any(Number),
         metrics: [
           { name: 'TTFB', value: 120 },

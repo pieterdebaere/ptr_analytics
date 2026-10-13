@@ -8,7 +8,7 @@ export const SITE = 'abcdef123456';
 export const SCRIPT_SRC = 'https://analytics.example.com/script.js';
 export const ENDPOINT = 'https://analytics.example.com/api/event';
 
-/** Captures what the tracker sends; Blob is replaced so beacon bodies can be read synchronously. */
+/** Captures what the tracker sends (fetch, or the sendBeacon fallback); Blob is replaced so beacon bodies can be read synchronously. */
 class FakeBlob {
   constructor(
     public parts: string[],
@@ -70,6 +70,9 @@ export function load(opts: LoadOptions = {}) {
   });
   win.navigator.sendBeacon = beacon;
   win.fetch = fetch;
+  // jsdom has no fetch/Request; pretend to be a browser that supports fetch keepalive.
+  win.Request = class Request {};
+  Object.defineProperty(win.Request.prototype, 'keepalive', { get: () => false });
   opts.before?.(win);
   const run = () => win.eval(bundle);
   if (!opts.defer) run();

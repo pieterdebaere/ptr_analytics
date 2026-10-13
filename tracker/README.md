@@ -2,14 +2,17 @@
 
 The one-line tracking script of [PTR Analytics](https://github.com/pieterdebaere/ptr_analytics):
 privacy-friendly page views, custom events and Speed Insights (Core Web Vitals) for any
-website. It is a single dependency-free classic script, about 4.7 KB minified (≈ 2.5 KB gzip),
+website. It is a single dependency-free classic script, about 5.3 KB minified (≈ 2.8 KB gzip),
 served by your PTR Analytics server at `/script.js`.
 
 * No cookies, no `localStorage`/`sessionStorage` writes, no fingerprinting. The only storage it
   ever *reads* is the `pa_ignore` opt-out flag.
 * Only `window.pa` is added to the page. It never throws into your page.
-* Sends with `navigator.sendBeacon` (`text/plain`, so no CORS preflight), falling back to
-  `fetch(…, {keepalive: true, credentials: 'omit'})`.
+* Sends only the page's origin, path and `utm_*` parameters, and only the *origin* of an
+  external referrer — see [What is sent](#what-is-sent).
+* Sends with `fetch(…, {keepalive: true, credentials: 'omit'})` (`text/plain`, so no CORS
+  preflight; never sends cookies), falling back to `navigator.sendBeacon` only in browsers
+  without `fetch` keepalive support.
 
 ## Installation
 
@@ -22,6 +25,10 @@ Create a site in the dashboard, then add this line to the `<head>` of every page
 Replace `analytics.example.com` with your server and `SITE_ID` with the 12-character site id.
 That's it: page views (including client-side navigations) and web vitals are now collected.
 
+The script reads its settings from its own tag (`document.currentScript`). Where that is not
+available, it uses the first `<script data-site>` whose `src` ends in `/script.js`, so keep
+that file name when you proxy the script through your own domain.
+
 ## Script attributes
 
 | attribute              | default                       | meaning |
@@ -33,7 +40,7 @@ That's it: page views (including client-side navigations) and web vitals are now
 | `data-vitals-sample`   | `1`                           | Fraction of page loads (0..1) that report web vitals, e.g. `0.25`. |
 | `data-respect-dnt`     | `false`                       | `true` = send nothing when the browser sends Do Not Track (`navigator.doNotTrack === "1"`) or Global Privacy Control. |
 | `data-allow-localhost` | `false`                       | `true` = also track on `localhost`, `*.localhost`, `127.x.x.x`, `[::1]` and `file:` pages (skipped by default). |
-| `data-exclude`         | none                          | Comma-separated path globs that are never tracked (page views, events and vitals). `*` = any characters within one path segment, `**` = anything. A trailing `/**` also matches the prefix itself: `/admin/**` excludes `/admin`, `/admin/` and `/admin/users/1`. Example: `data-exclude="/admin/**,/preview/*"`. |
+| `data-exclude`         | none                          | Comma-separated path globs that are never tracked (page views, events and vitals). `*` = any characters within one path segment, `**` = anything. A trailing `/**` also matches the prefix itself: `/admin/**` excludes `/admin`, `/admin/` and `/admin/users/1`. Example: `data-exclude="/admin/**,/preview/*"`. At most 20 globs of up to 200 characters each are used (longer ones are ignored). |
 | `data-debug`           | `false`                       | `true` = log why something was not sent (invalid input, disabled tracking, a throwing `beforeSend`) with `console.warn`. |
 
 Nothing at all is sent when the page is driven by automation (`navigator.webdriver`), and a
@@ -79,14 +86,16 @@ After loading, `window.pa` keeps working as such a function *and* has `pa.track`
 ### `pa.beforeSend`
 
 Called with the complete payload just before it is sent — page views, custom events and web
-vitals alike:
+vitals alike. It sees the full `location.href` and `document.referrer`; the reduction described
+in [What is sent](#what-is-sent) is applied to whatever it returns:
 
 ```js
 { site, type: 'pageview' | 'event' | 'vitals', url, width, referrer?, name?, props?, metrics? }
 ```
 
 Return the (possibly modified) object to send it, or `null`/`false` to drop it. If the hook
-throws, the event is dropped (fail closed: the hook might exist to redact data).
+throws, or returns a `url` that is not an absolute URL, the event is dropped (fail closed: the
+hook might exist to redact data).
 
 ```js
 pa.beforeSend = (event) => {
@@ -97,11 +106,20 @@ pa.beforeSend = (event) => {
 }
 ```
 
-What is sent: `url` is the full `location.href`; the server keeps only the pathname and the
-`utm_*` query parameters and discards the rest of the query string and the fragment.
-`referrer` (`document.referrer`) is only sent with the first page view of a page load, and
-the server keeps only its hostname. `width` is `window.innerWidth`, used as a device-type
-fallback.
+### What is sent
+
+* `url`: only the origin, the pathname and the `utm_source`, `utm_medium`, `utm_campaign`,
+  `utm_term` and `utm_content` query parameters of the page URL (or of the `url` returned by
+  `beforeSend`). Every other query parameter and the fragment never leave the browser, so
+  tokens such as `?token=…` or `#access_token=…` are not sent. Example:
+  `https://example.com/reset?token=SECRET&utm_source=mail#x` is sent as
+  `https://example.com/reset?utm_source=mail`. The server stores only the pathname and the
+  UTM values.
+* `referrer`: only with the first page view of a page load, and only the origin of
+  `document.referrer` (`https://www.google.com/search?q=…` → `https://www.google.com/`). It is
+  left out when the referrer is the page's own origin or not an `http(s)` URL. The server
+  stores only its hostname.
+* `width`: `window.innerWidth`, used as a device-type fallback.
 
 ## Declarative events
 

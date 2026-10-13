@@ -68,7 +68,7 @@ Supported attributes on the script tag:
 | `data-vitals-sample`   | `1`                | sample rate 0..1 for vitals |
 | `data-respect-dnt`     | `false`            | `true` = do nothing when `navigator.doNotTrack === "1"` or `globalPrivacyControl` |
 | `data-allow-localhost` | `false`            | track on `localhost`, `127.0.0.1`, `[::1]`, `file:` (otherwise skipped) |
-| `data-exclude`         | none               | comma separated path globs (`*` = any chars within segment, `**` = anything), e.g. `/admin/**,/preview/*` |
+| `data-exclude`         | none               | comma separated path globs (`*` = any chars within segment, `**` = anything), e.g. `/admin/**,/preview/*`; at most 20 globs of ≤ 200 chars, matched without backtracking (O(path length × glob length)) |
 
 Global API (`window.pa`):
 
@@ -104,10 +104,21 @@ try/catch — storage may throw).
 * Skips: excluded paths, localhost (unless allowed), DNT (if respected), opt-out,
   prerendering (`document.visibilityState === 'prerender'` → wait until visible),
   automation (`navigator.webdriver === true`).
-* Transport: `navigator.sendBeacon(endpoint, new Blob([json], {type: 'text/plain'}))`,
-  fallback `fetch(endpoint, {method:'POST', body: json, keepalive: true,
-  headers:{'Content-Type':'text/plain'}, credentials: 'omit'})`. `text/plain` avoids CORS
-  preflight. Never send credentials.
+* Settings come from `document.currentScript`; when that is null, from the first
+  `script[data-site]` whose `src` ends with `/script.js` (never an arbitrary `[data-site]` tag).
+* Data minimisation (after `beforeSend`, which still receives the full `location.href` /
+  `document.referrer` and may rewrite them): the sent `url` is `origin + pathname` plus only
+  the `utm_source|medium|campaign|term|content` query parameters; the fragment is always
+  dropped. The sent `referrer` is reduced to its origin (`https://host/`) and omitted when it
+  is same-origin or not `http(s)`. A `url` that is not an absolute URL drops the event.
+* Transport: `fetch(endpoint, {method:'POST', body: json, keepalive: true,
+  headers:{'Content-Type':'text/plain'}, credentials: 'omit'})` — `text/plain` without custom
+  headers is a CORS-simple request (no preflight; the server answers
+  `Access-Control-Allow-Origin: *`) and keepalive survives page unload. Only when `fetch`
+  keepalive is unavailable (no `fetch`/`Request`, `'keepalive' in Request.prototype` false, or
+  `fetch` throws synchronously) fall back to
+  `navigator.sendBeacon(endpoint, new Blob([json], {type: 'text/plain'}))`, which cannot omit
+  credentials. A rejected fetch is not retried.
 * Web vitals (Speed Insights): collect **LCP, FCP, CLS, INP, TTFB** with
   `PerformanceObserver` (implement it yourself, no dependency; follow the web-vitals
   library semantics: LCP finalised on first input / hidden, CLS = max session window,
@@ -128,8 +139,8 @@ Body is JSON (sent as `text/plain` or `application/json`), max **8 KB**:
 {
   "site": "k3j9x0abcd12",           // required
   "type": "pageview",               // "pageview" | "event" | "vitals"
-  "url": "https://example.com/blog/post?utm_source=x", // required, absolute http(s) URL of the page
-  "referrer": "https://google.com/", // optional, document.referrer ("" or omitted when none)
+  "url": "https://example.com/blog/post?utm_source=x", // required, absolute http(s) URL of the page (tracker sends origin + path + utm_* only)
+  "referrer": "https://google.com/", // optional, origin of document.referrer (omitted when none, same-origin or not http(s))
   "width": 1280,                    // optional, window.innerWidth (device fallback)
   "name": "Signup",                 // required for type "event"
   "props": { "plan": "pro" },       // optional for type "event"

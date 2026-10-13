@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { globToRegExp } from '../src/glob';
+import { globMatcher } from '../src/glob';
 import { clean, clsTracker, inpTracker } from '../src/vitals';
 
 describe('clsTracker (session windows)', () => {
@@ -97,8 +97,8 @@ describe('clean', () => {
   });
 });
 
-describe('globToRegExp', () => {
-  const m = (glob: string, path: string) => globToRegExp(glob).test(path);
+describe('globMatcher', () => {
+  const m = (glob: string, path: string) => globMatcher(glob)(path);
 
   it('* matches within one segment', () => {
     expect(m('/preview/*', '/preview/abc')).toBe(true);
@@ -123,5 +123,31 @@ describe('globToRegExp', () => {
     expect(m('/x', '/x/y')).toBe(false);
     expect(m(' /x ', '/x')).toBe(true);
     expect(m('/(group)+[x]', '/(group)+[x]')).toBe(true);
+  });
+
+  it('treats runs of 3+ stars like ** and handles empty globs', () => {
+    expect(m('/a/***', '/a')).toBe(true);
+    expect(m('/a/****/b', '/a/x/y/b')).toBe(true);
+    expect(m('/a***b', '/a/x/b')).toBe(true);
+    expect(m('', '')).toBe(true);
+    expect(m('', '/')).toBe(false);
+  });
+
+  it('runs in linear time on pathological globs (no backtracking)', () => {
+    const cases: [string, string][] = [
+      ['/**a**a**a**a**a**a**b', '/' + 'a'.repeat(40)],
+      ['/' + '*a'.repeat(99) + 'b', '/' + 'a'.repeat(2000)],
+      ['/' + '**a'.repeat(66), '/' + 'a/'.repeat(1000)],
+    ];
+    for (const [glob, path] of cases) {
+      const match = globMatcher(glob);
+      const t = performance.now();
+      expect(match(path)).toBe(false);
+      expect(performance.now() - t).toBeLessThan(250);
+    }
+    const t = performance.now();
+    expect(m('/**a**a**a**a**a**a**b', '/' + 'a'.repeat(40))).toBe(false);
+    expect(m('/**a**a**a**a**a**a**b', '/' + 'a'.repeat(39) + 'b')).toBe(true);
+    expect(performance.now() - t).toBeLessThan(20);
   });
 });
