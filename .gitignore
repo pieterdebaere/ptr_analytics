@@ -11,3 +11,6 @@ coverage/
 *.db-wal
 *.mmdb
 .DS_Store
+/server/data/
+*.db-journal
+*.mmdb.*.tmp

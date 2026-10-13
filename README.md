@@ -45,13 +45,14 @@ Connect any website with **one line** in its `<head>`:
 ```bash
 git clone https://github.com/pieterdebaere/ptr_analytics.git
 cd ptr_analytics
-cp .env.example .env        # edit PUBLIC_URL, ADMIN_EMAIL, ADMIN_PASSWORD
+cp .env.example .env        # set PUBLIC_URL, ADMIN_EMAIL and a strong ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
 The server listens on `127.0.0.1:3000`. Put a reverse proxy with TLS in front of it
-(see below), open `https://analytics.example.com`, log in with the admin account from
-`.env`, then **remove `ADMIN_PASSWORD` from `.env`**.
+(see below), open `https://analytics.example.com` and log in with the admin account from
+`.env`. Then **remove both `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `.env`** and run
+`docker compose up -d` again, so the password no longer sits in the container environment.
 
 Data (SQLite database and GeoIP database) lives in the `analytics-data` volume.
 
@@ -69,21 +70,50 @@ analytics.example.com {
 
 ```nginx
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name analytics.example.com;
     # ssl_certificate ... ;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        # Replace (don't append to) X-Forwarded-For with the real client address.
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
 
-With one proxy in front, keep `TRUST_PROXY=1`. Behind Cloudflare **and** nginx use `2`
-(or a list of trusted proxy IPs/CIDRs).
+With one proxy in front (Caddy or the nginx config above) keep `TRUST_PROXY=1`. The proxy
+must *replace* `X-Forwarded-For` with the real client address, as Caddy (2.5+) does by
+default and as the nginx config above does. Only use a non-`false` `TRUST_PROXY` when the
+server port is reachable exclusively through the proxy (the compose file binds it to
+`127.0.0.1`); otherwise clients can forge their IP address.
+
+**Behind Cloudflare:** let nginx restore the visitor address first and keep `TRUST_PROXY=1`:
+
+```nginx
+# in the server block; list all ranges from https://www.cloudflare.com/ips/
+set_real_ip_from 173.245.48.0/20;
+# ... remaining IPv4/IPv6 ranges ...
+real_ip_header CF-Connecting-IP;
+```
+
+Also firewall the origin so that only Cloudflare can reach ports 80/443; otherwise
+`CF-Connecting-IP` (and `GEOIP_HEADER=cf-ipcountry`) can be forged.
+
+### Backups
+
+All state lives in the SQLite database in the data volume. Make a consistent copy while the
+server runs with:
+
+```bash
+docker compose exec analytics node -e "new (require('better-sqlite3'))('/data/analytics.db').backup('/data/backup.db')"
+```
+
+Treat backups as secrets: they contain password hashes and the current day's salt.
 
 ## Connecting a website
 
@@ -136,15 +166,15 @@ Open the browser console on your website and run
 | Variable | Default | Description |
 |---|---|---|
 | `PUBLIC_URL` | – | Public URL of the dashboard, e.g. `https://analytics.example.com`. Required in production. |
-| `PORT` / `HOST` | `3000` / `0.0.0.0` | Listen address. |
+| `PORT` / `HOST` | `3000` / `127.0.0.1` | Listen address (the Docker image sets `HOST=0.0.0.0`). |
 | `DATA_DIR` | `./data` | Directory for the SQLite database. |
-| `TRUST_PROXY` | `false` | `false`, `true`, number of proxy hops, or comma-separated trusted IPs/CIDRs. |
+| `TRUST_PROXY` | `false` | `false`, number of proxy hops, or comma-separated trusted proxy IPs/CIDRs. See *Reverse proxy*. |
 | `COOKIE_SECURE` | `true` when `PUBLIC_URL` is https | Sets the `Secure` flag on the session cookie. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | – | Creates the first admin when there are no users yet (password ≥ 12 chars). |
 | `RETENTION_DAYS` | `0` | Delete analytics data older than N days (0 = forever). |
-| `GEOIP_DB_PATH` | `$DATA_DIR/geoip-country.mmdb` | MaxMind-format country database (DB-IP Lite or GeoLite2 Country). |
+| `GEOIP_DB_PATH` | `$DATA_DIR/geoip-country.mmdb` | MaxMind-format country database (DB-IP Lite or GeoLite2 Country). Set `GEOIP_AUTO_DOWNLOAD=false` when you provide your own. |
 | `GEOIP_AUTO_DOWNLOAD` | `false` | Download & monthly refresh the free DB-IP *IP to Country Lite* database. |
-| `GEOIP_HEADER` | – | Trusted header with the visitor's country code set by your CDN, e.g. `cf-ipcountry`. |
+| `GEOIP_HEADER` | – | Header with the visitor's country code set by your CDN, e.g. `cf-ipcountry`. Only honoured when `TRUST_PROXY` is set; the origin must be reachable only through that CDN. |
 | `INGEST_RATE_LIMIT` | `600` | Max tracking requests per IP per minute. |
 | `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 
@@ -158,7 +188,11 @@ docker compose exec analytics node server/dist/cli.js list-users
 docker compose exec analytics node server/dist/cli.js delete-user alice@example.com
 ```
 
-`create-user` and `reset-password` print a generated password once.
+`create-user` and `reset-password` print a generated password once. Login rate limits are
+kept in memory, so restarting the server also clears a temporary lockout.
+
+If the server needs an outbound HTTP proxy to download the GeoIP database, set
+`HTTPS_PROXY` and `NODE_USE_ENV_PROXY=1`.
 
 ## Development
 
@@ -168,7 +202,7 @@ Requires Node.js 22+.
 npm install
 npm run build           # tracker, dashboard and server
 npm test                # all test suites
-DATA_DIR=./data ADMIN_EMAIL=dev@example.com ADMIN_PASSWORD=dev-password-123 npm run dev   # API on :3000
+DATA_DIR=./data ADMIN_EMAIL=dev@example.com ADMIN_PASSWORD=dev-password-123 npm run dev   # API on 127.0.0.1:3000
 npm run dev:dashboard   # dashboard with hot reload on :5173 (proxies /api to :3000)
 ```
 
