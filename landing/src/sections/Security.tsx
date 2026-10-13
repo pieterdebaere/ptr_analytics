@@ -10,7 +10,7 @@ const ITEMS = [
   { icon: Database, title: 'Parameterised SQL', text: 'Every query is a prepared statement on SQLite (WAL, secure_delete).' },
   { icon: Package, title: 'Minimal dependencies', text: 'Small supply-chain surface; the tracker has zero runtime dependencies.' },
   { icon: Lock, title: 'Untrusted input everywhere', text: 'Paths, referrers and event names are validated, size-limited and escaped.' },
-  { icon: BadgeCheck, title: 'Independently audited', text: 'Reviewed in multiple security audits, with a documented disclosure policy.' },
+  { icon: BadgeCheck, title: 'Open to review', text: 'All code is public, security-reviewed before release, with a documented responsible-disclosure policy.' },
 ] as const;
 
 export function Security() {

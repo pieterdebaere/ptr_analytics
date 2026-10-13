@@ -124,7 +124,7 @@ export function Pricing() {
                 <Feature>We handle updates, backups, TLS and GeoIP</Feature>
                 <Feature>Ready in a minute — sign up, add the script</Feature>
                 <Feature>Stop paying any time: extra sites pause, nothing is deleted</Feature>
-                <Feature>Move to self-hosted whenever you like</Feature>
+                <Feature>Export your raw data as CSV at any time</Feature>
               </ul>
             </CardContent>
             <CardFooter className="relative border-t-0 bg-transparent pt-0">
