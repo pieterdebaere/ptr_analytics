@@ -1,0 +1,17 @@
+{
+  "name": "@ptr-analytics/tracker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.1.2",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.4"
+  }
+}

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+/data/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.mmdb
+.DS_Store
+/server/data/
+*.db-journal
+*.mmdb.*.tmp
