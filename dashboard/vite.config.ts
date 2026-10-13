@@ -22,5 +22,18 @@ export default defineConfig({
     // Never inline assets as data: URIs; everything is served from 'self'.
     assetsInlineLimit: 0,
     cssCodeSplit: false,
+    // The minifier drops the `@license` banners of bundled dependencies
+    // (React, React Router, ...), so ship their licence texts next to the
+    // bundle instead (MIT requires the notice to accompany the code).
+    license: { fileName: 'THIRD_PARTY_LICENSES.txt' },
+    rolldownOptions: {
+      output: {
+        // Kept by the minifier (legal comment); points to the notices above.
+        postBanner: (chunk) =>
+          chunk.isEntry
+            ? '/*! Bundles third-party open source code (React, React Router, ...); licenses: /THIRD_PARTY_LICENSES.txt */'
+            : '',
+      },
+    },
   },
 });

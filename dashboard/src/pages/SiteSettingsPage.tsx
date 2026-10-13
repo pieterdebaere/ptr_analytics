@@ -143,11 +143,13 @@ function DangerZone() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState('');
+  // Accept the name as displayed (control/bidi characters replaced) or the raw name.
+  const confirmed = confirm === site.name || confirm === displayText(site.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const onDelete = async () => {
-    if (confirm !== site.name) return;
+    if (!confirmed) return;
     setBusy(true);
     setError(null);
     try {
@@ -184,7 +186,7 @@ function DangerZone() {
               <button type="button" className="btn" onClick={() => setOpen(false)}>
                 Cancel
               </button>
-              <button type="button" className="btn btn-danger" disabled={busy || confirm !== site.name} onClick={onDelete}>
+              <button type="button" className="btn btn-danger" disabled={busy || !confirmed} onClick={onDelete}>
                 {busy ? 'Deleting…' : 'Delete permanently'}
               </button>
             </>
