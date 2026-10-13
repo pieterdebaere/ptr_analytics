@@ -1,0 +1,25 @@
+{
+  "name": "ptr-analytics",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted, privacy-friendly web analytics and speed insights for all your websites in one dashboard.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "tracker",
+    "dashboard",
+    "server"
+  ],
+  "scripts": {
+    "build": "npm run build -w tracker && npm run build -w dashboard && npm run build -w server",
+    "dev": "npm run build -w tracker && npm run dev -w server",
+    "dev:dashboard": "npm run dev -w dashboard",
+    "start": "node server/dist/index.js",
+    "cli": "node server/dist/cli.js",
+    "test": "npm test -w tracker && npm test -w server && npm test -w dashboard",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
