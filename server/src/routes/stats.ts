@@ -1,10 +1,20 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import { requireAuth } from '../auth/guard.js';
-import { badRequest } from '../lib/errors.js';
-import { VITALS_COLUMNS, parseFilters, parseLimit, queryString, type Filters, type Query, type VitalsDimension } from '../stats/filters.js';
+import { HttpError, badRequest, forbidden } from '../lib/errors.js';
+import {
+  VITALS_COLUMNS,
+  parseFilters,
+  parseLimit,
+  queryString,
+  type Filters,
+  type Query,
+  type VitalsDimension,
+} from '../stats/filters.js';
+import type { OpOf, StatsOpKind, StatsResults } from '../stats/ops.js';
 import { resolvePeriod, type ResolvedRange } from '../stats/period.js';
 import { BREAKDOWN_DIMENSIONS, type BreakdownDimension } from '../stats/queries.js';
+import { statsService } from '../stats/service.js';
 import { VITAL_METRICS, type VitalMetric } from '../stats/vitals-score.js';
 import { loadSite } from './sites.js';
 
@@ -28,90 +38,174 @@ export function parseStatsParams(ctx: AppContext, q: Query): StatsParams {
   return { range, filters: parseFilters(q) };
 }
 
+/** Speed Insights only know the vitals columns (path, hostname, country, device, browser, os). */
+function parseVitalsParams(ctx: AppContext, q: Query): StatsParams {
+  const p = parseStatsParams(ctx, q);
+  if (p.filters.event !== undefined || p.filters.columns.some((c) => !Object.hasOwn(VITALS_COLUMNS, c.key))) {
+    throw badRequest('filter not supported for speed insights');
+  }
+  return p;
+}
+
 function enumParam<T extends string>(q: Query, key: string, allowed: readonly T[]): T {
   const v = queryString(q, key, 32);
   if (v === undefined || !(allowed as readonly string[]).includes(v)) throw badRequest(`invalid ${key}`);
   return v as T;
 }
 
+const ALLOWED_FETCH_SITES = new Set(['same-origin', 'none']);
+
+/**
+ * onRequest: refuse heavy authenticated GETs initiated by another site, including sibling
+ * subdomains (`same-site`), e.g. `<img src=/api/sites/x/export?...>` used to load the
+ * server. Browsers send Sec-Fetch-Site; non-browser clients without it are unaffected.
+ */
+export async function rejectCrossSiteFetch(request: FastifyRequest): Promise<void> {
+  const site = request.headers['sec-fetch-site'];
+  if (site !== undefined && !(typeof site === 'string' && ALLOWED_FETCH_SITES.has(site))) throw forbidden();
+}
+
+/** Admission-control key: the logged-in user. */
+export function userKey(request: FastifyRequest): string {
+  return request.user ? `u${request.user.id}` : 'anonymous';
+}
+
 export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
+  const service = statsService(ctx);
+  app.addHook('onRequest', rejectCrossSiteFetch);
   app.addHook('preHandler', requireAuth(ctx));
+  app.addHook('onClose', async () => service.close());
 
-  app.get<{ Querystring: Query }>('/api/overview', async (request) => {
+  const run = async <K extends StatsOpKind>(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    op: OpOf<K>,
+    cache = true,
+  ): Promise<StatsResults[K]> => {
+    try {
+      return await service.query(userKey(request), op, { cache });
+    } catch (err) {
+      if (err instanceof HttpError && (err.statusCode === 429 || err.statusCode === 503)) reply.header('Retry-After', '5');
+      throw err;
+    }
+  };
+
+  app.get<{ Querystring: Query }>('/api/overview', async (request, reply) => {
     const { range } = parseStatsParams(ctx, request.query);
-    const noFilters: Filters = { columns: [] };
-    const sites = ctx.sites.list().map((site) => {
-      const totals = ctx.stats.totals(site.id, range.from, range.to, noFilters);
-      return {
-        id: site.id,
-        name: site.name,
-        domains: site.domains,
-        visitors: totals.visitors,
-        pageviews: totals.pageviews,
-        previousVisitors: ctx.stats.visitors(site.id, range.previous.from, range.previous.to, noFilters),
-        series: ctx.stats.timeseries(site.id, range, noFilters).map((p) => p.visitors),
-      };
+    const sites = ctx.sites.list().map((s) => ({ id: s.id, name: s.name, domains: s.domains }));
+    return {
+      sites: await run(request, reply, { kind: 'overview', sites, range }),
+    };
+  });
+
+  app.get<SiteRoute>('/api/sites/:id/stats/summary', async (request, reply) => {
+    const site = loadSite(ctx, request.params.id);
+    const { range, filters } = parseStatsParams(ctx, request.query);
+    return run(request, reply, {
+      kind: 'summary',
+      siteId: site.id,
+      range,
+      filters,
     });
-    return { sites };
   });
 
-  app.get<SiteRoute>('/api/sites/:id/stats/summary', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/stats/timeseries', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
-    const current = ctx.stats.totals(site.id, range.from, range.to, filters);
-    const previous = ctx.stats.totals(site.id, range.previous.from, range.previous.to, filters);
-    return { ...current, previous };
+    return {
+      interval: range.interval,
+      points: await run(request, reply, {
+        kind: 'timeseries',
+        siteId: site.id,
+        range,
+        filters,
+      }),
+    };
   });
 
-  app.get<SiteRoute>('/api/sites/:id/stats/timeseries', async (request) => {
-    const site = loadSite(ctx, request.params.id);
-    const { range, filters } = parseStatsParams(ctx, request.query);
-    return { interval: range.interval, points: ctx.stats.timeseries(site.id, range, filters) };
-  });
-
-  app.get<SiteRoute>('/api/sites/:id/stats/breakdown', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/stats/breakdown', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
     const dimension = enumParam<BreakdownDimension>(request.query, 'dimension', BREAKDOWN_DIMENSIONS);
     const limit = parseLimit(request.query);
-    return { dimension, rows: ctx.stats.breakdown(site.id, range, filters, dimension, limit) };
+    const rows = await run(request, reply, {
+      kind: 'breakdown',
+      siteId: site.id,
+      range,
+      filters,
+      dimension,
+      limit,
+    });
+    return { dimension, rows };
   });
 
-  app.get<SiteRoute>('/api/sites/:id/stats/event-props', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/stats/event-props', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
     if (filters.event === undefined || filters.event === null) throw badRequest('event is required');
     const limit = parseLimit(request.query, 100);
-    return { rows: ctx.stats.eventProps(site.id, range, filters, filters.event, limit) };
+    const rows = await run(request, reply, {
+      kind: 'eventProps',
+      siteId: site.id,
+      range,
+      filters,
+      event: filters.event,
+      limit,
+    });
+    return { rows };
   });
 
-  app.get<SiteRoute>('/api/sites/:id/stats/realtime', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/stats/realtime', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
-    return { visitors: ctx.stats.realtime(site.id, ctx.now()) };
+    // keyed on the current time: never cached
+    return {
+      visitors: await run(request, reply, { kind: 'realtime', siteId: site.id, now: ctx.now() }, false),
+    };
   });
 
   // ---- Speed Insights ----
 
-  app.get<SiteRoute>('/api/sites/:id/vitals/summary', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/vitals/summary', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
-    const { range, filters } = parseStatsParams(ctx, request.query);
-    return ctx.vitals.summary(site.id, range, filters);
+    const { range, filters } = parseVitalsParams(ctx, request.query);
+    return run(request, reply, {
+      kind: 'vitalsSummary',
+      siteId: site.id,
+      range,
+      filters,
+    });
   });
 
-  app.get<SiteRoute>('/api/sites/:id/vitals/timeseries', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/vitals/timeseries', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
-    const { range, filters } = parseStatsParams(ctx, request.query);
+    const { range, filters } = parseVitalsParams(ctx, request.query);
     const metric = enumParam<VitalMetric | 'RES'>(request.query, 'metric', [...VITAL_METRICS, 'RES']);
-    return { interval: range.interval, points: ctx.vitals.timeseries(site.id, range, filters, metric) };
+    const points = await run(request, reply, {
+      kind: 'vitalsTimeseries',
+      siteId: site.id,
+      range,
+      filters,
+      metric,
+    });
+    return { interval: range.interval, points };
   });
 
-  app.get<SiteRoute>('/api/sites/:id/vitals/breakdown', async (request) => {
+  app.get<SiteRoute>('/api/sites/:id/vitals/breakdown', async (request, reply) => {
     const site = loadSite(ctx, request.params.id);
-    const { range, filters } = parseStatsParams(ctx, request.query);
+    const { range, filters } = parseVitalsParams(ctx, request.query);
     const metric = enumParam<VitalMetric>(request.query, 'metric', VITAL_METRICS);
     const dimension = enumParam<VitalsDimension>(request.query, 'dimension', Object.keys(VITALS_COLUMNS) as VitalsDimension[]);
     const limit = parseLimit(request.query);
-    return { rows: ctx.vitals.breakdown(site.id, range, filters, metric, dimension, limit) };
+    const rows = await run(request, reply, {
+      kind: 'vitalsBreakdown',
+      siteId: site.id,
+      range,
+      filters,
+      metric,
+      dimension,
+      limit,
+    });
+    return { rows };
   });
 }

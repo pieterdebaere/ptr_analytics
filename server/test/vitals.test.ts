@@ -115,8 +115,19 @@ describe('vitals endpoints', () => {
       metrics: Record<string, { p75: number; count: number }>;
     };
     expect(p.metrics['LCP']).toMatchObject({ p75: 5000, count: 2 });
-    // non-vitals filters are ignored rather than failing
-    expect((await api(t.app, cookie, 'GET', `/api/sites/${siteId}/vitals/summary?referrer=x`)).statusCode).toBe(200);
+    // filters that do not exist for vitals are rejected instead of silently ignored
+    for (const qs of ['referrer=x', 'referrer=', 'utm_source=x', 'utm_campaign=y', 'event=Signup', 'event=']) {
+      for (const ep of ['summary', 'timeseries?metric=LCP&', 'breakdown?metric=LCP&dimension=path&']) {
+        const url = ep.endsWith('&') ? `/api/sites/${siteId}/vitals/${ep}${qs}` : `/api/sites/${siteId}/vitals/${ep}?${qs}`;
+        const res = await api(t.app, cookie, 'GET', url);
+        expect(res.statusCode, url).toBe(400);
+        expect(res.json()).toEqual({ error: 'filter not supported for speed insights' });
+      }
+    }
+    // the vitals columns are supported
+    for (const qs of ['hostname=example.com', 'country=', 'browser=Chrome', 'os=iOS']) {
+      expect((await api(t.app, cookie, 'GET', `/api/sites/${siteId}/vitals/summary?${qs}`)).statusCode, qs).toBe(200);
+    }
   });
 
   it('returns a per-bucket p75 timeseries and RES', async () => {

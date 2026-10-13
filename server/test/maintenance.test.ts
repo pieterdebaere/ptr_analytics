@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { runCli } from '../src/cli.js';
 import { migrate, openDatabase } from '../src/db/index.js';
 import { MIGRATIONS } from '../src/db/migrations.js';
-import { runCleanup } from '../src/jobs/cleanup.js';
+import { CLEANUP_CHUNK, runCleanup } from '../src/jobs/cleanup.js';
 import { verifyPassword } from '../src/lib/password.js';
 import { DAY, api, createTestApp, login, pageview, sendEvent, tmpDir } from './helpers.js';
 
@@ -23,12 +23,53 @@ describe('cleanup job', () => {
       t.ctx.db.prepare(`INSERT INTO salts (day, salt) VALUES ('2000-01-01', x'00')`).run();
 
       t.clock.t = start + 31 * DAY;
-      const r = runCleanup(t.ctx);
+      const r = await runCleanup(t.ctx);
       expect(r).toMatchObject({ authSessions: 1, events: 1, vitals: 1, sessions: 1 });
       expect(t.ctx.db.prepare('SELECT path FROM events').all()).toEqual([{ path: '/new' }]);
       expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
       expect(t.ctx.db.prepare(`SELECT COUNT(*) AS n FROM salts WHERE day = '2000-01-01'`).get()).toEqual({ n: 0 });
       expect((await api(t.app, cookie, 'GET', '/api/auth/me')).statusCode).toBe(401);
+    } finally {
+      await t.app.close();
+    }
+  });
+
+  it('deletes large amounts of old data in chunks, yielding between them, one run at a time', async () => {
+    const t = await createTestApp({ env: { RETENTION_DAYS: '30' } });
+    try {
+      const id = t.ctx.sites.create('S', ['example.com'], t.clock.t).id;
+      const old = t.clock.t - 40 * DAY;
+      const ev = t.ctx.db.prepare(
+        `INSERT INTO events (site_id, ts, type, visitor_id, session_id, hostname, path) VALUES (?, ?, 'pageview', 'v', ?, 'example.com', '/')`,
+      );
+      const vi = t.ctx.db.prepare(`INSERT INTO vitals (site_id, ts, metric, value, hostname, path) VALUES (?, ?, 'LCP', 1, 'example.com', '/')`);
+      const se = t.ctx.db.prepare(`INSERT INTO sessions (id, site_id, visitor_id, started_at, last_seen_at, pageviews) VALUES (?, ?, 'v', ?, ?, 1)`);
+      const n = CLEANUP_CHUNK * 2 + 123;
+      t.ctx.db.transaction(() => {
+        for (let i = 0; i < n; i++) {
+          ev.run(id, old + i, `s${i}`);
+          vi.run(id, old + i);
+          se.run(`s${i}`, id, old + i, old + i);
+        }
+        ev.run(id, t.clock.t - DAY, 'recent');
+      })();
+
+      // the event loop keeps running while the cleanup works through the chunks
+      let ticks = 0;
+      const timer = setInterval(() => ticks++, 0);
+      const p1 = runCleanup(t.ctx);
+      const p2 = runCleanup(t.ctx);
+      expect(p2).toBe(p1);
+      const r = await p1;
+      clearInterval(timer);
+      expect(r).toMatchObject({ events: n, vitals: n, sessions: n });
+      expect(ticks).toBeGreaterThan(0);
+      expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 });
+      expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM vitals').get()).toEqual({ n: 0 });
+      // a new run starts once the previous one finished
+      const p3 = runCleanup(t.ctx);
+      expect(p3).not.toBe(p1);
+      expect(await p3).toMatchObject({ events: 0, vitals: 0, sessions: 0 });
     } finally {
       await t.app.close();
     }
@@ -40,7 +81,7 @@ describe('cleanup job', () => {
       const id = t.ctx.sites.create('S', ['example.com'], t.clock.t).id;
       await sendEvent(t.app, pageview(id, 'https://example.com/'));
       t.clock.t += 5000 * DAY;
-      expect(runCleanup(t.ctx)).toMatchObject({ events: 0, sessions: 0 });
+      expect(await runCleanup(t.ctx)).toMatchObject({ events: 0, sessions: 0 });
       expect(t.ctx.db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 });
     } finally {
       await t.app.close();
@@ -76,6 +117,11 @@ describe('migrations', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
     const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'sessions_site_started'`).get();
     expect(idx).toEqual({ name: 'sessions_site_started' });
+    const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'`).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    );
+    expect(names).toEqual(expect.arrayContaining(['events_site_type_name_ts', 'events_site_type_ts_visitor', 'events_site_ts']));
+    expect(names).not.toContain('events_site_type_ts');
     expect(db.pragma('journal_mode', { simple: true })).toBe('wal');
     db.close();
   });

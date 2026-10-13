@@ -16,6 +16,19 @@ describe('csv escaping', () => {
     expect(csvCell('line\nbreak')).toBe('"line\nbreak"');
     expect(csvRow(['a', null, 3])).toBe('a,,3\r\n');
   });
+
+  it('neutralises full-width formula characters and leading control characters', () => {
+    expect(csvCell('\uff1dcmd|calc')).toBe("'\uff1dcmd|calc");
+    expect(csvCell('\uff0b1')).toBe("'\uff0b1");
+    expect(csvCell('\uff0d1')).toBe("'\uff0d1");
+    expect(csvCell('\uff20SUM(A1)')).toBe("'\uff20SUM(A1)");
+    expect(csvCell('\u0000=1+1')).toBe("'\u0000=1+1");
+    expect(csvCell('\u0001x')).toBe("'\u0001x");
+    expect(csvCell('\u007fx')).toBe("'\u007fx");
+    expect(csvCell('\nx')).toBe(`"'\nx"`);
+    // only a leading character matters
+    expect(csvCell('a\uff1db')).toBe('a\uff1db');
+  });
 });
 
 describe('GET /api/sites/:id/export', () => {
@@ -75,6 +88,27 @@ describe('GET /api/sites/:id/export', () => {
     // the event itself + the pageview of the same visitor
     expect(rows).toHaveLength(2);
     expect(rows.some((r) => r.includes(',event,'))).toBe(true);
+  });
+
+  it('pages through rows sharing a timestamp exactly once, in order', async () => {
+    const tie = t.ctx.sites.create('Ties', ['ties.com'], t.clock.t).id;
+    const ins = t.ctx.db.prepare(
+      `INSERT INTO events (site_id, ts, type, visitor_id, session_id, hostname, path) VALUES (?, ?, 'pageview', 'v', 's', 'ties.com', ?)`,
+    );
+    t.ctx.db.transaction(() => {
+      for (let i = 0; i < 2500; i++) ins.run(tie, t.clock.t - 5000 - (i % 3), `/t/${i}`);
+    })();
+    const res = await api(t.app, cookie, 'GET', `/api/sites/${tie}/export?period=7d`);
+    const paths = res.body
+      .trim()
+      .split('\r\n')
+      .slice(1)
+      .map((l) => l.split(',')[4] as string);
+    expect(paths).toHaveLength(2500);
+    expect(new Set(paths).size).toBe(2500);
+    // within each timestamp, rows come in insertion (id) order
+    const expected = [2, 1, 0].flatMap((r) => Array.from({ length: 2500 }, (_, i) => i).filter((i) => i % 3 === r)).map((i) => `/t/${i}`);
+    expect(paths).toEqual(expected);
   });
 
   it('requires authentication', async () => {

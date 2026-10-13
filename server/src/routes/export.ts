@@ -1,143 +1,116 @@
 import { Readable } from 'node:stream';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import { requireAuth } from '../auth/guard.js';
+import { HttpError } from '../lib/errors.js';
 import { csvRow } from '../lib/csv.js';
 import { formatLocalDate } from '../lib/time.js';
-import { columnFilterSql, type Filters, type Query } from '../stats/filters.js';
+import { EXPORT_HEADER } from '../stats/export.js';
+import type { Query } from '../stats/filters.js';
+import { statsService, type ExportSession } from '../stats/service.js';
 import { loadSite } from './sites.js';
-import { parseStatsParams } from './stats.js';
+import { parseStatsParams, rejectCrossSiteFetch, userKey, type StatsParams } from './stats.js';
 
-const HEADER = [
-  'timestamp',
-  'type',
-  'name',
-  'hostname',
-  'path',
-  'referrer',
-  'utm_source',
-  'utm_medium',
-  'utm_campaign',
-  'utm_term',
-  'utm_content',
-  'country',
-  'device',
-  'browser',
-  'os',
-  'props',
-] as const;
+type ExportRoute = { Params: { id: string }; Querystring: Query };
 
-interface ExportRow {
-  id: number;
-  ts: number;
-  type: string;
-  name: string | null;
-  hostname: string;
-  path: string;
-  referrer: string | null;
-  utm_source: string | null;
-  utm_medium: string | null;
-  utm_campaign: string | null;
-  utm_term: string | null;
-  utm_content: string | null;
-  country: string | null;
-  device: string | null;
-  browser: string | null;
-  os: string | null;
-  props: string | null;
-}
-
-const BATCH = 1000;
-
-/** SQL + params selecting raw events in range with filters (event filter: see spec 4.7). */
-function exportQuery(siteId: string, from: number, to: number, filters: Filters): { sql: string; params: unknown[] } {
-  const cols = columnFilterSql(filters, 'e');
-  let sql = `SELECT e.id, e.ts, e.type, e.name, e.hostname, e.path, e.referrer, e.utm_source, e.utm_medium,
-       e.utm_campaign, e.utm_term, e.utm_content, e.country, e.device, e.browser, e.os, e.props
-     FROM events e
-     WHERE e.site_id = ? AND e.ts >= ? AND e.ts < ? AND (e.ts > ? OR (e.ts = ? AND e.id > ?))${cols.sql}`;
-  const params: unknown[] = [...cols.params];
-  if (filters.event !== undefined) {
-    // custom events with that name, plus pageviews of visitors that triggered it
-    const nameCond = filters.event === null ? 'IS NULL' : '= ?';
-    sql += ` AND ((e.type = 'event' AND e.name ${nameCond}) OR (e.type = 'pageview' AND e.visitor_id IN (
-       SELECT x.visitor_id FROM events x WHERE x.site_id = ? AND x.type = 'event' AND x.ts >= ? AND x.ts < ? AND x.name ${nameCond})))`;
-    if (filters.event !== null) params.push(filters.event);
-    params.push(siteId, from, to);
-    if (filters.event !== null) params.push(filters.event);
-  }
-  sql += ' ORDER BY e.ts, e.id LIMIT ?';
-  return { sql, params };
+/**
+ * A pull-based CSV stream: one keyset page is fetched (off the main thread, or after yielding
+ * to the event loop in-process) per `read()`, so a slow client applies backpressure and the
+ * event loop is never monopolised. Destroying the stream (client gone) stops it.
+ */
+function csvStream(session: ExportSession): Readable {
+  let fetching = false;
+  let headerSent = false;
+  const stream: Readable = new Readable({
+    highWaterMark: 64 * 1024,
+    read() {
+      if (!headerSent) {
+        headerSent = true;
+        this.push(csvRow(EXPORT_HEADER));
+      }
+      pull();
+    },
+    destroy(err, cb) {
+      session.close();
+      cb(err);
+    },
+  });
+  const pull = (): void => {
+    if (fetching || stream.destroyed) return;
+    fetching = true;
+    session.next().then(
+      (batch) => {
+        fetching = false;
+        if (stream.destroyed) return;
+        if (batch.csv) stream.push(batch.csv);
+        if (batch.done) stream.push(null);
+        else if (!batch.csv) pull(); // (cannot happen: a non-final page is never empty)
+      },
+      (err: unknown) => {
+        fetching = false;
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  };
+  return stream;
 }
 
 export async function exportRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
+  const service = statsService(ctx);
+  app.addHook('onRequest', rejectCrossSiteFetch);
+  app.addHook('onClose', async () => service.close());
 
-  app.get<{ Params: { id: string }; Querystring: Query }>(
+  const prepare = (request: FastifyRequest<ExportRoute>): { siteId: string; fileName: string } & StatsParams => {
+    const site = loadSite(ctx, request.params.id);
+    const params = parseStatsParams(ctx, request.query);
+    const fileName = `ptr-analytics-${site.id}-${formatLocalDate(params.range.fromDate)}-${formatLocalDate(params.range.toDate)}.csv`;
+    return { siteId: site.id, fileName, ...params };
+  };
+
+  const csvHeaders = (reply: FastifyReply, fileName: string): void => {
+    reply
+      .header('Content-Type', 'text/csv; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="${fileName}"`)
+      .header('Cache-Control', 'no-store');
+  };
+
+  // HEAD: headers only. (Fastify's automatic HEAD route would run the export and drain it.)
+  app.head<ExportRoute>('/api/sites/:id/export', { preHandler: requireAuth(ctx) }, async (request, reply) => {
+    csvHeaders(reply, prepare(request).fileName);
+    return reply.send();
+  });
+
+  app.get<ExportRoute>(
     '/api/sites/:id/export',
-    { preHandler: requireAuth(ctx) },
+    { preHandler: requireAuth(ctx), exposeHeadRoute: false },
     async (request, reply) => {
-      const site = loadSite(ctx, request.params.id);
-      const { range, filters } = parseStatsParams(ctx, request.query);
-      const { sql, params } = exportQuery(site.id, range.from, range.to, filters);
-      const stmt = ctx.db.prepare(sql);
-
-      // Keyset pagination: each batch is a short synchronous query, so the (single) DB
-      // connection is never held busy between stream reads.
-      let lastTs = -Infinity;
-      let lastId = -1;
-      let headerSent = false;
-      let done = false;
-      const stream = new Readable({
-        read() {
-          if (done) return;
-          try {
-            let chunk = '';
-            if (!headerSent) {
-              chunk += csvRow(HEADER);
-              headerSent = true;
-            }
-            const tsParam = lastTs === -Infinity ? range.from - 1 : lastTs;
-            const rows = stmt.all(site.id, range.from, range.to, tsParam, tsParam, lastId, ...params, BATCH) as ExportRow[];
-            for (const r of rows) {
-              chunk += csvRow([
-                new Date(r.ts).toISOString(),
-                r.type,
-                r.name,
-                r.hostname,
-                r.path,
-                r.referrer,
-                r.utm_source,
-                r.utm_medium,
-                r.utm_campaign,
-                r.utm_term,
-                r.utm_content,
-                r.country,
-                r.device,
-                r.browser,
-                r.os,
-                r.props,
-              ]);
-            }
-            const last = rows[rows.length - 1];
-            if (last) {
-              lastTs = last.ts;
-              lastId = last.id;
-            }
-            if (rows.length < BATCH) done = true;
-            if (chunk) this.push(chunk);
-            if (done) this.push(null);
-          } catch (err) {
-            this.destroy(err as Error);
-          }
-        },
+      const { siteId, fileName, range, filters } = prepare(request);
+      let session: ExportSession;
+      try {
+        session = await service.openExport(userKey(request), {
+          siteId,
+          from: range.from,
+          to: range.to,
+          filters,
+        });
+      } catch (err) {
+        if (err instanceof HttpError && (err.statusCode === 429 || err.statusCode === 503)) {
+          reply.header('Retry-After', err.statusCode === 429 ? '30' : '5');
+        }
+        throw err;
+      }
+      // the client may have gone away while the cursor was opened
+      if (request.raw.destroyed || reply.raw.destroyed) {
+        session.close();
+        return reply;
+      }
+      const stream = csvStream(session);
+      csvHeaders(reply, fileName);
+      // Stop (and free the export slot) as soon as the connection closes, whatever the state.
+      reply.raw.once('close', () => {
+        if (!stream.destroyed) stream.destroy();
       });
-
-      const fileName = `ptr-analytics-${site.id}-${formatLocalDate(range.fromDate)}-${formatLocalDate(range.toDate)}.csv`;
-      reply
-        .header('Content-Type', 'text/csv; charset=utf-8')
-        .header('Content-Disposition', `attachment; filename="${fileName}"`)
-        .header('Cache-Control', 'no-store');
       return reply.send(stream);
     },
   );

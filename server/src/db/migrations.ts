@@ -90,4 +90,13 @@ export const MIGRATIONS: readonly string[] = [
   `
   CREATE INDEX sessions_site_started ON sessions(site_id, started_at);
   `,
+  // v3 — stats performance:
+  // * custom events by name (event filter visitor sets, event props, export with event=)
+  // * pageview counting (COUNT(DISTINCT visitor_id), bounce session sets) from the index alone;
+  //   replaces events_site_type_ts, which is a prefix of it
+  `
+  CREATE INDEX events_site_type_name_ts ON events(site_id, type, name, ts);
+  CREATE INDEX events_site_type_ts_visitor ON events(site_id, type, ts, visitor_id, session_id);
+  DROP INDEX events_site_type_ts;
+  `,
 ];

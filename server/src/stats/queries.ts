@@ -168,11 +168,11 @@ export class StatsQueries {
               CASE j.type WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' WHEN 'null' THEN NULL
                           ELSE CAST(j.value AS TEXT) END AS value,
               COUNT(DISTINCT e.visitor_id) AS visitors, COUNT(*) AS count
-       FROM events e, json_each(e.props) j
-       WHERE e.site_id = ? AND e.type = 'event' AND e.ts >= ? AND e.ts < ? AND e.name = ?
-         AND e.props IS NOT NULL${cols.sql}
+       FROM events e, json_each(CASE WHEN json_valid(e.props) THEN e.props END) j
+       WHERE e.site_id = ? AND e.type = 'event' AND e.name = ? AND e.ts >= ? AND e.ts < ?
+         AND e.props IS NOT NULL AND json_valid(e.props)${cols.sql}
        GROUP BY 1, 2 ORDER BY visitors DESC, count DESC, key, value LIMIT ?`,
-      [siteId, range.from, range.to, eventName, ...cols.params, limit],
+      [siteId, eventName, range.from, range.to, ...cols.params, limit],
     );
   }
 
