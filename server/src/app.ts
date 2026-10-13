@@ -270,7 +270,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   if (options.backgroundJobs) {
     const cleanup = (): void => {
       try {
-        runCleanup(ctx);
+        void runCleanup(ctx);
       } catch (err) {
         ctx.log.error({ err }, 'cleanup job failed');
       }

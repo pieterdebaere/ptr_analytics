@@ -176,6 +176,9 @@ Open the browser console on your website and run
 | `GEOIP_AUTO_DOWNLOAD` | `false` | Download & monthly refresh the free DB-IP *IP to Country Lite* database. |
 | `GEOIP_HEADER` | – | Header with the visitor's country code set by your CDN, e.g. `cf-ipcountry`. Only honoured when `TRUST_PROXY` is set; the origin must be reachable only through that CDN. |
 | `INGEST_RATE_LIMIT` | `600` | Max tracking requests per IP per minute. |
+| `STATS_WORKERS` | `2` | Worker threads for dashboard queries and exports (0 = run in the main thread). |
+| `STATS_QUERY_TIMEOUT_MS` | `30000` | Time budget per dashboard query; slower queries are aborted with 503. |
+| `STATS_CACHE_TTL_MS` | `15000` | How long identical dashboard queries are served from cache. |
 | `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 
 ## Command line

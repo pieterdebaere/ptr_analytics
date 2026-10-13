@@ -15,7 +15,9 @@ export interface CleanupResult {
   sessions: number;
 }
 
-const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+/** Pause between chunks: as long as the chunk took (max 100 ms), i.e. at most ~50% of the main thread. */
+const pause = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, Math.round(ms)))));
 
 /** One cleanup run per context at a time; overlapping calls share the running one. */
 const running = new WeakMap<AppContext, Promise<CleanupResult>>();
@@ -24,7 +26,7 @@ const running = new WeakMap<AppContext, Promise<CleanupResult>>();
  * Hourly maintenance: expired login sessions, salts of past days, analytics data older
  * than RETENTION_DAYS (and the analytics sessions that belong to it), rate limiter sweep.
  *
- * Old analytics data is deleted in small chunks, yielding to the event loop between them,
+ * Old analytics data is deleted in small chunks, pausing between them,
  * so even the first run after enabling RETENTION_DAYS on years of data never blocks
  * requests for long. Never rejects: errors are logged (the result then is partial).
  */
@@ -79,7 +81,7 @@ async function cleanup(c: AppContext, result: CleanupResult): Promise<CleanupRes
         if (n < size) return;
         if (ms > TARGET_CHUNK_MS * 2) size = Math.max(MIN_CHUNK, Math.floor(size / 2));
         else if (ms < TARGET_CHUNK_MS / 2) size = Math.min(MAX_CHUNK, size * 2);
-        await yieldToEventLoop();
+        await pause(ms);
       }
     };
     for (const siteId of c.sites.ids()) {

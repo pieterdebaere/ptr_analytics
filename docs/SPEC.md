@@ -328,6 +328,15 @@ Period resolution (all in `tz`):
 
 Bucket starts are computed in `tz` (DST-correct) and returned as ms epoch (`t`).
 
+#### Load protection
+Stats, vitals, overview and export queries run in a pool of worker threads with read-only
+SQLite connections (`STATS_WORKERS`), each with a time budget (`STATS_QUERY_TIMEOUT_MS` →
+`503 {"error":"query timed out"}`). Concurrency is capped (32 in flight globally, 6 per user;
+exports 1 per user and 2 globally → `429` with `Retry-After`). Identical queries are cached
+for `STATS_CACHE_TTL_MS`. Authenticated GETs carrying a `Sec-Fetch-Site` header other than
+`same-origin`/`none` are rejected with `403`. `HEAD` on export returns headers only.
+Vitals endpoints reject the `referrer`, `utm_*` and `event` filters with `400`.
+
 #### Stats endpoints
 * `GET /api/overview?period&tz` →
   `{sites: [{id, name, domains, visitors, pageviews, previousVisitors, series: number[] /* visitors per bucket */}]}`
