@@ -1,9 +1,10 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BreakdownRows, EventDetailModal, FilterChips } from '../components/analytics';
+import { BreakdownRows, EventDetailDialog, FilterChips } from '../components/analytics';
 import { ErrorBoundary } from '../components/ErrorBoundary';
-import { AreaChart, RingGauge, Sparkline } from '../components/charts';
+import { LiveFeed } from '../components/live';
+import { Sparkline, TimeSeriesChart } from '../components/stats-charts';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -47,7 +48,7 @@ describe('BreakdownRows', () => {
     expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://google.com/']);
     expect(links[0]!.getAttribute('rel')).toBe('noopener noreferrer nofollow');
     expect(links[0]!.getAttribute('target')).toBe('_blank');
-    const buttons = container.querySelectorAll<HTMLButtonElement>('button.row-main');
+    const buttons = container.querySelectorAll<HTMLButtonElement>('button[data-slot="breakdown-row"]');
     act(() => buttons[3]!.click());
     expect(onSelect).toHaveBeenCalledWith({ value: null, visitors: 2, count: 2 });
   });
@@ -123,7 +124,7 @@ describe('BreakdownRows links and bidi', () => {
     );
     expect(container.textContent).not.toContain('\u202E');
     expect(container.textContent).toContain('/\uFFFDgnp.exe');
-    const label = container.querySelector('.row-label .truncate')!;
+    const label = container.querySelector('[data-slot="breakdown-label"]')!;
     expect(label.classList.contains('bidi-isolate')).toBe(true);
     expect(container.innerHTML).not.toContain('\u202E');
   });
@@ -144,36 +145,56 @@ describe('FilterChips', () => {
 });
 
 describe('charts', () => {
-  it('renders an area chart without inline style attributes on SVG', () => {
+  it('renders the Bklit time series chart with an accessible label (nulls are dropped)', () => {
     const t0 = Date.UTC(2026, 0, 1);
     act(() =>
       root.render(
-        <AreaChart
-          points={[0, 1, 2, 3].map((i) => ({ t: t0 + i * 86_400_000, value: i * 10 }))}
+        <TimeSeriesChart
+          points={[0, 1, 2, 3].map((i) => ({ t: t0 + i * 86_400_000, value: i === 2 ? null : i * 10 }))}
           interval="day"
-          label="Visitors"
+          label="Visitors over time"
           valueLabel="Visitors"
           formatValue={(v) => String(v)}
         />,
       ),
     );
-    const svg = container.querySelector('svg');
-    expect(svg).not.toBeNull();
-    expect(svg!.querySelectorAll('path.chart-line')).toHaveLength(1);
-    expect(container.querySelectorAll('[style]')).toHaveLength(0);
+    expect(container.querySelector('[role="img"][aria-label="Visitors over time"]')).not.toBeNull();
   });
 
-  it('renders sparkline and gauge', () => {
+  it('shows an empty state instead of an empty chart', () => {
+    act(() =>
+      root.render(<TimeSeriesChart points={[{ t: 1, value: null }]} interval="day" label="x" valueLabel="x" formatValue={String} />),
+    );
+    expect(container.textContent).toContain('No data for this period');
+  });
+
+  it('renders a sparkline placeholder for short series', () => {
+    act(() => root.render(<Sparkline values={[3]} label="trend" />));
+    expect(container.querySelector('[aria-label="trend"]')).not.toBeNull();
+  });
+});
+
+describe('LiveFeed', () => {
+  it('renders untrusted paths as isolated text with flags only for ISO codes', () => {
+    const now = Date.UTC(2026, 0, 1, 12);
     act(() =>
       root.render(
-        <>
-          <Sparkline values={[1, 2, 3]} label="trend" />
-          <RingGauge score={92.4} tone="good" label="score" />
-        </>,
+        <LiveFeed
+          now={now}
+          recent={[
+            { ts: now - 1000, country: 'BE', path: '/<img src=x onerror=alert(1)>' },
+            { ts: now - 125_000, country: '<b>', path: '/a\u202Eb' },
+          ]}
+        />,
       ),
     );
-    expect(container.querySelector('.sparkline-line')).not.toBeNull();
-    expect(container.querySelector('.gauge-text')!.textContent).toBe('92');
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).toContain('/<img src=x onerror=alert(1)>');
+    expect(container.textContent).toContain('/a\uFFFDb');
+    expect(container.textContent).toContain('just now');
+    expect(container.textContent).toContain('2m ago');
+    expect(container.textContent).toContain('\u{1F1E7}\u{1F1EA}');
+    expect(container.textContent).not.toContain('<b>');
   });
 });
 
@@ -188,7 +209,7 @@ describe('FilterChips bidi', () => {
   });
 });
 
-describe('EventDetailModal bidi', () => {
+describe('EventDetailDialog bidi', () => {
   it('renders the event name, prop keys and values isolated', async () => {
     vi.stubGlobal(
       'fetch',
@@ -198,15 +219,16 @@ describe('EventDetailModal bidi', () => {
     );
     await act(async () => {
       root.render(
-        <EventDetailModal siteId="abc123def456" query={{ period: '7d', tz: 'UTC' }} event={'Sign\u202Eup'} onClose={() => {}} onFilter={() => {}} />,
+        <EventDetailDialog siteId="abc123def456" query={{ period: '7d', tz: 'UTC' }} event={'Sign\u202Eup'} onClose={() => {}} onFilter={() => {}} />,
       );
     });
     for (let i = 0; i < 3; i++) await act(async () => new Promise((r) => setTimeout(r, 0)));
     vi.unstubAllGlobals();
-    const title = document.querySelector('.modal-title bdi');
+    const title = document.querySelector('[data-slot="dialog-title"] bdi');
     expect(title?.textContent).toBe('Sign\uFFFDup');
-    expect(document.querySelector('.props-key bdi')?.textContent).toBe('k\uFFFDey');
-    expect(document.querySelector('.props td bdi')?.textContent).toBe('v\uFFFDal');
+    expect(title?.classList.contains('bidi-isolate')).toBe(true);
+    expect(document.querySelector('[data-slot="event-prop-key"] bdi')?.textContent).toBe('k\uFFFDey');
+    expect(document.querySelector('[data-slot="event-props"] td bdi')?.textContent).toBe('v\uFFFDal');
     expect(document.body.textContent).not.toMatch(/[\u202E\u2067]/);
   });
 });

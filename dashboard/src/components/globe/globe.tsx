@@ -166,7 +166,7 @@ export function Globe({
           ref={canvasRef}
           aria-hidden="true"
           className="absolute inset-0 block h-full w-full"
-          style={{ cursor: 'grab', touchAction: 'none' }}
+          style={{ cursor: 'grab', touchAction: 'pan-y' }}
         />
       </motion.div>
       {children !== undefined && children !== null && <div className="pointer-events-none absolute inset-0 z-10">{children}</div>}

@@ -338,7 +338,7 @@ export function useChartInteraction({
 
   const interactionStyle: React.CSSProperties = {
     cursor: canInteract ? "crosshair" : "default",
-    touchAction: "none",
+    touchAction: "pan-y", // PTR: let the page scroll vertically over charts on touch devices
   };
 
   return {

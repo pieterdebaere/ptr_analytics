@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { ActivityIcon, GlobeIcon } from 'lucide-react';
 import { api } from '@/api/client';
 import type { LiveCountry, LiveOverviewResponse, LiveRecentPageview, SiteLiveResponse } from '@/api/types';
-import { Globe } from '@/components/globe';
+import { LazyGlobe as Globe } from './LazyGlobe';
 import { LiveLine } from '@/components/charts/live-line';
 import { LiveLineChart } from '@/components/charts/live-line-chart';
 import { LiveXAxis } from '@/components/charts/live-x-axis';
@@ -186,7 +186,7 @@ export function LiveOverviewCard({ siteHref }: { siteHref: (id: string) => strin
     <Card className="gap-0 overflow-hidden py-0">
       <div className="grid lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="relative border-b lg:border-r lg:border-b-0">
-          <Globe countries={countries} valueLabel="visitors" className="h-72 w-full sm:h-80 lg:h-[22rem]">
+          <Globe countries={countries} valueLabel="visitors" scrollZoom={false} formatValue={formatNumber} className="h-72 w-full sm:h-80 lg:h-[22rem]">
             <div className="pointer-events-none absolute top-4 left-4">
               <LiveCounter visitors={data ? data.visitors : null} label="visitors online" />
             </div>
@@ -248,7 +248,7 @@ export function SiteLiveView({ siteId }: { siteId: string }) {
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <Card className="relative gap-0 overflow-hidden py-0 lg:col-span-2">
-        <Globe countries={countries} pings={pings} valueLabel="visitors" className="h-80 w-full sm:h-[26rem] lg:h-[30rem]">
+        <Globe countries={countries} pings={pings} valueLabel="visitors" scrollZoom={false} formatValue={formatNumber} className="h-80 w-full sm:h-[26rem] lg:h-[30rem]">
           <div className="pointer-events-none absolute top-4 left-4">
             <LiveCounter visitors={visitors} label={visitors === 1 ? 'visitor online' : 'visitors online'} />
           </div>
