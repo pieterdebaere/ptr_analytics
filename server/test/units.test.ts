@@ -15,11 +15,12 @@ describe('config', () => {
     const c = loadConfig({}, '/srv');
     expect(c).toMatchObject({
       port: 3000,
-      host: '0.0.0.0',
+      host: '127.0.0.1',
       dataDir: '/srv/data',
       publicUrl: null,
       trustProxy: false,
       cookieSecure: false,
+      production: false,
       retentionDays: 0,
       geoipDbPath: path.join('/srv/data', 'geoip-country.mmdb'),
       geoipAutoDownload: false,
@@ -48,8 +49,10 @@ describe('config', () => {
       { TRUST_PROXY: 'maybe' },
       { TRUST_PROXY: '10.0.0.0/33' },
       { COOKIE_SECURE: 'perhaps' },
-      { ADMIN_EMAIL: 'a@b.co' },
       { ADMIN_EMAIL: 'a@b.co', ADMIN_PASSWORD: 'short' },
+      { ADMIN_EMAIL: 'a@b.co', ADMIN_PASSWORD: 'change-me-to-a-long-random-password' },
+      { ADMIN_PASSWORD: 'change-me-to-a-long-random-password' },
+      { ADMIN_EMAIL: 'nope' },
       { ADMIN_EMAIL: 'nope', ADMIN_PASSWORD: 'long enough password' },
       { RETENTION_DAYS: '-1' },
       { GEOIP_AUTO_DOWNLOAD: 'sometimes' },
@@ -60,10 +63,18 @@ describe('config', () => {
     for (const env of bad) expect(() => loadConfig(env), JSON.stringify(env)).toThrow(ConfigError);
   });
 
+  it('accepts only one of ADMIN_EMAIL / ADMIN_PASSWORD (reported by bootstrapAdmin instead)', () => {
+    expect(loadConfig({ ADMIN_EMAIL: 'a@b.co' })).toMatchObject({ adminEmail: 'a@b.co', adminPassword: null });
+    expect(loadConfig({ ADMIN_PASSWORD: 'long enough password' })).toMatchObject({ adminEmail: null });
+    expect(loadConfig({ HOST: '0.0.0.0', NODE_ENV: 'production' })).toMatchObject({ host: '0.0.0.0', production: true });
+  });
+
   it('parses TRUST_PROXY', () => {
     expect(parseTrustProxy('true')).toBe(true);
     expect(parseTrustProxy('false')).toBe(false);
     expect(parseTrustProxy('1')).toBe(1);
+    expect(parseTrustProxy('0')).toBe(false);
+    expect(parseTrustProxy('00')).toBe(false);
     expect(parseTrustProxy('10.0.0.0/8, 127.0.0.1')).toEqual(['10.0.0.0/8', '127.0.0.1']);
   });
 });

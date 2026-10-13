@@ -33,7 +33,7 @@ function array(items: Buffer[]): Buffer {
   return Buffer.concat([Buffer.from([items.length, 11 - 7]), ...items]);
 }
 
-export function buildCountryMmdb(isoCode = 'DE'): Buffer {
+export function buildCountryMmdb(isoCode = 'DE', databaseType = 'Test-Country'): Buffer {
   const nodeCount = 1;
   const dataValue = nodeCount + 16 + 0; // pointer to data offset 0
   const tree = Buffer.alloc(6);
@@ -44,7 +44,7 @@ export function buildCountryMmdb(isoCode = 'DE'): Buffer {
     ['node_count', uint(6, nodeCount)],
     ['record_size', uint(5, 24)],
     ['ip_version', uint(5, 4)],
-    ['database_type', str('Test-Country')],
+    ['database_type', str(databaseType)],
     ['languages', array([str('en')])],
     ['binary_format_major_version', uint(5, 2)],
     ['binary_format_minor_version', uint(5, 0)],

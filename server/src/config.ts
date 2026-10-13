@@ -13,6 +13,8 @@ export interface Config {
   publicUrl: string | null;
   trustProxy: TrustProxy;
   cookieSecure: boolean;
+  /** NODE_ENV === 'production' (only used for startup warnings). */
+  production: boolean;
   adminEmail: string | null;
   adminPassword: string | null;
   retentionDays: number;
@@ -77,7 +79,10 @@ export function parseTrustProxy(value: string | undefined): TrustProxy {
   const v = value.toLowerCase();
   if (v === 'false' || v === '0') return false;
   if (v === 'true') return true;
-  if (/^\d+$/.test(v)) return parseInt10('TRUST_PROXY', v, 0, 100);
+  if (/^\d+$/.test(v)) {
+    const hops = parseInt10('TRUST_PROXY', v, 0, 100);
+    return hops === 0 ? false : hops;
+  }
   const parts = value.split(',').map((p) => p.trim()).filter((p) => p !== '');
   if (parts.length === 0) return false;
   for (const p of parts) {
@@ -108,13 +113,17 @@ export function parsePublicUrl(value: string | undefined): string | null {
   return url.origin;
 }
 
+/** The placeholder from the old example env file; refused so it never ends up in production. */
+export const EXAMPLE_ADMIN_PASSWORD = 'change-me-to-a-long-random-password';
+
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 256;
 
 /** Parse and validate configuration from environment variables. Throws ConfigError. */
 export function loadConfig(env: Env = process.env, cwd: string = process.cwd()): Config {
   const port = parseInt10('PORT', str(env, 'PORT') ?? '3000', 0, 65535);
-  const host = str(env, 'HOST') ?? '0.0.0.0';
+  // Loopback by default (put a reverse proxy in front); the Docker image sets HOST=0.0.0.0.
+  const host = str(env, 'HOST') ?? '127.0.0.1';
   const dataDir = path.resolve(cwd, str(env, 'DATA_DIR') ?? './data');
   const publicUrl = parsePublicUrl(str(env, 'PUBLIC_URL'));
   const trustProxy = parseTrustProxy(str(env, 'TRUST_PROXY'));
@@ -129,14 +138,16 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
   // Do not trim passwords: whitespace may be intentional.
   const adminPasswordRaw = env['ADMIN_PASSWORD'];
   const adminPassword = adminPasswordRaw === undefined || adminPasswordRaw === '' ? null : adminPasswordRaw;
-  if ((adminEmail === null) !== (adminPassword === null)) {
-    throw new ConfigError('ADMIN_EMAIL and ADMIN_PASSWORD must be set together');
-  }
+  // Only one of ADMIN_EMAIL / ADMIN_PASSWORD set is not fatal here: operators commonly
+  // remove the password after the first start. bootstrapAdmin() reports it when it matters.
   if (adminEmail !== null && !isValidEmail(adminEmail)) {
     throw new ConfigError('ADMIN_EMAIL is not a valid email address');
   }
   if (adminPassword !== null && (adminPassword.length < PASSWORD_MIN || adminPassword.length > PASSWORD_MAX)) {
     throw new ConfigError(`ADMIN_PASSWORD must be ${PASSWORD_MIN}..${PASSWORD_MAX} characters long`);
+  }
+  if (adminPassword !== null && adminPassword.trim() === EXAMPLE_ADMIN_PASSWORD) {
+    throw new ConfigError('ADMIN_PASSWORD is still the example value; choose a long random password');
   }
 
   const retentionDays = parseInt10('RETENTION_DAYS', str(env, 'RETENTION_DAYS') ?? '0', 0, 36500);
@@ -172,6 +183,7 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
     publicUrl,
     trustProxy,
     cookieSecure,
+    production: str(env, 'NODE_ENV') === 'production',
     adminEmail: adminEmail === null ? null : adminEmail.toLowerCase(),
     adminPassword,
     retentionDays,

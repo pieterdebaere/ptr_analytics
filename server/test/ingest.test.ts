@@ -275,7 +275,15 @@ describe('POST /api/event', () => {
     expect(events()[0]?.country).toBeNull();
     await t.app.close();
 
+    // Configured but no reverse proxy (TRUST_PROXY=false): any client could send it -> ignored.
     t = await createTestApp({ env: { GEOIP_HEADER: 'CF-IPCountry' } });
+    siteId = t.ctx.sites.create('Example', ['example.com'], t.clock.t).id;
+    expect(t.ctx.geo.enabled).toBe(false);
+    await sendEvent(t.app, pageview(siteId, 'https://example.com/'), { headers: { 'cf-ipcountry': 'DE' } });
+    expect(events()[0]?.country).toBeNull();
+    await t.app.close();
+
+    t = await createTestApp({ env: { GEOIP_HEADER: 'CF-IPCountry', TRUST_PROXY: '1' } });
     siteId = t.ctx.sites.create('Example', ['example.com'], t.clock.t).id;
     await sendEvent(t.app, pageview(siteId, 'https://example.com/'), { headers: { 'cf-ipcountry': 'de' } });
     await sendEvent(t.app, pageview(siteId, 'https://example.com/'), { headers: { 'cf-ipcountry': 'XX' } });
@@ -296,6 +304,117 @@ describe('POST /api/event', () => {
     // window resets
     t.clock.t += 61_000;
     expect((await sendEvent(t.app, pageview(siteId, 'https://example.com/'))).statusCode).toBe(202);
+  });
+});
+
+describe('ingest hardening', () => {
+  const ev = (name: string, props?: unknown): Record<string, unknown> => ({
+    site: siteId,
+    type: 'event',
+    url: 'https://example.com/',
+    name,
+    ...(props === undefined ? {} : { props }),
+  });
+
+  it('rejects control/format characters and lone surrogates in event names and prop keys', async () => {
+    const badNames = ['bad\u0007', 'evil\u202Etxt', 'zero\u200Bwidth', 'b\uFEFFom', 'lone\uD800', 'lone\uDC00x', 'c1\u0085'];
+    for (const name of badNames) {
+      expect((await sendEvent(t.app, ev(name))).statusCode, JSON.stringify(name)).toBe(400);
+    }
+    for (const key of ['k\u202E', 'k\u0000', 'k\u200D', 'k\uD83D']) {
+      expect((await sendEvent(t.app, ev('X', { [key]: 1 }))).statusCode, JSON.stringify(key)).toBe(400);
+    }
+    expect(events()).toHaveLength(0);
+    // Ordinary unicode (incl. emoji) is fine.
+    expect((await sendEvent(t.app, ev('Kauf 🛒 Ü', { 'größe': 'ß' }))).statusCode).toBe(202);
+    expect(events()[0]?.name).toBe('Kauf 🛒 Ü');
+  });
+
+  it('strips control/format characters from prop values and UTM values, truncating on code points', async () => {
+    const res = await sendEvent(
+      t.app,
+      ev('X', {
+        a: 'safe\u202Etxt.exe\u0000\u200B',
+        b: `${'x'.repeat(499)}😀tail`,
+        c: 'lone\uD800surrogate',
+      }),
+    );
+    expect(res.statusCode).toBe(202);
+    const props = JSON.parse(events()[0]?.props ?? '{}') as Record<string, string>;
+    expect(props['a']).toBe('safetxt.exe');
+    // 499 + 2 code units would exceed 500: the pair is dropped, never split.
+    expect(props['b']).toBe('x'.repeat(499));
+    expect(props['c']).toBe('lonesurrogate');
+
+    await sendEvent(
+      t.app,
+      pageview(siteId, 'https://example.com/p?utm_source=%E2%80%AEnews%00letter&utm_medium=%0A%E2%80%8B&utm_campaign=' + '%F0%9F%98%80'.repeat(150)),
+    );
+    const e = events()[1];
+    expect(e?.utm_source).toBe('newsletter');
+    expect(e?.utm_medium).toBeNull();
+    // 128 emoji = 256 code units: fits exactly, no split pair.
+    expect(e?.utm_campaign).toBe('😀'.repeat(128));
+    expect(e?.path).toBe('/p');
+  });
+
+  it('applies the ingest rate limit before reading/parsing the body', async () => {
+    await t.app.close();
+    t = await createTestApp({ env: { INGEST_RATE_LIMIT: '2' } });
+    siteId = t.ctx.sites.create('Example', ['example.com'], t.clock.t).id;
+    // Bodies that fail to parse count towards the limit.
+    expect((await sendEvent(t.app, 'not json')).statusCode).toBe(400);
+    expect((await sendEvent(t.app, '{"__proto__":{}}')).statusCode).toBe(400);
+    expect((await sendEvent(t.app, pageview(siteId, 'https://example.com/'))).statusCode).toBe(429);
+    // Rejected before the body is parsed or even size-checked.
+    expect((await sendEvent(t.app, 'x'.repeat(20_000))).statusCode).toBe(429);
+    expect((await sendEvent(t.app, 'not json', { contentType: 'application/xml' })).statusCode).toBe(429);
+    const limited = await sendEvent(t.app, 'not json');
+    expect(limited.json()).toEqual({ error: 'too many requests' });
+    expect(limited.headers['access-control-allow-origin']).toBe('*');
+    // CORS preflight is not counted / limited.
+    expect((await t.app.inject({ method: 'OPTIONS', url: '/api/event', remoteAddress: '203.0.113.1' })).statusCode).toBe(204);
+    expect(events()).toHaveLength(0);
+  });
+
+  it('rate limits IPv6 clients per /64 and normalises IPv4-mapped addresses', async () => {
+    await t.app.close();
+    t = await createTestApp({ env: { INGEST_RATE_LIMIT: '2' } });
+    siteId = t.ctx.sites.create('Example', ['example.com'], t.clock.t).id;
+    const send = (ip: string) => sendEvent(t.app, pageview(siteId, 'https://example.com/'), { ip });
+    expect((await send('2001:db8:1:2::1')).statusCode).toBe(202);
+    expect((await send('2001:db8:1:2:ffff:ffff:ffff:fffe')).statusCode).toBe(202);
+    // Same /64, different spelling / address -> same bucket.
+    expect((await send('2001:0DB8:0001:0002:0:0:0:99')).statusCode).toBe(429);
+    // A different /64 is unaffected.
+    expect((await send('2001:db8:1:3::1')).statusCode).toBe(202);
+    // ::ffff:198.51.100.9 is the same client as 198.51.100.9.
+    expect((await send('::ffff:198.51.100.9')).statusCode).toBe(202);
+    expect((await send('198.51.100.9')).statusCode).toBe(202);
+    expect((await send('::ffff:c633:6409')).statusCode).toBe(429);
+    const rows = events();
+    // The visitor hash uses the full address (not the /64) and the normalised IPv4 form.
+    expect(rows[0]?.visitor_id).not.toBe(rows[1]?.visitor_id);
+    expect(rows[3]?.visitor_id).toBe(rows[4]?.visitor_id);
+  });
+
+  it('falls back to the socket address when the proxied client IP is not a valid IP', async () => {
+    await t.app.close();
+    t = await createTestApp({ env: { INGEST_RATE_LIMIT: '1', TRUST_PROXY: 'true' } });
+    siteId = t.ctx.sites.create('Example', ['example.com'], t.clock.t).id;
+    const r1 = await sendEvent(t.app, pageview(siteId, 'https://example.com/'), {
+      ip: '198.51.100.20',
+      headers: { 'x-forwarded-for': 'not-an-ip' },
+    });
+    expect(r1.statusCode).toBe(202);
+    // Same socket address, no header: same bucket.
+    expect((await sendEvent(t.app, pageview(siteId, 'https://example.com/'), { ip: '198.51.100.20' })).statusCode).toBe(429);
+    // Valid forwarded addresses are still honoured.
+    const r3 = await sendEvent(t.app, pageview(siteId, 'https://example.com/'), {
+      ip: '198.51.100.20',
+      headers: { 'x-forwarded-for': '192.0.2.5' },
+    });
+    expect(r3.statusCode).toBe(202);
   });
 });
 

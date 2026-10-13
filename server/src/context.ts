@@ -46,6 +46,16 @@ const LOGIN_MAX_PER_EMAIL = 100;
 /** Attempts per client IP per window (higher: several users may share an IP). */
 const LOGIN_MAX_PER_IP = 30;
 
+/**
+ * GEOIP_HEADER is only honoured when a reverse proxy is configured (TRUST_PROXY not false):
+ * without a proxy any client could simply send the header. The proxy/CDN in front MUST set
+ * or overwrite this header on every request (never pass a client-supplied value through),
+ * e.g. Cloudflare's `CF-IPCountry`, or `proxy_set_header X-Country $geoip2_country;` in nginx.
+ */
+export function effectiveGeoipHeader(config: Config): string | null {
+  return config.trustProxy === false ? null : config.geoipHeader;
+}
+
 export function createContext(config: Config, db: DB, now: Clock, log: FastifyBaseLogger, version: string): AppContext {
   return {
     config,
@@ -57,7 +67,7 @@ export function createContext(config: Config, db: DB, now: Clock, log: FastifyBa
     sites: new SiteRepo(db),
     authSessions: new AuthSessionRepo(db),
     salts: new SaltStore(db),
-    geo: new GeoService(config.geoipDbPath, config.geoipHeader, log),
+    geo: new GeoService(config.geoipDbPath, effectiveGeoipHeader(config), log),
     ingest: new IngestStore(db),
     stats: new StatsQueries(db),
     vitals: new VitalsQueries(db),
