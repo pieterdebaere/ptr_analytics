@@ -1,5 +1,5 @@
 import type { DB } from '../db/index.js';
-import type { User } from '../data/users.js';
+import { toUser, type User } from '../data/users.js';
 import { SESSION_TOKEN_RE, generateSessionToken, sha256Hex } from '../lib/ids.js';
 
 const SESSION_COOKIE_BASE = 'pa_session';
@@ -19,6 +19,7 @@ interface Row {
   email: string;
   role: User['role'];
   created_at: number;
+  email_verified_at: number | null;
 }
 
 /** Login sessions. Only sha256(token) is stored. */
@@ -40,12 +41,14 @@ export class AuthSessionRepo {
     const tokenHash = sha256Hex(token);
     const r = this.db
       .prepare(
-        `SELECT u.id, u.email, u.role, u.created_at FROM auth_sessions s JOIN users u ON u.id = s.user_id
+        `SELECT u.id, u.email, u.role, u.created_at, u.email_verified_at FROM auth_sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ? AND s.expires_at > ?`,
       )
       .get(tokenHash, now) as Row | undefined;
     if (!r) return null;
-    return { user: { id: r.id, email: r.email, role: r.role, createdAt: r.created_at }, tokenHash };
+    // Defence in depth: an unverified member never holds a valid session.
+    if (r.role === 'member' && r.email_verified_at === null) return null;
+    return { user: toUser(r), tokenHash };
   }
 
   deleteByHash(tokenHash: string): void {

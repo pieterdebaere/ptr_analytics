@@ -1,6 +1,9 @@
 import type { AppContext } from '../context.js';
 
 const DAY = 86_400_000;
+const UNVERIFIED_TTL_MS = 7 * DAY;
+/** Stripe retries a webhook for up to 3 days; keep processed ids well beyond that. */
+const STRIPE_EVENT_TTL_MS = 30 * DAY;
 /** Initial rows per DELETE; each chunk is its own short write transaction. */
 export const CLEANUP_CHUNK = 1000;
 const MIN_CHUNK = 100;
@@ -10,6 +13,8 @@ const TARGET_CHUNK_MS = 25;
 
 export interface CleanupResult {
   authSessions: number;
+  userTokens: number;
+  unverifiedUsers: number;
   events: number;
   vitals: number;
   sessions: number;
@@ -35,6 +40,8 @@ export function runCleanup(ctx: AppContext): Promise<CleanupResult> {
   if (current) return current;
   const result: CleanupResult = {
     authSessions: 0,
+    userTokens: 0,
+    unverifiedUsers: 0,
     events: 0,
     vitals: 0,
     sessions: 0,
@@ -52,6 +59,10 @@ export function runCleanup(ctx: AppContext): Promise<CleanupResult> {
 async function cleanup(c: AppContext, result: CleanupResult): Promise<CleanupResult> {
   const now = c.now();
   result.authSessions = c.authSessions.purgeExpired(now);
+  result.userTokens = c.userTokens.purgeExpired(now);
+  // Sign-ups never verified within a week are removed (they cannot log in or own sites).
+  result.unverifiedUsers = c.users.purgeUnverified(now - UNVERIFIED_TTL_MS);
+  c.db.prepare('DELETE FROM stripe_events WHERE received_at < ?').run(now - STRIPE_EVENT_TTL_MS);
   c.salts.purgeOld(now);
 
   if (c.config.retentionDays > 0) {
@@ -103,5 +114,11 @@ async function cleanup(c: AppContext, result: CleanupResult): Promise<CleanupRes
   c.limits.ingest?.sweep();
   c.limits.loginIp.sweep();
   c.limits.loginEmail.sweep();
+  c.limits.loginEmailIp.sweep();
+  c.limits.signupIp.sweep();
+  c.limits.signupEmail.sweep();
+  c.limits.forgotIp.sweep();
+  c.limits.forgotEmail.sweep();
+  c.limits.tokenIp.sweep();
   return result;
 }

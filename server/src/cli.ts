@@ -10,7 +10,8 @@ import { hashPassword } from './lib/password.js';
 const USAGE = `PTR Analytics admin CLI
 
 Usage:
-  cli create-user <email> [admin|viewer]   create a user (default role: admin) and print a generated password
+  cli create-user <email> [admin|viewer|member]
+                                           create a user (default role: admin) and print a generated password
   cli reset-password <email>               generate and print a new password (signs out all sessions)
   cli list-users                           list users
   cli delete-user <email>                  delete a user (the last admin cannot be deleted)
@@ -43,7 +44,7 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
       case 'create-user': {
         needEmail();
         const role = (args[1] ?? 'admin') as Role;
-        if (!ROLES.includes(role)) throw new CliError('Role must be "admin" or "viewer".');
+        if (!ROLES.includes(role)) throw new CliError('Role must be "admin", "viewer" or "member".');
         const password = generatePassword();
         const user = users.create(email, await hashPassword(password), role, Date.now());
         if (!user) throw new CliError(`A user with email ${printable(email)} already exists.`);
@@ -72,6 +73,13 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         const found = users.byEmailWithHash(email);
         if (!found) throw new CliError(`No user with email ${printable(email)}.`);
         if (found.user.role === 'admin' && users.countAdmins() <= 1) throw new CliError('The last admin cannot be deleted.');
+        const billing = users.billing(found.user.id);
+        if (billing && billing.status !== 'none' && billing.status !== 'canceled') {
+          throw new CliError(
+            'This member has a Stripe subscription. Delete the account from the dashboard (Users), which cancels it, ' +
+              'or cancel the subscription in Stripe first.',
+          );
+        }
         users.delete(found.user.id);
         out(`Deleted ${printable(found.user.email)}`);
         return;

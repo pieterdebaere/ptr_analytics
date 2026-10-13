@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { MIGRATIONS } from './migrations.js';
+import { MIGRATIONS, type Migration } from './migrations.js';
 
 export type DB = Database.Database;
 
@@ -43,11 +43,27 @@ export function migrate(db: DB): void {
     );
   }
   for (let v = current; v < MIGRATIONS.length; v++) {
-    const sql = MIGRATIONS[v] as string;
-    db.transaction(() => {
-      db.exec(sql);
-      db.pragma(`user_version = ${v + 1}`);
-    })();
+    const m = MIGRATIONS[v] as Migration;
+    if (typeof m === 'string') {
+      db.transaction(() => {
+        db.exec(m);
+        db.pragma(`user_version = ${v + 1}`);
+      })();
+      continue;
+    }
+    // Table rebuild: foreign keys must be off (they cannot be toggled inside a transaction).
+    const fkWasOn = (db.pragma('foreign_keys', { simple: true }) as number) === 1;
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(m.sql);
+        const violations = db.pragma('foreign_key_check') as unknown[];
+        if (violations.length > 0) throw new Error(`migration ${v + 1} would violate foreign keys`);
+        db.pragma(`user_version = ${v + 1}`);
+      })();
+    } finally {
+      if (fkWasOn) db.pragma('foreign_keys = ON');
+    }
   }
 }
 

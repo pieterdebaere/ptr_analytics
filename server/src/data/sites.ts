@@ -6,6 +6,10 @@ export interface Site {
   name: string;
   domains: string[];
   createdAt: number;
+  /** Owning member, or null for operator sites (created by an admin). */
+  ownerId: number | null;
+  /** Over the owner's allowance: ingest drops its events (hosted mode). */
+  suspended: boolean;
 }
 
 interface SiteRow {
@@ -13,6 +17,8 @@ interface SiteRow {
   name: string;
   domains: string;
   created_at: number;
+  owner_id: number | null;
+  suspended: number;
 }
 
 function parseDomains(json: string): string[] {
@@ -24,17 +30,36 @@ function parseDomains(json: string): string[] {
   }
 }
 
-const toSite = (r: SiteRow): Site => ({ id: r.id, name: r.name, domains: parseDomains(r.domains), createdAt: r.created_at });
+const toSite = (r: SiteRow): Site => ({
+  id: r.id,
+  name: r.name,
+  domains: parseDomains(r.domains),
+  createdAt: r.created_at,
+  ownerId: r.owner_id,
+  suspended: r.suspended === 1,
+});
+
+const COLUMNS = 'id, name, domains, created_at, owner_id, suspended';
 
 export class SiteRepo {
   constructor(private readonly db: DB) {}
 
   list(): Site[] {
-    return (this.db.prepare('SELECT * FROM sites ORDER BY name COLLATE NOCASE, id').all() as SiteRow[]).map(toSite);
+    return (this.db.prepare(`SELECT ${COLUMNS} FROM sites ORDER BY name COLLATE NOCASE, id`).all() as SiteRow[]).map(toSite);
+  }
+
+  listByOwner(ownerId: number): Site[] {
+    return (
+      this.db.prepare(`SELECT ${COLUMNS} FROM sites WHERE owner_id = ? ORDER BY name COLLATE NOCASE, id`).all(ownerId) as SiteRow[]
+    ).map(toSite);
+  }
+
+  countByOwner(ownerId: number): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM sites WHERE owner_id = ?').get(ownerId) as { n: number }).n;
   }
 
   byId(id: string): Site | null {
-    const r = this.db.prepare('SELECT * FROM sites WHERE id = ?').get(id) as SiteRow | undefined;
+    const r = this.db.prepare(`SELECT ${COLUMNS} FROM sites WHERE id = ?`).get(id) as SiteRow | undefined;
     return r ? toSite(r) : null;
   }
 
@@ -42,12 +67,12 @@ export class SiteRepo {
     return (this.db.prepare('SELECT id FROM sites').all() as Array<{ id: string }>).map((r) => r.id);
   }
 
-  create(name: string, domains: string[], now: number): Site {
-    const insert = this.db.prepare('INSERT OR IGNORE INTO sites (id, name, domains, created_at) VALUES (?, ?, ?, ?)');
+  create(name: string, domains: string[], now: number, ownerId: number | null = null): Site {
+    const insert = this.db.prepare('INSERT OR IGNORE INTO sites (id, name, domains, created_at, owner_id) VALUES (?, ?, ?, ?, ?)');
     for (let attempt = 0; attempt < 10; attempt++) {
       const id = generateSiteId();
-      if (insert.run(id, name, JSON.stringify(domains), now).changes === 1) {
-        return { id, name, domains, createdAt: now };
+      if (insert.run(id, name, JSON.stringify(domains), now, ownerId).changes === 1) {
+        return { id, name, domains, createdAt: now, ownerId, suspended: false };
       }
     }
     throw new Error('could not allocate a unique site id');
@@ -64,5 +89,24 @@ export class SiteRepo {
 
   delete(id: string): boolean {
     return this.db.prepare('DELETE FROM sites WHERE id = ?').run(id).changes > 0;
+  }
+
+  /**
+   * Keep the owner's `allowance` oldest sites active and suspend the newer ones (null = no
+   * limit). Nothing is deleted.
+   */
+  applyAllowance(ownerId: number, allowance: number | null): void {
+    if (allowance === null) {
+      this.db.prepare('UPDATE sites SET suspended = 0 WHERE owner_id = ? AND suspended <> 0').run(ownerId);
+      return;
+    }
+    this.db
+      .prepare(
+        `UPDATE sites SET suspended = CASE WHEN rowid IN (
+            SELECT rowid FROM sites WHERE owner_id = ? ORDER BY created_at, rowid LIMIT ?
+          ) THEN 0 ELSE 1 END
+         WHERE owner_id = ?`,
+      )
+      .run(ownerId, Math.max(0, allowance), ownerId);
   }
 }

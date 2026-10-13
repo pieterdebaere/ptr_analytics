@@ -14,7 +14,9 @@ function parseId(raw: unknown): number {
 }
 
 function parseRole(v: unknown): Role {
-  if (typeof v !== 'string' || !(ROLES as readonly string[]).includes(v)) throw badRequest('role must be "admin" or "viewer"');
+  if (typeof v !== 'string' || !(ROLES as readonly string[]).includes(v)) {
+    throw badRequest('role must be "admin", "viewer" or "member"');
+  }
   return v as Role;
 }
 
@@ -76,6 +78,8 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
       if (role !== undefined && role !== current.role) {
         if (current.role === 'admin' && ctx.users.countAdmins() <= 1) throw conflict('the last admin cannot be demoted');
         ctx.users.setRole(id, role);
+        // members are limited to their allowance; other roles never have suspended sites
+        ctx.billing.recompute(id);
       }
       if (newHash !== undefined) {
         ctx.users.setPasswordHash(id, newHash);
@@ -91,6 +95,8 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const me = currentUser(request);
     const id = parseId(request.params.id);
     if (id === me.id) throw badRequest('you cannot delete yourself');
+    // A member's subscription is cancelled first (502 and nothing deleted if Stripe fails).
+    if (ctx.users.byId(id)?.role === 'member') await ctx.billing.cancelAll(id);
     const tx = ctx.db.transaction(() => {
       assertStillAdmin(ctx, me.id);
       const target = ctx.users.byId(id);

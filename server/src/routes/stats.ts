@@ -16,7 +16,8 @@ import { resolvePeriod, type ResolvedRange } from '../stats/period.js';
 import { BREAKDOWN_DIMENSIONS, type BreakdownDimension } from '../stats/queries.js';
 import { statsService } from '../stats/service.js';
 import { VITAL_METRICS, type VitalMetric } from '../stats/vitals-score.js';
-import { loadSite } from './sites.js';
+import { accessibleSites, siteFromRequest } from '../auth/access.js';
+import { currentUser } from '../auth/guard.js';
 
 type SiteRoute = { Params: { id: string }; Querystring: Query };
 
@@ -93,14 +94,14 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
 
   app.get<{ Querystring: Query }>('/api/overview', async (request, reply) => {
     const { range } = parseStatsParams(ctx, request.query);
-    const sites = ctx.sites.list().map((s) => ({ id: s.id, name: s.name, domains: s.domains }));
+    const sites = accessibleSites(ctx, currentUser(request)).map((s) => ({ id: s.id, name: s.name, domains: s.domains }));
     return {
       sites: await run(request, reply, { kind: 'overview', sites, range }),
     };
   });
 
   app.get<SiteRoute>('/api/sites/:id/stats/summary', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
     return run(request, reply, {
       kind: 'summary',
@@ -111,7 +112,7 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
   });
 
   app.get<SiteRoute>('/api/sites/:id/stats/timeseries', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
     return {
       interval: range.interval,
@@ -125,7 +126,7 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
   });
 
   app.get<SiteRoute>('/api/sites/:id/stats/breakdown', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
     const dimension = enumParam<BreakdownDimension>(request.query, 'dimension', BREAKDOWN_DIMENSIONS);
     const limit = parseLimit(request.query);
@@ -141,7 +142,7 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
   });
 
   app.get<SiteRoute>('/api/sites/:id/stats/event-props', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseStatsParams(ctx, request.query);
     if (filters.event === undefined || filters.event === null) throw badRequest('event is required');
     const limit = parseLimit(request.query, 100);
@@ -157,17 +158,41 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
   });
 
   app.get<SiteRoute>('/api/sites/:id/stats/realtime', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     // keyed on the current time: never cached
     return {
       visitors: await run(request, reply, { kind: 'realtime', siteId: site.id, now: ctx.now() }, false),
     };
   });
 
+  // ---- Live map (globe): last 5 minutes, never cached ----
+
+  app.get<SiteRoute>('/api/sites/:id/stats/live', async (request, reply) => {
+    const site = siteFromRequest(ctx, request, request.params.id);
+    return run(request, reply, { kind: 'live', siteId: site.id, now: ctx.now() }, false);
+  });
+
+  app.get('/api/live', async (request, reply) => {
+    const user = currentUser(request);
+    const sites = accessibleSites(ctx, user);
+    // admins/viewers: every site (resolved in SQL); members: their own sites only
+    const siteIds = user.role === 'member' ? sites.map((s) => s.id) : null;
+    const result = await run(request, reply, { kind: 'liveAll', siteIds, now: ctx.now() }, false);
+    const names = new Map(sites.map((s) => [s.id, s.name]));
+    return {
+      visitors: result.visitors,
+      countries: result.countries,
+      sites: result.sites.flatMap((r) => {
+        const name = names.get(r.id);
+        return name === undefined ? [] : [{ id: r.id, name, visitors: r.visitors }];
+      }),
+    };
+  });
+
   // ---- Speed Insights ----
 
   app.get<SiteRoute>('/api/sites/:id/vitals/summary', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseVitalsParams(ctx, request.query);
     return run(request, reply, {
       kind: 'vitalsSummary',
@@ -178,7 +203,7 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
   });
 
   app.get<SiteRoute>('/api/sites/:id/vitals/timeseries', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseVitalsParams(ctx, request.query);
     const metric = enumParam<VitalMetric | 'RES'>(request.query, 'metric', [...VITAL_METRICS, 'RES']);
     const points = await run(request, reply, {
@@ -192,7 +217,7 @@ export async function statsRoutes(app: FastifyInstance, opts: { ctx: AppContext 
   });
 
   app.get<SiteRoute>('/api/sites/:id/vitals/breakdown', async (request, reply) => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const { range, filters } = parseVitalsParams(ctx, request.query);
     const metric = enumParam<VitalMetric>(request.query, 'metric', VITAL_METRICS);
     const dimension = enumParam<VitalsDimension>(request.query, 'dimension', Object.keys(VITALS_COLUMNS) as VitalsDimension[]);

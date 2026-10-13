@@ -8,7 +8,7 @@ import { formatLocalDate } from '../lib/time.js';
 import { EXPORT_HEADER } from '../stats/export.js';
 import type { Query } from '../stats/filters.js';
 import { statsService, type ExportSession } from '../stats/service.js';
-import { loadSite } from './sites.js';
+import { siteFromRequest } from '../auth/access.js';
 import { parseStatsParams, rejectCrossSiteFetch, userKey, type StatsParams } from './stats.js';
 
 type ExportRoute = { Params: { id: string }; Querystring: Query };
@@ -62,7 +62,7 @@ export async function exportRoutes(app: FastifyInstance, opts: { ctx: AppContext
   app.addHook('onClose', async () => service.close());
 
   const prepare = (request: FastifyRequest<ExportRoute>): { siteId: string; fileName: string } & StatsParams => {
-    const site = loadSite(ctx, request.params.id);
+    const site = siteFromRequest(ctx, request, request.params.id);
     const params = parseStatsParams(ctx, request.query);
     const fileName = `ptr-analytics-${site.id}-${formatLocalDate(params.range.fromDate)}-${formatLocalDate(params.range.toDate)}.csv`;
     return { siteId: site.id, fileName, ...params };

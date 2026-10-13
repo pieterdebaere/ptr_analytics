@@ -45,14 +45,15 @@ export function registerSecurityHeaders(app: FastifyInstance, config: Config): v
 }
 
 /**
- * CSRF (spec 4.6): every non-GET/HEAD/OPTIONS request except the public ingest route must
+ * CSRF (spec 4.6): every non-GET/HEAD/OPTIONS request except the public ingest route and the
+ * Stripe webhook (server-to-server, authenticated by its signature, never by cookies) must
  * carry `X-PA-Request: 1`; a present Origin must equal PUBLIC_URL's origin (or the request Host).
  *
  * The exemption is decided on the *matched route* (`routeOptions.url`), not on the raw URL:
  * the router decodes and normalises paths (`/%61pi/users` routes to `/api/users`), so a check
  * on the raw string could be bypassed. Everything else is checked (default deny).
  */
-const CSRF_EXEMPT_ROUTES = new Set(['/api/event']);
+const CSRF_EXEMPT_ROUTES = new Set(['/api/event', '/api/billing/webhook']);
 
 export function registerCsrfCheck(app: FastifyInstance, config: Config): void {
   app.addHook('onRequest', async (request, reply) => {

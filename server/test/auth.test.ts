@@ -45,7 +45,7 @@ describe('login / logout / me', () => {
     const res = await loginReq(ADMIN_EMAIL.toUpperCase(), ADMIN_PASSWORD);
     expect(res.statusCode).toBe(200);
     const body = res.json() as { user: Record<string, unknown> };
-    expect(body.user).toEqual({ id: 1, email: ADMIN_EMAIL, role: 'admin', createdAt: t.clock.t });
+    expect(body.user).toEqual({ id: 1, email: ADMIN_EMAIL, role: 'admin', createdAt: t.clock.t, emailVerified: true });
     expect(JSON.stringify(body)).not.toContain('password');
 
     const setCookie = String(res.headers['set-cookie']);
@@ -288,7 +288,14 @@ describe('sites API', () => {
     expect(created.statusCode).toBe(201);
     const site = (created.json() as { site: { id: string; name: string; domains: string[]; createdAt: number } }).site;
     expect(site.id).toMatch(/^[a-z0-9]{12}$/);
-    expect(site).toMatchObject({ name: 'My Site', domains: ['example.com', 'www.example.com', '*.example.org', 'localhost'] });
+    expect(site).toEqual({
+      id: site.id,
+      name: 'My Site',
+      domains: ['example.com', 'www.example.com', '*.example.org', 'localhost'],
+      createdAt: t.clock.t,
+      suspended: false,
+      ownerId: null,
+    });
 
     const patched = await api(t.app, admin, 'PATCH', `/api/sites/${site.id}`, { domains: ['new.example'] });
     expect(patched.json()).toMatchObject({ site: { name: 'My Site', domains: ['new.example'] } });

@@ -27,6 +27,28 @@ export interface Config {
   logLevel: LogLevel;
   trackerFile: string;
   dashboardDir: string;
+  /** Hosted ("cloud") mode, spec section 6. Everything is off by default. */
+  cloud: CloudConfig;
+}
+
+export interface CloudConfig {
+  signupEnabled: boolean;
+  /** nodemailer connection URL (contains credentials: never log it). */
+  smtpUrl: string | null;
+  mailFrom: string | null;
+  memberSiteLimit: number;
+  billingEnabled: boolean;
+  /** Secrets: never log them. */
+  stripeSecretKey: string | null;
+  stripeWebhookSecret: string | null;
+  stripePriceId: string | null;
+  stripeAutomaticTax: boolean;
+  freeSites: number;
+  pricePerSiteCents: number;
+  /** ISO 4217, lower case. */
+  priceCurrency: string;
+  termsUrl: string | null;
+  privacyUrl: string | null;
 }
 
 export class ConfigError extends Error {
@@ -173,6 +195,8 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
   }
   const logLevel = logLevelRaw as LogLevel;
 
+  const cloud = loadCloudConfig(env, publicUrl);
+
   const trackerFile = path.resolve(cwd, str(env, 'TRACKER_FILE') ?? path.join(PACKAGE_DIR, '..', 'tracker', 'dist', 'script.js'));
   const dashboardDir = path.resolve(cwd, str(env, 'DASHBOARD_DIR') ?? path.join(PACKAGE_DIR, '..', 'dashboard', 'dist'));
 
@@ -194,6 +218,110 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
     logLevel,
     trackerFile,
     dashboardDir,
+    cloud,
+  };
+}
+
+function optBool(env: Env, key: string, def: boolean): boolean {
+  const raw = str(env, key);
+  return raw === undefined ? def : parseBool(key, raw);
+}
+
+function optUrl(env: Env, key: string): string | null {
+  const raw = str(env, key);
+  if (raw === undefined) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigError(`${key} must be an absolute http(s) URL`);
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || raw.length > 2048) {
+    throw new ConfigError(`${key} must be an absolute http(s) URL without credentials`);
+  }
+  return url.href;
+}
+
+/** A display name + address as nodemailer accepts it, without header-injection characters. */
+function parseMailFrom(value: string): string {
+  if (value.length > 320 || /[\r\n\p{Cc}\p{Cf}]/u.test(value)) throw new ConfigError('MAIL_FROM is not a valid sender');
+  const m = /<([^<>]+)>\s*$/.exec(value);
+  const address = (m ? m[1] : value)?.trim() ?? '';
+  if (!isValidEmail(address)) throw new ConfigError('MAIL_FROM must be an address such as "PTR Analytics <no-reply@example.com>"');
+  return value;
+}
+
+function parseSmtpUrl(value: string): string {
+  // Never echo the value: it usually contains the SMTP password.
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError('SMTP_URL must be a URL such as smtps://user:pass@smtp.example.com:465');
+  }
+  if (url.protocol !== 'smtp:' && url.protocol !== 'smtps:') throw new ConfigError('SMTP_URL must use smtp:// or smtps://');
+  if (!url.hostname) throw new ConfigError('SMTP_URL must contain a host');
+  return value;
+}
+
+/** Hosted-mode settings (spec 6.1). Fails fast on incomplete combinations; never echoes secrets. */
+export function loadCloudConfig(env: Env, publicUrl: string | null): CloudConfig {
+  const signupEnabled = optBool(env, 'SIGNUP_ENABLED', false);
+  const billingEnabled = optBool(env, 'BILLING_ENABLED', false);
+  const smtpRaw = str(env, 'SMTP_URL');
+  const smtpUrl = smtpRaw === undefined ? null : parseSmtpUrl(smtpRaw);
+  const fromRaw = str(env, 'MAIL_FROM');
+  const mailFrom = fromRaw === undefined ? null : parseMailFrom(fromRaw);
+
+  if (signupEnabled) {
+    const missing = [smtpUrl ? null : 'SMTP_URL', mailFrom ? null : 'MAIL_FROM', publicUrl ? null : 'PUBLIC_URL'].filter(
+      (k): k is string => k !== null,
+    );
+    if (missing.length > 0) {
+      throw new ConfigError(`SIGNUP_ENABLED=true requires ${missing.join(', ')} (email verification is mandatory)`);
+    }
+  }
+
+  const stripeSecretKey = str(env, 'STRIPE_SECRET_KEY') ?? null;
+  const stripeWebhookSecret = str(env, 'STRIPE_WEBHOOK_SECRET') ?? null;
+  const stripePriceId = str(env, 'STRIPE_PRICE_ID') ?? null;
+  if (stripeSecretKey !== null && !/^(sk|rk)_[A-Za-z0-9_]{8,250}$/.test(stripeSecretKey)) {
+    throw new ConfigError('STRIPE_SECRET_KEY must be a Stripe secret (sk_...) or restricted (rk_...) key');
+  }
+  if (stripeWebhookSecret !== null && !/^whsec_[A-Za-z0-9+/=_-]{8,250}$/.test(stripeWebhookSecret)) {
+    throw new ConfigError('STRIPE_WEBHOOK_SECRET must be a webhook signing secret (whsec_...)');
+  }
+  if (stripePriceId !== null && !/^price_[A-Za-z0-9_]{4,250}$/.test(stripePriceId)) {
+    throw new ConfigError('STRIPE_PRICE_ID must be a Stripe price id (price_...)');
+  }
+  if (billingEnabled) {
+    if (!signupEnabled) throw new ConfigError('BILLING_ENABLED=true requires SIGNUP_ENABLED=true');
+    const missing = [
+      stripeSecretKey ? null : 'STRIPE_SECRET_KEY',
+      stripeWebhookSecret ? null : 'STRIPE_WEBHOOK_SECRET',
+      stripePriceId ? null : 'STRIPE_PRICE_ID',
+    ].filter((k): k is string => k !== null);
+    if (missing.length > 0) throw new ConfigError(`BILLING_ENABLED=true requires ${missing.join(', ')}`);
+  }
+
+  const currency = (str(env, 'PRICE_CURRENCY') ?? 'eur').toLowerCase();
+  if (!/^[a-z]{3}$/.test(currency)) throw new ConfigError('PRICE_CURRENCY must be a 3-letter ISO currency code (e.g. eur)');
+
+  return {
+    signupEnabled,
+    smtpUrl,
+    mailFrom,
+    memberSiteLimit: parseInt10('MEMBER_SITE_LIMIT', str(env, 'MEMBER_SITE_LIMIT') ?? '10', 0, 100_000),
+    billingEnabled,
+    stripeSecretKey,
+    stripeWebhookSecret,
+    stripePriceId,
+    stripeAutomaticTax: optBool(env, 'STRIPE_AUTOMATIC_TAX', false),
+    freeSites: parseInt10('FREE_SITES', str(env, 'FREE_SITES') ?? '1', 0, 1000),
+    pricePerSiteCents: parseInt10('PRICE_PER_SITE_CENTS', str(env, 'PRICE_PER_SITE_CENTS') ?? '100', 0, 100_000_000),
+    priceCurrency: currency,
+    termsUrl: optUrl(env, 'TERMS_URL'),
+    privacyUrl: optUrl(env, 'PRIVACY_URL'),
   };
 }
 

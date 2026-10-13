@@ -13,20 +13,28 @@ export function validPassword(v: unknown): v is string {
   return typeof v === 'string' && v.length >= PASSWORD_MIN && v.length <= PASSWORD_MAX;
 }
 
+export function setSessionCookie(ctx: AppContext, reply: FastifyReply, token: string): void {
+  reply.setCookie(sessionCookieName(ctx.config.cookieSecure), token, {
+    httpOnly: true,
+    sameSite: 'strict',
+    path: '/',
+    secure: ctx.config.cookieSecure,
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
+  });
+}
+
+export function clearSessionCookie(ctx: AppContext, reply: FastifyReply): void {
+  reply.clearCookie(sessionCookieName(ctx.config.cookieSecure), {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: ctx.config.cookieSecure,
+  });
+}
+
 export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
   const auth = requireAuth(ctx);
-  const SESSION_COOKIE = sessionCookieName(ctx.config.cookieSecure);
-
-  const setSessionCookie = (reply: FastifyReply, token: string): void => {
-    reply.setCookie(SESSION_COOKIE, token, {
-      httpOnly: true,
-      sameSite: 'strict',
-      path: '/',
-      secure: ctx.config.cookieSecure,
-      maxAge: Math.floor(SESSION_TTL_MS / 1000),
-    });
-  };
 
   app.post('/api/auth/login', async (request, reply) => {
     const body = objectBody(request.body);
@@ -55,15 +63,17 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
       throw new HttpError(401, 'invalid email or password');
     }
     ctx.limits.loginEmailIp.reset(`${email}\n${ipKey}`);
+    // Only revealed to someone who knows the password.
+    if (found.user.role === 'member' && !found.user.emailVerified) throw new HttpError(403, 'email not verified');
     const { token } = ctx.authSessions.create(found.user.id, ctx.now());
-    setSessionCookie(reply, token);
+    setSessionCookie(ctx, reply, token);
     return { user: found.user };
   });
 
   app.post('/api/auth/logout', async (request, reply) => {
     const token = sessionToken(request);
     if (token !== undefined) ctx.authSessions.deleteToken(token);
-    reply.clearCookie(SESSION_COOKIE, { path: '/', httpOnly: true, sameSite: 'strict', secure: ctx.config.cookieSecure });
+    clearSessionCookie(ctx, reply);
     return reply.code(204).send();
   });
 

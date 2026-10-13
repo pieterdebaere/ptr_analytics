@@ -179,7 +179,78 @@ export class StatsQueries {
   realtime(siteId: string, now: number): number {
     return this.get<{ n: number }>(
       `SELECT COUNT(DISTINCT visitor_id) AS n FROM events WHERE site_id = ? AND ts >= ? AND ts <= ?`,
-      [siteId, now - 5 * 60_000, now],
+      [siteId, now - LIVE_WINDOW_MS, now],
     ).n;
   }
+
+  /** Live map of one site (spec 4.7): last 5 minutes. */
+  live(siteId: string, now: number): LiveSite {
+    const from = now - LIVE_WINDOW_MS;
+    const visitors = this.realtime(siteId, now);
+    const countries = this.all<LiveCountry>(
+      `SELECT country, COUNT(DISTINCT visitor_id) AS visitors FROM events
+       WHERE site_id = ? AND ts >= ? AND ts <= ?
+       GROUP BY country ORDER BY visitors DESC, country LIMIT ?`,
+      [siteId, from, now, LIVE_MAX_COUNTRIES],
+    );
+    const recent = this.all<LiveRecent>(
+      `SELECT ts, country, path FROM events
+       WHERE site_id = ? AND type = 'pageview' AND ts >= ? AND ts <= ?
+       ORDER BY ts DESC, id DESC LIMIT ?`,
+      [siteId, from, now, LIVE_MAX_RECENT],
+    );
+    return { visitors, countries, recent };
+  }
+
+  /** Live map over several sites (null = every site). */
+  liveAll(siteIds: readonly string[] | null, now: number): LiveAll {
+    const from = now - LIVE_WINDOW_MS;
+    if (siteIds !== null && siteIds.length === 0) return { visitors: 0, countries: [], sites: [] };
+    // Visitor ids are per site (the hash includes the site id), so (site, visitor) pairs are
+    // distinct visitors. The site IN (...) lets every site use the (site_id, ts) index.
+    const scope =
+      siteIds === null
+        ? { sql: 'site_id IN (SELECT id FROM sites)', params: [] as unknown[] }
+        : { sql: `site_id IN (${siteIds.map(() => '?').join(', ')})`, params: [...siteIds] as unknown[] };
+    const perSite = this.all<{ id: string; visitors: number }>(
+      `SELECT site_id AS id, COUNT(DISTINCT visitor_id) AS visitors FROM events
+       WHERE ${scope.sql} AND ts >= ? AND ts <= ?
+       GROUP BY site_id ORDER BY visitors DESC, site_id`,
+      [...scope.params, from, now],
+    );
+    const countries = this.all<LiveCountry>(
+      `SELECT country, COUNT(*) AS visitors FROM (
+         SELECT DISTINCT site_id, visitor_id, country FROM events WHERE ${scope.sql} AND ts >= ? AND ts <= ?
+       ) GROUP BY country ORDER BY visitors DESC, country LIMIT ?`,
+      [...scope.params, from, now, LIVE_MAX_COUNTRIES],
+    );
+    return { visitors: perSite.reduce((n, r) => n + r.visitors, 0), countries, sites: perSite };
+  }
+}
+
+export const LIVE_WINDOW_MS = 5 * 60_000;
+const LIVE_MAX_RECENT = 50;
+const LIVE_MAX_COUNTRIES = 300;
+
+export interface LiveCountry {
+  country: string | null;
+  visitors: number;
+}
+
+export interface LiveRecent {
+  ts: number;
+  country: string | null;
+  path: string;
+}
+
+export interface LiveSite {
+  visitors: number;
+  countries: LiveCountry[];
+  recent: LiveRecent[];
+}
+
+export interface LiveAll {
+  visitors: number;
+  countries: LiveCountry[];
+  sites: Array<{ id: string; visitors: number }>;
 }

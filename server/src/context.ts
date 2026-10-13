@@ -2,6 +2,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from './config.js';
 import type { DB } from './db/index.js';
 import { AuthSessionRepo } from './auth/sessions.js';
+import { UserTokenRepo } from './auth/tokens.js';
+import { BillingService } from './billing/service.js';
+import { HttpStripeClient, type StripeClient } from './billing/stripe.js';
+import { Mailer, smtpTransport, type MailTransport } from './mail.js';
 import { SiteRepo } from './data/sites.js';
 import { UserRepo, type User } from './data/users.js';
 import { GeoService } from './geo/geo.js';
@@ -22,6 +26,10 @@ export interface AppContext {
   users: UserRepo;
   sites: SiteRepo;
   authSessions: AuthSessionRepo;
+  userTokens: UserTokenRepo;
+  /** Outgoing mail (hosted mode), null when SIGNUP_ENABLED is off. */
+  mailer: Mailer | null;
+  billing: BillingService;
   salts: SaltStore;
   geo: GeoService;
   ingest: IngestStore;
@@ -32,7 +40,21 @@ export interface AppContext {
     loginIp: RateLimiter;
     loginEmailIp: RateLimiter;
     loginEmail: RateLimiter;
+    /** Sign-up / forgot-password requests per client IP and per email address. */
+    signupIp: RateLimiter;
+    signupEmail: RateLimiter;
+    forgotIp: RateLimiter;
+    forgotEmail: RateLimiter;
+    /** verify / reset token submissions per client IP. */
+    tokenIp: RateLimiter;
   };
+}
+
+export interface ContextOptions {
+  /** Mail transport (tests capture mail); default: SMTP from SMTP_URL. */
+  mailTransport?: MailTransport;
+  /** Stripe client (tests inject a fake); default: REST client when STRIPE_SECRET_KEY is set. */
+  stripe?: StripeClient;
 }
 
 const LOGIN_WINDOW_MS = 15 * 60_000;
@@ -56,16 +78,36 @@ export function effectiveGeoipHeader(config: Config): string | null {
   return config.trustProxy === false ? null : config.geoipHeader;
 }
 
-export function createContext(config: Config, db: DB, now: Clock, log: FastifyBaseLogger, version: string): AppContext {
+const HOUR_MS = 3_600_000;
+
+export function createContext(
+  config: Config,
+  db: DB,
+  now: Clock,
+  log: FastifyBaseLogger,
+  version: string,
+  options: ContextOptions = {},
+): AppContext {
+  const users = new UserRepo(db);
+  const sites = new SiteRepo(db);
+  const cloud = config.cloud;
+  let mailer: Mailer | null = null;
+  if (cloud.signupEnabled && cloud.smtpUrl && cloud.mailFrom) {
+    mailer = new Mailer(options.mailTransport ?? smtpTransport(cloud.smtpUrl), cloud.mailFrom, log);
+  }
+  const stripe = options.stripe ?? (cloud.stripeSecretKey ? new HttpStripeClient(cloud.stripeSecretKey) : null);
   return {
     config,
     db,
     now,
     log,
     version,
-    users: new UserRepo(db),
-    sites: new SiteRepo(db),
+    users,
+    sites,
     authSessions: new AuthSessionRepo(db),
+    userTokens: new UserTokenRepo(db),
+    mailer,
+    billing: new BillingService({ config, db, users, sites, log }, stripe),
     salts: new SaltStore(db),
     geo: new GeoService(config.geoipDbPath, effectiveGeoipHeader(config), log),
     ingest: new IngestStore(db),
@@ -76,6 +118,11 @@ export function createContext(config: Config, db: DB, now: Clock, log: FastifyBa
       loginIp: new RateLimiter(LOGIN_MAX_PER_IP, LOGIN_WINDOW_MS, now, 20_000),
       loginEmailIp: new RateLimiter(LOGIN_MAX_PER_EMAIL_IP, LOGIN_WINDOW_MS, now, 20_000),
       loginEmail: new RateLimiter(LOGIN_MAX_PER_EMAIL, LOGIN_WINDOW_MS, now, 20_000),
+      signupIp: new RateLimiter(10, HOUR_MS, now, 20_000),
+      signupEmail: new RateLimiter(3, HOUR_MS, now, 20_000),
+      forgotIp: new RateLimiter(10, HOUR_MS, now, 20_000),
+      forgotEmail: new RateLimiter(3, HOUR_MS, now, 20_000),
+      tokenIp: new RateLimiter(30, 15 * 60_000, now, 20_000),
     },
   };
 }

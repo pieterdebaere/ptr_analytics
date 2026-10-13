@@ -31,6 +31,8 @@ Connect any website with **one line** in its `<head>`:
 **One server, many sites**
 - Central overview of all connected websites with sparklines and trends
 - Multiple users (admin / viewer)
+- Optional hosted mode: public sign-up with email verification, per-member sites and
+  per-site billing with Stripe (see [Hosted mode](#hosted-mode))
 
 **Privacy & security**
 - No cookies, no local storage, no persistent identifiers — no cookie banner needed
@@ -181,11 +183,69 @@ Open the browser console on your website and run
 | `STATS_CACHE_TTL_MS` | `15000` | How long identical dashboard queries are served from cache. |
 | `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 
+Hosted mode (all off by default, see [Hosted mode](#hosted-mode)):
+
+| Variable | Default | Description |
+|---|---|---|
+| `SIGNUP_ENABLED` | `false` | Public self-service sign-up (`member` accounts, email verification). Requires `SMTP_URL`, `MAIL_FROM` and `PUBLIC_URL`. |
+| `SMTP_URL` | – | Outgoing mail server, e.g. `smtps://user:pass@smtp.example.com:465`. |
+| `MAIL_FROM` | – | Sender, e.g. `PTR Analytics <no-reply@example.com>`. |
+| `MEMBER_SITE_LIMIT` | `10` | Max sites per member when billing is disabled. |
+| `TERMS_URL` / `PRIVACY_URL` | – | Shown on the sign-up page; when set, sign-up requires accepting them. |
+| `BILLING_ENABLED` | `false` | Charge members per site with Stripe. Requires `SIGNUP_ENABLED` and the three Stripe variables. |
+| `STRIPE_SECRET_KEY` | – | `sk_live_…` / `sk_test_…` or a restricted key (`rk_…`). |
+| `STRIPE_WEBHOOK_SECRET` | – | `whsec_…` of the webhook endpoint `PUBLIC_URL/api/billing/webhook`. |
+| `STRIPE_PRICE_ID` | – | Recurring per-unit price (`price_…`), e.g. €1 per site per month. |
+| `STRIPE_AUTOMATIC_TAX` | `false` | Enable Stripe Tax in Checkout. |
+| `FREE_SITES` | `1` | Sites included for free per member (billing enabled). |
+| `PRICE_PER_SITE_CENTS` / `PRICE_CURRENCY` | `100` / `eur` | Display only; the Stripe price is authoritative. |
+
+## Hosted mode
+
+The same server can run as a hosted service where anyone can create an account. A
+self-hosted install is unaffected unless you set `SIGNUP_ENABLED=true`.
+
+* **Accounts.** Besides `admin` (operator: all sites, user management, never billed) and
+  `viewer` (read-only access to all sites), there is a `member` role: a self-service account
+  that only sees and manages the sites it created. Sign-up needs a verified email address
+  (link valid 24 h); "forgot password" mails a one-hour reset link. Members can delete their
+  account, which cancels their subscription and deletes all their sites and data. Admins can
+  also create members (`role: "member"`) from the user management screen or the CLI.
+  Sign-ups that are never verified are removed after 7 days.
+* **Limits.** Without billing every member may create `MEMBER_SITE_LIMIT` sites. With
+  billing, `FREE_SITES` are free and each additional site is one unit of `STRIPE_PRICE_ID`.
+  When a member pays for fewer sites than it has (e.g. after cancelling), its oldest sites
+  stay active and newer ones are *suspended*: their tracking requests are accepted but
+  dropped, nothing is deleted, and they become active again as soon as the allowance allows.
+  Sites created by admins have no owner and are never limited.
+* **Mail.** Any SMTP provider works. Mail is sent in the background; delivery failures are
+  logged without addresses or links.
+
+### Stripe setup
+
+1. Create a product with a **recurring, per-unit** price (e.g. €1.00 / month) and copy its
+   `price_…` id to `STRIPE_PRICE_ID`.
+2. Create a secret key (or a restricted key with write access to Customers, Checkout
+   Sessions, Subscriptions and Customer portal) → `STRIPE_SECRET_KEY`.
+3. Add a webhook endpoint `https://analytics.example.com/api/billing/webhook` for the events
+   `checkout.session.completed`, `customer.subscription.created`,
+   `customer.subscription.updated` and `customer.subscription.deleted`, and copy its signing
+   secret to `STRIPE_WEBHOOK_SECRET`.
+4. Configure the [customer portal](https://dashboard.stripe.com/settings/billing/portal)
+   (invoices, payment methods, cancellation). Do not allow customers to switch to other
+   prices there: only `STRIPE_PRICE_ID` counts.
+5. Set `BILLING_ENABLED=true` and restart.
+
+Webhooks are only a trigger: the server always re-reads the subscription from the Stripe API,
+so replayed or out-of-order events are harmless. Increasing the number of paid sites is
+invoiced immediately (prorated) and takes effect once paid; decreasing it credits the
+difference on the next invoice; `0` cancels at the end of the billing period.
+
 ## Command line
 
 ```bash
 # Docker
-docker compose exec analytics node server/dist/cli.js create-user alice@example.com viewer
+docker compose exec analytics node server/dist/cli.js create-user alice@example.com viewer   # admin | viewer | member
 docker compose exec analytics node server/dist/cli.js reset-password you@example.com
 docker compose exec analytics node server/dist/cli.js list-users
 docker compose exec analytics node server/dist/cli.js delete-user alice@example.com

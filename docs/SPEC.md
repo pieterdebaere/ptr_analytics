@@ -422,12 +422,14 @@ access to all sites — self-hosted teams) and `member` (self-service account: s
 **only the sites it owns**). `sites.owner_id` references the creating user (`ON DELETE CASCADE`).
 Every site-scoped endpoint (stats, vitals, export, live, settings) checks access:
 admin/viewer → any site; member → `owner_id = user.id`, otherwise `404`.
-`User = {id, email, role, createdAt, emailVerified}`; `Site` gains `suspended: boolean`.
+`User = {id, email, role, createdAt, emailVerified}`; `Site` gains `suspended: boolean` and,
+for admins only, `ownerId: number|null` (`null` = operator site: never suspended, never
+deleted together with a user).
 
 ### 6.3 Auth endpoints (cloud)
 
 * `GET /api/public-config` (no auth) →
-  `{signupEnabled, billingEnabled, freeSites, pricePerSiteCents, currency, termsUrl, privacyUrl}`
+  `{signupEnabled, billingEnabled, freeSites, memberSiteLimit, pricePerSiteCents, currency, termsUrl, privacyUrl}`
 * `POST /api/auth/signup` `{email, password, acceptTerms: true}` → always `202 {ok:true}`
   (no account enumeration). New address: create unverified member + send a verification link
   `PUBLIC_URL/verify?token=…` (24 h). Existing address: send a "you already have an account"
@@ -445,7 +447,10 @@ Tokens: 32 random bytes, only `sha256(token)` stored, single use.
 Allowance for a member = `FREE_SITES + paidSites` (billing enabled) or `MEMBER_SITE_LIMIT`.
 `POST /api/sites` beyond the allowance → `402 {error, code: "upgrade_required"}`.
 * `GET /api/billing` →
-  `{enabled, freeSites, pricePerSiteCents, currency, sitesUsed, sitesAllowed, paidSites, status: "none"|"active"|"trialing"|"past_due"|"canceled"|"unpaid"|"incomplete", hasCustomer}`
+  `{enabled, freeSites, pricePerSiteCents, currency, sitesUsed, sitesAllowed, paidSites, status: "none"|"active"|"trialing"|"past_due"|"canceled"|"unpaid"|"incomplete", hasCustomer, cancelAtPeriodEnd}`
+  (`sitesAllowed` is authoritative). Billing endpoints are members-only (`403` otherwise);
+  checkout/quantity/portal/webhook are `404` when billing is disabled; `409` for state
+  conflicts (already subscribed, no subscription, …); `502` when Stripe fails.
 * `POST /api/billing/checkout` `{paidSites: 1..1000}` → `{url}` — Stripe Checkout (subscription,
   `STRIPE_PRICE_ID` × paidSites). Only when the member has no active subscription.
 * `POST /api/billing/quantity` `{paidSites: 0..1000}` → `{billing}` — updates the existing
