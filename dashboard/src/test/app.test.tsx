@@ -118,7 +118,11 @@ async function renderAt(path: string) {
       </MemoryRouter>,
     );
   });
-  // let the chained requests (me -> sites -> stats) settle
+  // let the chained requests (me -> sites -> stats) and lazy route chunks settle
+  for (let i = 0; i < 8; i++) await act(async () => new Promise((r) => setTimeout(r, 0)));
+  for (let i = 0; i < 40 && container.querySelector('[role="status"][aria-label="Loading"]'); i++) {
+    await act(async () => new Promise((r) => setTimeout(r, 25)));
+  }
   for (let i = 0; i < 5; i++) await act(async () => new Promise((r) => setTimeout(r, 0)));
 }
 
@@ -275,11 +279,11 @@ describe('Hosted mode', () => {
     expect(container.textContent).toContain('new@example.com');
   });
 
-  it('links to sign-up / forgot and explains an unverified email on login', async () => {
+  it('links to sign-up / forgot and hints at email confirmation after a failed login', async () => {
     publicConfig = HOSTED;
     me = null;
     fetchMock.mockImplementation(async (url: string) => {
-      if (url === '/api/auth/login') return new Response(JSON.stringify({ error: 'email not verified' }), { status: 403 });
+      if (url === '/api/auth/login') return new Response(JSON.stringify({ error: 'invalid email or password' }), { status: 401 });
       return defaultFetch(url);
     });
     await renderAt('/login');
@@ -293,7 +297,48 @@ describe('Hosted mode', () => {
       container.querySelector<HTMLFormElement>('form')!.requestSubmit();
     });
     await settle();
-    expect(container.textContent).toContain('Email not verified');
+    expect(container.textContent).toContain('Invalid email or password.');
+    expect(container.querySelector('[data-slot="verify-hint"]')?.textContent).toContain('Confirm your email first');
+  });
+
+  it('verifies only after the password is entered, with the token from the fragment', async () => {
+    publicConfig = HOSTED;
+    me = null;
+    const calls: Array<{ url: string; body: unknown }> = [];
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/auth/verify') {
+        calls.push({ url, body: JSON.parse(String(init?.body)) });
+        return new Response(JSON.stringify({ user: MEMBER }), { status: 200 });
+      }
+      return defaultFetch(url);
+    });
+    await renderAt('/verify#token=tok_123');
+    expect(container.textContent).toContain('Confirm your email');
+    expect(calls).toHaveLength(0);
+    setInput(container.querySelector<HTMLInputElement>('input')!, 'p'.repeat(12));
+    await act(async () => {
+      container.querySelector<HTMLFormElement>('form')!.requestSubmit();
+    });
+    await settle();
+    expect(calls).toEqual([{ url: '/api/auth/verify', body: { token: 'tok_123', password: 'p'.repeat(12) } }]);
+    expect(container.textContent).toContain('All sites');
+  });
+
+  it('rejects sign-up emails with display-name syntax', async () => {
+    publicConfig = HOSTED;
+    me = null;
+    await renderAt('/signup');
+    const inputs = container.querySelectorAll<HTMLInputElement>('input');
+    setInput(inputs[0]!, 'a<b@c.de>');
+    setInput(inputs[1]!, 'p'.repeat(12));
+    setInput(inputs[2]!, 'p'.repeat(12));
+    act(() => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => {
+      container.querySelector<HTMLFormElement>('form')!.requestSubmit();
+    });
+    await settle();
+    expect(container.textContent).toContain('plain email address');
+    expect(fetchMock.mock.calls.some((c) => String(c[0]) === '/api/auth/signup')).toBe(false);
   });
 
   it('shows the billing overview for members', async () => {

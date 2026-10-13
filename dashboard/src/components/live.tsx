@@ -79,7 +79,7 @@ export function LiveCounter({ visitors, label = 'online now', className }: { vis
         Live
       </div>
       <div className="flex items-baseline gap-2">
-        <span className="text-4xl font-semibold tracking-tight tabular-nums">{visitors === null ? '–' : formatNumber(visitors)}</span>
+        <span className="text-3xl font-semibold tracking-tight tabular-nums sm:text-4xl">{visitors === null ? '–' : formatNumber(visitors)}</span>
         <span className="text-sm text-muted-foreground">{label}</span>
       </div>
     </div>
@@ -108,7 +108,7 @@ export function LiveCountryList({ countries, limit = 6 }: { countries: readonly 
     <ul className="flex flex-col gap-1">
       {rows.map((r, i) => (
         <li key={`${r.country ?? 'null'}-${i}`} className="relative flex h-8 items-center justify-between gap-3 rounded-md px-2 text-sm">
-          <span aria-hidden="true" className="absolute inset-y-0 left-0 rounded-md bg-chart-1/12 dark:bg-chart-1/18" style={{ width: `${(r.visitors / max) * 100}%` }} />
+          <span aria-hidden="true" className="absolute inset-y-0 left-0 rounded-md bg-chart-1/12 dark:bg-chart-1/15" style={{ width: `${(r.visitors / max) * 100}%` }} />
           <span className="relative min-w-0">
             <CountryLabel code={r.country} />
           </span>
@@ -134,12 +134,12 @@ export function LiveFeed({ recent, now, className }: { recent: readonly LiveRece
         const iso = isoCountry(r.country);
         const flag = iso ? flagEmoji(iso) : '';
         return (
-          <li key={`${r.ts}-${i}`} className="flex h-9 items-center gap-3 border-b px-1 text-sm last:border-b-0">
+          <li key={`${r.ts}-${i}`} className="relative flex h-9 items-center gap-3 border-b px-1 text-sm last:border-b-0">
             <span className="w-5 shrink-0 text-center text-base leading-none" title={iso ? countryName(iso) : 'Unknown location'}>
               <span aria-hidden="true">{flag || '🌐'}</span>
               <span className="sr-only">{iso ? countryName(iso) : 'Unknown location'}</span>
             </span>
-            <bdi className="bidi-isolate min-w-0 flex-1 truncate font-mono text-[13px]" title={displayText(r.path)}>
+            <bdi className="bidi-isolate min-w-0 flex-1 truncate" title={displayText(r.path)}>
               {displayText(r.path)}
             </bdi>
             <time className="shrink-0 text-xs text-muted-foreground tabular-nums" dateTime={new Date(r.ts).toISOString()}>
@@ -165,7 +165,7 @@ export function LiveVisitorsChart({ series, value }: { series: readonly LiveSamp
       window={LIVE_WINDOW_SECONDS}
       numXTicks={6}
       paused={!visible}
-      margin={{ top: 20, right: 56, bottom: 30, left: 8 }}
+      margin={{ top: 20, right: 56, bottom: 30, left: 32 }}
       style={{ height: 220, touchAction: 'pan-y' }}
     >
       <Grid horizontal numTicksRows={3} strokeDasharray="3,4" fadeHorizontal={false} />
@@ -187,7 +187,7 @@ export function LiveOverviewCard({ siteHref }: { siteHref: (id: string) => strin
       <div className="grid lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="relative border-b lg:border-r lg:border-b-0">
           <Globe countries={countries} valueLabel="visitors" scrollZoom={false} formatValue={formatNumber} className="h-72 w-full sm:h-80 lg:h-[22rem]">
-            <div className="pointer-events-none absolute top-4 left-4">
+            <div className="pointer-events-none absolute top-3 left-3 rounded-lg bg-background/70 px-2.5 py-2 backdrop-blur-sm sm:top-4 sm:left-4 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
               <LiveCounter visitors={data ? data.visitors : null} label="visitors online" />
             </div>
           </Globe>
@@ -249,19 +249,19 @@ export function SiteLiveView({ siteId }: { siteId: string }) {
     <div className="grid gap-4 lg:grid-cols-3">
       <Card className="relative gap-0 overflow-hidden py-0 lg:col-span-2">
         <Globe countries={countries} pings={pings} valueLabel="visitors" scrollZoom={false} formatValue={formatNumber} className="h-80 w-full sm:h-[26rem] lg:h-[30rem]">
-          <div className="pointer-events-none absolute top-4 left-4">
+          <div className="pointer-events-none absolute top-3 left-3 rounded-lg bg-background/70 px-2.5 py-2 backdrop-blur-sm sm:top-4 sm:left-4 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
             <LiveCounter visitors={visitors} label={visitors === 1 ? 'visitor online' : 'visitors online'} />
           </div>
         </Globe>
       </Card>
-      <Card className="gap-0 py-0 lg:max-h-[30rem]">
+      <Card className="max-h-[26rem] gap-0 py-0 lg:max-h-[30rem]">
         <CardHeader className="flex h-12 items-center border-b px-4 py-0 [.border-b]:pb-0">
           <CardTitle className="flex items-center gap-2 text-sm">
             <ActivityIcon className="size-4 text-muted-foreground" aria-hidden="true" />
             Recent pageviews
           </CardTitle>
         </CardHeader>
-        <CardContent className="min-h-0 flex-1 overflow-y-auto px-3 py-1">
+        <CardContent className="relative min-h-0 flex-1 overflow-y-auto px-3 py-1">
           <LiveFeed recent={recent} now={now} className="min-h-64" />
         </CardContent>
       </Card>

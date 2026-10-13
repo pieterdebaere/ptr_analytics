@@ -1,58 +1,32 @@
-import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { MailXIcon } from 'lucide-react';
+import { useState, type FormEvent } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { MailCheckIcon, MailXIcon } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
-import { AuthCard, readToken } from '@/components/AuthCard';
-import { Spinner } from '@/components/common';
+import { AuthCard, FormMessage, PasswordField, useUrlToken } from '@/components/AuthCard';
+import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/auth';
 
 const linkCls = 'font-medium text-foreground underline underline-offset-4 hover:text-foreground/80';
 
-/** /verify?token=… — confirms the email address, signs in and goes to the dashboard. */
+/**
+ * /verify#token=… — "Confirm your email". Nothing is sent on page load (link
+ * scanners must not consume the token); the password proves account ownership.
+ * On success the server sets the session cookie and we go to the dashboard.
+ */
 export function VerifyPage() {
-  const [params] = useSearchParams();
   const navigate = useNavigate();
-  const { user, setUser } = useAuth();
-  const token = readToken(params);
-  const [error, setError] = useState<string | null>(token ? null : 'This verification link is incomplete.');
-  // Tokens are single use: never send the same one twice (StrictMode re-runs effects).
-  const sent = useRef<string | null>(null);
-  const mounted = useRef(true);
+  const { setUser } = useAuth();
+  const token = useUrlToken();
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    // Wait for the session probe so its answer cannot overwrite the new session.
-    if (!token || user === undefined || sent.current === token) return;
-    sent.current = token;
-    api.verifyEmail(token).then(
-      (u) => {
-        if (!mounted.current) return;
-        setUser(u);
-        navigate('/', { replace: true });
-      },
-      (err: unknown) => {
-        if (!mounted.current) return;
-        if (err instanceof ApiError && (err.status === 400 || err.status === 404 || err.status === 410)) {
-          setError('This verification link is invalid or has expired.');
-        } else {
-          setError(err instanceof ApiError ? err.message : 'Verification failed.');
-        }
-      },
-    );
-  }, [token, user, navigate, setUser]);
-
-  if (error) {
+  if (!token) {
     return (
       <AuthCard
         icon={<MailXIcon />}
-        title="Could not verify your email"
-        description={error}
+        title="Invalid verification link"
+        description="This link is incomplete. Open the link from the email again, or sign up again to get a new one."
         footer={
           <span>
             <Link to="/login" className={linkCls}>
@@ -61,19 +35,55 @@ export function VerifyPage() {
             or{' '}
             <Link to="/signup" className={linkCls}>
               sign up again
-            </Link>{' '}
-            to get a new link.
+            </Link>
           </span>
         }
       />
     );
   }
 
+  const onSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!password) return setError('Enter your password.');
+    setBusy(true);
+    setError(null);
+    try {
+      const u = await api.verifyEmail(token, password);
+      setUser(u);
+      navigate('/', { replace: true });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 400) {
+        setError('This link is invalid or has expired, or the password is wrong.');
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError('Too many attempts. Please try again later.');
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Verification failed.');
+      }
+      setBusy(false);
+    }
+  };
+
   return (
-    <AuthCard title="Verifying your email…" description="One moment, we are activating your account.">
-      <div className="flex justify-center py-2">
-        <Spinner label="Verifying" />
-      </div>
+    <AuthCard
+      icon={<MailCheckIcon />}
+      title="Confirm your email"
+      description="Enter the password you chose when signing up to activate your account."
+      footer={
+        <span>
+          Link expired?{' '}
+          <Link to="/signup" className={linkCls}>
+            Sign up again
+          </Link>
+        </span>
+      }
+    >
+      <form className="flex flex-col gap-4" onSubmit={onSubmit}>
+        <PasswordField label="Password" value={password} onChange={setPassword} autoComplete="current-password" autoFocus />
+        {error ? <FormMessage>{error}</FormMessage> : null}
+        <Button type="submit" className="w-full" disabled={busy}>
+          {busy ? 'Confirming…' : 'Confirm email'}
+        </Button>
+      </form>
     </AuthCard>
   );
 }

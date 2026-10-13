@@ -135,13 +135,15 @@ export function AppLayout() {
           <Outlet />
         </ErrorBoundary>
       </main>
-      <footer className={cn(CONTAINER, 'flex flex-wrap items-center justify-between gap-2 border-t py-5 text-xs text-muted-foreground')}>
+      <footer className="border-t">
+        <div className={cn(CONTAINER, 'flex flex-wrap items-center justify-between gap-2 py-5 text-xs text-muted-foreground')}>
         <span>PTR Analytics{config?.version ? ` v${config.version}` : ''}</span>
         {config?.geoip ? (
           <a className="hover:text-foreground" href="https://db-ip.com" target="_blank" rel="noopener noreferrer">
             IP geolocation by DB-IP
           </a>
         ) : null}
+        </div>
       </footer>
     </div>
   );

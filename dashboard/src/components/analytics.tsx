@@ -177,7 +177,7 @@ export function BreakdownRows({
             >
               <span
                 aria-hidden="true"
-                className="absolute inset-y-0 left-0 rounded-md bg-chart-1/12 transition-[width] duration-500 ease-out dark:bg-chart-1/18"
+                className="absolute inset-y-0 left-0 rounded-md bg-chart-1/12 transition-[width] duration-500 ease-out dark:bg-chart-1/15"
                 style={{ width: `${pct}%` }}
               />
               <span className="relative flex min-w-0 items-center gap-2">
@@ -365,7 +365,7 @@ export function BreakdownPanel({
       </CardHeader>
       <CardContent className="flex flex-1 flex-col px-2 pt-2 pb-2">
         <ColumnsHeader label={DIMENSION_LABELS[tab]} metric={metric} onMetric={setMetric} countLabel={countLabel} />
-        <div className="min-h-[21rem] flex-1">
+        <div className="min-h-24 flex-1 lg:min-h-[21rem]">
           {error ? (
             <ErrorState message={error} onRetry={reload} />
           ) : loading && !rows ? (

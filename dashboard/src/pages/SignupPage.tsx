@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { useAuth } from '@/hooks/auth';
 import { pricingNote } from '@/lib/billing';
 import { MIN_PASSWORD, validateNewPassword } from '@/lib/password';
-import { displayText } from '@/lib/safety';
+import { displayText, isPlainEmail } from '@/lib/safety';
 
 const linkCls = 'font-medium text-foreground underline underline-offset-4 hover:text-foreground/80';
 
@@ -68,6 +68,7 @@ export function SignupPage() {
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!isPlainEmail(email.trim())) return setError('Enter a plain email address, like name@example.com.');
     const err = validateNewPassword(password, confirm);
     if (err) return setError(err);
     if (!accept) return setError('Please accept the terms to continue.');

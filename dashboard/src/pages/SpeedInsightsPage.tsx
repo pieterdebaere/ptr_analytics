@@ -255,25 +255,30 @@ function VitalsOverview({ data, metric, onSelect }: { data: VitalsSummaryRespons
               role="tab"
               aria-selected={active}
               className={cn(
-                'flex min-w-0 flex-col gap-2 rounded-xl bg-card p-3.5 text-left ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50',
+                'flex min-w-0 flex-col gap-3 rounded-xl bg-card p-3.5 text-left ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50',
                 active && 'ring-2 ring-chart-1 hover:ring-chart-1',
               )}
               onClick={() => onSelect(m)}
             >
               <span className="flex flex-col">
-                <span className="text-sm font-semibold">{m}</span>
+                <span className="flex items-baseline justify-between gap-2">
+                  <span className="text-sm font-semibold">{m}</span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums" title="Samples">
+                    {formatNumber(s?.count ?? 0)}
+                  </span>
+                </span>
                 <span className="truncate text-xs text-muted-foreground">{METRIC_INFO[m].name}</span>
               </span>
-              <span className={cn('text-2xl font-semibold tracking-tight tabular-nums', rating && RATING_TEXT[rating])}>
-                {formatVital(m, s?.p75 ?? null)}
-              </span>
-              <RatingScale metric={m} value={s?.p75 ?? null} />
-              <span className="flex items-center justify-between gap-2 text-xs">
-                <span className={cn('flex items-center gap-1.5 font-medium', rating ? RATING_TEXT[rating] : 'text-muted-foreground')}>
-                  <i className={cn('size-1.5 rounded-full', rating ? RATING_BG[rating] : 'bg-muted-foreground/40')} aria-hidden="true" />
-                  {rating ? RATING_LABELS[rating] : 'No data'}
+              <span className="mt-auto flex flex-col gap-2">
+                <span className={cn('text-2xl font-semibold tracking-tight tabular-nums', rating && RATING_TEXT[rating])}>
+                  {formatVital(m, s?.p75 ?? null)}
                 </span>
-                <span className="text-muted-foreground tabular-nums">{formatNumber(s?.count ?? 0)}</span>
+                <RatingScale metric={m} value={s?.p75 ?? null} />
+                <span className={cn('flex items-start gap-1.5 text-xs leading-tight font-medium', rating ? RATING_TEXT[rating] : 'text-muted-foreground')}>
+                  <i className={cn('mt-[0.3em] size-1.5 shrink-0 rounded-full', rating ? RATING_BG[rating] : 'bg-muted-foreground/40')} aria-hidden="true" />
+                  <span>{rating ? RATING_LABELS[rating] : 'No data'}</span>
+                </span>
+                <span className="sr-only">{formatNumber(s?.count ?? 0)} samples</span>
               </span>
             </button>
           );

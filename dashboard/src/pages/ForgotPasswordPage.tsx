@@ -6,7 +6,7 @@ import { AuthCard, FormMessage } from '@/components/AuthCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { displayText } from '@/lib/safety';
+import { displayText, isPlainEmail } from '@/lib/safety';
 
 const linkCls = 'font-medium text-foreground underline underline-offset-4 hover:text-foreground/80';
 
@@ -42,6 +42,7 @@ export function ForgotPasswordPage() {
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return setError('Enter your email address.');
+    if (!isPlainEmail(email.trim())) return setError('Enter a plain email address, like name@example.com.');
     setBusy(true);
     setError(null);
     try {

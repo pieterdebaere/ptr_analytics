@@ -3,7 +3,6 @@ import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { MailWarningIcon } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
 import { AuthCard, FormMessage, PasswordField } from '@/components/AuthCard';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -20,7 +19,6 @@ export function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [unverified, setUnverified] = useState(false);
   const [busy, setBusy] = useState(false);
   const emailId = useId();
 
@@ -30,14 +28,13 @@ export function LoginPage() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    setUnverified(false);
     try {
       const u = await api.login(email.trim(), password);
       setUser(u);
       navigate(next, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) setError('Invalid email or password.');
-      else if (err instanceof ApiError && err.status === 403) setUnverified(true);
+      // Unverified accounts get the same 401 as a wrong password (no account enumeration).
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) setError('Invalid email or password.');
       else if (err instanceof ApiError && err.status === 429) setError('Too many attempts. Please wait a few minutes and try again.');
       else setError(err instanceof ApiError ? err.message : 'Login failed.');
       setBusy(false);
@@ -62,15 +59,6 @@ export function LoginPage() {
       }
     >
       <form className="flex flex-col gap-4" onSubmit={onSubmit}>
-        {unverified ? (
-          <Alert>
-            <MailWarningIcon aria-hidden="true" />
-            <AlertTitle>Email not verified</AlertTitle>
-            <AlertDescription>
-              Open the verification link we sent to your inbox to activate your account, then log in again.
-            </AlertDescription>
-          </Alert>
-        ) : null}
         <div className="flex flex-col gap-2">
           <Label htmlFor={emailId}>Email</Label>
           <Input
@@ -98,7 +86,17 @@ export function LoginPage() {
             ) : undefined
           }
         />
-        {error ? <FormMessage>{error}</FormMessage> : null}
+        {error ? (
+          <div className="flex flex-col gap-1">
+            <FormMessage>{error}</FormMessage>
+            {hosted ? (
+              <p className="flex items-start gap-1.5 text-xs text-muted-foreground" data-slot="verify-hint">
+                <MailWarningIcon className="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                <span>Just signed up? Confirm your email first — we&apos;ve sent you a link.</span>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <Button type="submit" className="w-full" disabled={busy}>
           {busy ? 'Logging in…' : 'Log in'}
         </Button>

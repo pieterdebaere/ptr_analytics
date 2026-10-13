@@ -1,18 +1,17 @@
 import { useState, type FormEvent } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { CheckCircle2Icon, MailXIcon } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
-import { AuthCard, FormMessage, PasswordField, readToken } from '@/components/AuthCard';
+import { AuthCard, FormMessage, PasswordField, useUrlToken } from '@/components/AuthCard';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { MIN_PASSWORD, validateNewPassword } from '@/lib/password';
 import { cn } from '@/lib/utils';
 
 const linkCls = 'font-medium text-foreground underline underline-offset-4 hover:text-foreground/80';
 
-/** /reset?token=… — sets a new password (signs out all sessions of that user). */
+/** /reset#token=… (or legacy ?token=) — sets a new password (signs out all sessions of that user). */
 export function ResetPasswordPage() {
-  const [params] = useSearchParams();
-  const token = readToken(params);
+  const token = useUrlToken();
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);

@@ -183,15 +183,11 @@ export function CopyButton({ text, label = 'Copy', className }: { text: string; 
 
 export function CodeBlock({ code, copy = true }: { code: string; copy?: boolean }) {
   return (
-    <div className="group/code relative rounded-lg border bg-muted/50">
-      <pre className="overflow-x-auto px-3 py-3 pr-24 text-[0.8rem] leading-relaxed">
+    <div className="flex min-w-0 items-start gap-2 rounded-lg border bg-muted/50 py-1.5 pr-1.5 pl-3">
+      <pre className="min-w-0 flex-1 overflow-x-auto py-1 text-[0.8rem] leading-relaxed">
         <code>{code}</code>
       </pre>
-      {copy ? (
-        <div className="absolute top-2 right-2">
-          <CopyButton text={code} className="bg-background" />
-        </div>
-      ) : null}
+      {copy ? <CopyButton text={code} className="shrink-0 bg-background" /> : null}
     </div>
   );
 }

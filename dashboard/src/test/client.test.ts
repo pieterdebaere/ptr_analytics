@@ -129,7 +129,7 @@ describe('api client', () => {
     const handler = vi.fn();
     setUnauthorizedHandler(handler);
     await expect(api.publicConfig()).rejects.toBeInstanceOf(ApiError);
-    await expect(api.verifyEmail('tok')).rejects.toBeInstanceOf(ApiError);
+    await expect(api.verifyEmail('tok', 'pw')).rejects.toBeInstanceOf(ApiError);
     expect(handler).not.toHaveBeenCalled();
   });
 });

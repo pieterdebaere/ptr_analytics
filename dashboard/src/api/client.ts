@@ -152,8 +152,9 @@ export const api = {
       body: { email, password, acceptTerms: true },
       redirectOn401: false,
     }),
-  verifyEmail: (token: string) =>
-    request<{ user: User }>('POST', '/auth/verify', { body: { token }, redirectOn401: false }).then((r) => r.user),
+  /** Confirms the address; the password proves the person opening the link owns the account. */
+  verifyEmail: (token: string, password: string) =>
+    request<{ user: User }>('POST', '/auth/verify', { body: { token, password }, redirectOn401: false }).then((r) => r.user),
   forgotPassword: (email: string) =>
     request<{ ok: true }>('POST', '/auth/forgot', { body: { email }, redirectOn401: false }),
   resetPassword: (token: string, password: string) =>
