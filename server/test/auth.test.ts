@@ -391,7 +391,7 @@ describe('hardening', () => {
 
   it('rejects emails with control or bidi characters', async () => {
     const cookie = await login(t.app);
-    for (const email of ['\u001b[31mevil@x.com', 'a‮@x.com', 'a@x']) {
+    for (const email of ['\u001b[31mevil@x.com', 'a\u202e@x.com', 'a@x']) {
       const res = await api(t.app, cookie, 'POST', '/api/users', { email, password: 'long enough password', role: 'viewer' });
       expect(res.statusCode).toBe(400);
     }

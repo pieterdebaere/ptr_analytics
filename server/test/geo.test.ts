@@ -112,6 +112,34 @@ describe('DB-IP auto download', () => {
     }
   });
 
+  it('refuses redirects, unexpected final URLs and non-country databases; logs the error cause', async () => {
+    const dir = tmpDir();
+    const dest = path.join(dir, 'geoip-country.mmdb');
+    const inits: Array<{ redirect?: string } | undefined> = [];
+    const good = gzipSync(buildCountryMmdb('BE'));
+    const redirected: FetchFn = async (_url, init) => {
+      inits.push(init);
+      const res = new Response(new Uint8Array(good), { status: 200 });
+      Object.defineProperty(res, 'url', { value: 'http://mirror.example.net/db.mmdb.gz' });
+      return res;
+    };
+    logs.length = 0;
+    expect(await downloadGeoDatabase(dest, log, { fetchFn: redirected, now: NOW })).toBe(false);
+    expect(inits.every((i) => i?.redirect === 'error')).toBe(true);
+    expect(logs.some((l) => l.includes('unexpected final URL'))).toBe(true);
+
+    const city: FetchFn = async () => new Response(new Uint8Array(gzipSync(buildCountryMmdb('BE', 'GeoLite2-City'))), { status: 200 });
+    expect(await downloadGeoDatabase(dest, log, { fetchFn: city, now: NOW })).toBe(false);
+    expect(logs.some((l) => l.includes('unexpected database type "GeoLite2-City"'))).toBe(true);
+
+    const refused: FetchFn = async () => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }) });
+    };
+    expect(await downloadGeoDatabase(dest, log, { fetchFn: refused, now: NOW })).toBe(false);
+    expect(logs.some((l) => l.includes('fetch failed (ECONNREFUSED)'))).toBe(true);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
   it('caps the decompressed size', async () => {
     const dir = tmpDir();
     const dest = path.join(dir, 'geoip-country.mmdb');

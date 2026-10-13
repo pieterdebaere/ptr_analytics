@@ -40,9 +40,11 @@ is an implementation detail of the package that owns it.
 * **IP addresses are never stored or logged.** (Disable Fastify request logging of IPs
   or make sure IPs are not part of log lines for `/api/event`.)
 * Visitor identifier = first 16 bytes (hex) of
-  `sha256(daily_salt || site_id || client_ip || user_agent)`.
+  `sha256(daily_salt || site_id || client_ip || user_agent)` where every part is
+  length-prefixed (unambiguous concatenation).
   `daily_salt` is 32 random bytes generated per UTC day, stored in the `salts` table, and
-  **deleted when the day is over** (only the current day's salt is kept), so visitor ids
+  **deleted when the day is over** (only the current day's salt is kept; SQLite
+  `secure_delete` + WAL truncation make sure the bytes are really gone), so visitor ids
   cannot be linked across days nor reversed.
 * Only the URL **pathname** is stored (no query string, no fragment). UTM parameters are
   extracted from the query string; everything else in the query string is discarded.
@@ -155,7 +157,7 @@ Body is JSON (sent as `text/plain` or `application/json`), max **8 KB**:
 | var | default | meaning |
 |-----|---------|---------|
 | `PORT` | `3000` | |
-| `HOST` | `0.0.0.0` | |
+| `HOST` | `127.0.0.1` | the Docker image sets `0.0.0.0` |
 | `DATA_DIR` | `./data` | directory for `analytics.db` (created if missing) |
 | `PUBLIC_URL` | (none) | public origin of the dashboard, e.g. `https://analytics.example.com`. Used for CSRF origin checks and the install snippet. Strongly recommended; warn on startup if missing. |
 | `TRUST_PROXY` | `false` | `false`, `true`, a hop count (`1`), or comma separated IPs/CIDRs. Passed to Fastify `trustProxy`. Client IP comes from `request.ip`. **Never** read `X-Forwarded-For` manually. |
