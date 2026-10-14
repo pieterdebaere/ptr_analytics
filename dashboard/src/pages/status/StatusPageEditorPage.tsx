@@ -1,11 +1,11 @@
 // /status-pages/:uid — status page editor (General, Monitors, Incidents, Custom domains, Badges).
 // General + Monitors form one draft saved with a single PATCH; logo, domains and incidents
 // are saved immediately.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeftIcon, EyeIcon, ExternalLinkIcon, SaveIcon } from 'lucide-react';
+import { ArrowLeftIcon, EyeIcon, ExternalLinkIcon, SaveIcon, SendIcon } from 'lucide-react';
 import { ApiError, api, errorMessage } from '@/api/client';
-import { statusApi, type StatusPage } from '@/api/status';
+import { statusApi, statusOrigin, type StatusPage } from '@/api/status';
 import { uptimeApi } from '@/api/uptime';
 import { FormMessage } from '@/components/AuthCard';
 import { ErrorState, SkeletonRows } from '@/components/common';
@@ -37,12 +37,11 @@ function isTab(v: unknown): v is Tab {
 
 export function StatusPageEditorPage() {
   const { uid = '' } = useParams();
-  const { config } = useAuth();
+  const { config, publicConfig } = useAuth();
   const readOnly = !useCanManageSites();
   const [params, setParams] = useSearchParams();
   const tabParam = params.get('tab');
   const tab: Tab = isTab(tabParam) ? tabParam : 'general';
-  const origin = publicOrigin(config?.publicUrl);
 
   const loaded = useApi((signal) => statusApi.get(uid, signal), [uid]);
   const [page, setPage] = useState<StatusPage | null>(null);
@@ -63,6 +62,9 @@ export function StatusPageEditorPage() {
   const sites = useApi((signal) => api.listSites(signal), []);
   const siteId = page?.siteId ?? null;
   const monitors = useApi((signal) => uptimeApi.siteMonitors(siteId ?? '', signal), [siteId], siteId !== null);
+
+  // Public links use the page's own address (STATUS_PAGE_ORIGIN when the server has one).
+  const origin = statusOrigin(page, publicConfig.statusPageOrigin, publicOrigin(config?.publicUrl));
 
   const baseline = useMemo(() => (page ? draftOf(page) : null), [page]);
   const dirty = !!draft && !!baseline && !sameDraft(draft, baseline);
@@ -97,9 +99,10 @@ export function StatusPageEditorPage() {
     setParams(next, { replace: true });
   };
 
-  const save = async () => {
+  const save = async (override: Partial<Draft> = {}) => {
     if (!draft || !page) return;
-    const v = validateDraft(draft);
+    const next = { ...draft, ...override };
+    const v = validateDraft(next);
     if (Object.keys(v).length > 0) {
       setTab(v.sections && !v.title && !v.slug && !v.description && !v.footer ? 'monitors' : 'general');
       setSaveError('Fix the highlighted fields first.');
@@ -108,7 +111,7 @@ export function StatusPageEditorPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      const saved = await statusApi.update(page.uid, draftToInput(draft));
+      const saved = await statusApi.update(page.uid, draftToInput(next));
       setPage(saved);
       setDraft(draftOf(saved));
       setServerErrors({});
@@ -155,7 +158,7 @@ export function StatusPageEditorPage() {
     );
   }
 
-  const publicPath = `/status/${encodeURIComponent(page.slug)}`;
+  const publicHref = page.publicUrl ?? `/status/${encodeURIComponent(page.slug)}`;
   let publicHost = 'this server';
   try {
     publicHost = new URL(origin).host;
@@ -171,11 +174,10 @@ export function StatusPageEditorPage() {
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <h1 className="bidi-isolate min-w-0 truncate text-2xl font-semibold tracking-tight">{displayText(page.title) || 'Untitled'}</h1>
-              {page.published ? <Badge className="bg-good/12 text-good">Published</Badge> : <Badge variant="secondary">Draft</Badge>}
+              {page.published ? <Badge className="bg-good/12 text-good-text">Published</Badge> : <Badge variant="secondary">Draft</Badge>}
             </div>
-            <p className="mt-1 truncate text-sm text-muted-foreground">
-              {origin}
-              {publicPath}
+            <p className="mt-1 truncate text-sm text-muted-foreground" title={`${origin}/status/${page.slug}`}>
+              {origin}/status/{displayText(page.slug)}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -184,12 +186,24 @@ export function StatusPageEditorPage() {
               Preview
             </Button>
             {page.published ? (
-              <Button variant="outline" render={<a href={publicPath} target="_blank" rel="noopener noreferrer" />} nativeButton={false}>
+              <Button variant="outline" render={<a href={publicHref} target="_blank" rel="noopener noreferrer" />} nativeButton={false}>
                 <ExternalLinkIcon aria-hidden="true" />
                 View public page
               </Button>
             ) : null}
-            {!readOnly ? (
+            {!readOnly && !page.published ? (
+              <Button
+                type="button"
+                variant={dirty ? 'outline' : 'default'}
+                onClick={() => void save({ published: true })}
+                disabled={saving}
+                title={dirty ? 'Save your changes and publish the page' : 'Make the page visible at its public address'}
+              >
+                <SendIcon aria-hidden="true" />
+                {dirty ? 'Save & publish' : 'Publish'}
+              </Button>
+            ) : null}
+            {!readOnly && (page.published || dirty) ? (
               <Button type="button" onClick={() => void save()} disabled={!dirty || saving}>
                 <SaveIcon aria-hidden="true" />
                 {saving ? 'Saving…' : savedAt ? 'Saved' : 'Save changes'}
@@ -198,10 +212,15 @@ export function StatusPageEditorPage() {
           </div>
         </div>
         {saveError && !dirty ? <FormMessage>{saveError}</FormMessage> : null}
+        {!page.published && !readOnly ? (
+          <p className="text-sm text-muted-foreground" data-slot="draft-note">
+            This page is a draft: visitors get “not found” until you publish it. Use Preview to check it first.
+          </p>
+        ) : null}
       </div>
 
       <Tabs value={tab} onValueChange={(v) => isTab(v) && setTab(v)} className="gap-5">
-        <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0 [scrollbar-width:none]">
+        <TabScroller active={tab}>
           <TabsList variant="line" className="w-max min-w-full justify-start border-b pb-1 sm:min-w-0">
             {TABS.map((t) => (
               <TabsTrigger key={t} value={t} className="flex-none px-2.5">
@@ -213,7 +232,7 @@ export function StatusPageEditorPage() {
               </TabsTrigger>
             ))}
           </TabsList>
-        </div>
+        </TabScroller>
         <TabsContent value="general">
           <GeneralTab
             draft={draft}
@@ -265,6 +284,45 @@ export function StatusPageEditorPage() {
       ) : null}
 
       {preview ? <PreviewSheet page={page} onClose={() => setPreview(false)} dirty={dirty} /> : null}
+    </div>
+  );
+}
+
+/**
+ * Sideways-scrolling tab strip (narrow screens): fades the edge that has more tabs behind it
+ * and keeps the active tab in view.
+ */
+function TabScroller({ active, children }: { active: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState({ left: false, right: false });
+  const measure = () => {
+    const el = ref.current;
+    if (!el) return;
+    const left = el.scrollLeft > 2;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
+    setMore((m) => (m.left === left && m.right === right ? m : { left, right }));
+  };
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.querySelector<HTMLElement>('[data-active], [aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [active]);
+  return (
+    <div className="relative -mx-4 sm:mx-0">
+      <div ref={ref} onScroll={measure} className="overflow-x-auto px-4 sm:px-0 [scrollbar-width:none]" data-slot="tab-scroller">
+        {children}
+      </div>
+      <span
+        aria-hidden="true"
+        className={cn('pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-background to-transparent transition-opacity', more.left ? 'opacity-100' : 'opacity-0')}
+      />
+      <span
+        aria-hidden="true"
+        className={cn('pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-background to-transparent transition-opacity', more.right ? 'opacity-100' : 'opacity-0')}
+      />
     </div>
   );
 }

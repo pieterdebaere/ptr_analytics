@@ -1,9 +1,9 @@
 // /status-pages — public status pages per site (docs/SPEC.md §8.3).
 import { useMemo, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { EllipsisIcon, ExternalLinkIcon, GlobeIcon, LayoutListIcon, PencilIcon, PlusIcon, RadioTowerIcon, Trash2Icon } from 'lucide-react';
+import { EllipsisIcon, ExternalLinkIcon, GlobeIcon, LayoutListIcon, PencilIcon, PlusIcon, RadioTowerIcon, SendIcon, Trash2Icon } from 'lucide-react';
 import { api, errorMessage } from '@/api/client';
-import { statusApi, type StatusPage } from '@/api/status';
+import { statusApi, statusOrigin, type StatusPage } from '@/api/status';
 import { FormMessage } from '@/components/AuthCard';
 import { EmptyState, ErrorState, PageHeader, SkeletonRows } from '@/components/common';
 import { CreateStatusPageDialog, publicOrigin } from '@/components/status/CreateStatusPageDialog';
@@ -28,7 +28,7 @@ import { displayText } from '@/lib/safety';
 const ALL = '__all__';
 
 export function StatusPagesPage() {
-  const { config } = useAuth();
+  const { config, publicConfig } = useAuth();
   const canManage = useCanManageSites();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -38,7 +38,9 @@ export function StatusPagesPage() {
   const [deleting, setDeleting] = useState<StatusPage | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const origin = publicOrigin(config?.publicUrl);
+  const [publishing, setPublishing] = useState<string | null>(null);
+  // Where new pages will live (STATUS_PAGE_ORIGIN when the server has one).
+  const origin = statusOrigin(pages.data?.[0] ?? null, publicConfig.statusPageOrigin, publicOrigin(config?.publicUrl));
 
   const siteMap = useMemo(() => new Map((sites.data ?? []).map((s) => [s.id, s])), [sites.data]);
   const siteFilter = params.get('site');
@@ -64,6 +66,19 @@ export function StatusPagesPage() {
       setDeleting(null);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const publish = async (p: StatusPage) => {
+    setPublishing(p.uid);
+    setActionError(null);
+    try {
+      await statusApi.update(p.uid, { published: true });
+      pages.reload();
+    } catch (e) {
+      setActionError(errorMessage(e));
+    } finally {
+      setPublishing(null);
     }
   };
 
@@ -133,6 +148,7 @@ export function StatusPagesPage() {
               const site = siteMap.get(p.siteId);
               const monitors = p.sections.reduce((n, s) => n + s.monitors.length, 0);
               const verifiedDomains = p.domains.filter((d) => d.verified);
+              const href = p.publicUrl ?? `/status/${encodeURIComponent(p.slug)}`;
               return (
                 <li key={p.uid} className="flex items-center gap-3 px-4 py-3.5 sm:px-5" data-page={p.uid}>
                   <PageAvatar page={p} />
@@ -141,10 +157,10 @@ export function StatusPagesPage() {
                       <Link to={`/status-pages/${encodeURIComponent(p.uid)}`} className="bidi-isolate min-w-0 truncate font-medium outline-none hover:underline hover:underline-offset-4 focus-visible:underline">
                         {displayText(p.title) || 'Untitled'}
                       </Link>
-                      {p.published ? <Badge className="bg-good/12 text-good">Published</Badge> : <Badge variant="secondary">Draft</Badge>}
+                      {p.published ? <Badge className="bg-good/12 text-good-text">Published</Badge> : <Badge variant="secondary">Draft</Badge>}
                     </div>
                     <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-                      <span className="truncate font-mono">/status/{displayText(p.slug)}</span>
+                      <span className="truncate font-mono" title={href}>/status/{displayText(p.slug)}</span>
                       {site && !filter ? (
                         <>
                           <span aria-hidden="true">·</span>
@@ -173,11 +189,24 @@ export function StatusPagesPage() {
                       variant="outline"
                       size="sm"
                       className="hidden sm:inline-flex"
-                      render={<a href={`/status/${encodeURIComponent(p.slug)}`} target="_blank" rel="noopener noreferrer" />}
+                      render={<a href={href} target="_blank" rel="noopener noreferrer" />}
                       nativeButton={false}
                     >
                       <ExternalLinkIcon aria-hidden="true" />
                       View
+                    </Button>
+                  ) : canManage ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="hidden sm:inline-flex"
+                      disabled={publishing === p.uid}
+                      onClick={() => void publish(p)}
+                      title="Make the page visible at its public address"
+                    >
+                      <SendIcon aria-hidden="true" />
+                      {publishing === p.uid ? 'Publishing…' : 'Publish'}
                     </Button>
                   ) : null}
                   {canManage ? (
@@ -195,10 +224,17 @@ export function StatusPagesPage() {
                         <PencilIcon aria-hidden="true" />
                         {canManage ? 'Edit' : 'Open'}
                       </DropdownMenuItem>
-                      <DropdownMenuItem render={<a href={`/status/${encodeURIComponent(p.slug)}`} target="_blank" rel="noopener noreferrer" />} disabled={!p.published}>
-                        <ExternalLinkIcon aria-hidden="true" />
-                        View public page
-                      </DropdownMenuItem>
+                      {p.published ? (
+                        <DropdownMenuItem render={<a href={href} target="_blank" rel="noopener noreferrer" />}>
+                          <ExternalLinkIcon aria-hidden="true" />
+                          View public page
+                        </DropdownMenuItem>
+                      ) : canManage ? (
+                        <DropdownMenuItem onClick={() => void publish(p)} disabled={publishing === p.uid}>
+                          <SendIcon aria-hidden="true" />
+                          Publish
+                        </DropdownMenuItem>
+                      ) : null}
                       {canManage ? (
                         <>
                           <DropdownMenuSeparator />

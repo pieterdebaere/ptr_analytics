@@ -55,7 +55,7 @@ export function FieldDefForm({ fields, values, onChange, errors = {}, secretsSet
     .map((g) => ({ ...g, fields: g.fields.filter((f) => isFieldVisible(f, fields, values, hosted)) }))
     .filter((g) => g.fields.length > 0);
 
-  const renderFields = (list: FieldDef[]) => (
+  const renderFields = (list: FieldDef[], group: string | null = null) => (
     <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
       {list.map((f) => (
         <FieldRow
@@ -69,6 +69,8 @@ export function FieldDefForm({ fields, values, onChange, errors = {}, secretsSet
           secretsSet={secretsSet}
           disabled={disabled}
           wide={WIDE_KINDS.has(f.kind) || list.length === 1}
+          // a field labelled like its group ("Authentication" → "Authentication") reads as a duplicate heading
+          displayLabel={group !== null && f.label.trim().toLowerCase() === group.trim().toLowerCase() ? 'Type' : undefined}
         />
       ))}
     </div>
@@ -82,12 +84,12 @@ export function FieldDefForm({ fields, values, onChange, errors = {}, secretsSet
           <div key="__default">{renderFields(g.fields)}</div>
         ) : /advanced/i.test(g.group) ? (
           <CollapsibleGroup key={g.group} title={g.group} forceOpen={g.fields.some((f) => errors[f.key])}>
-            {renderFields(g.fields)}
+            {renderFields(g.fields, g.group)}
           </CollapsibleGroup>
         ) : (
           <fieldset key={g.group} className="flex min-w-0 flex-col gap-4 border-t pt-5 first:border-t-0 first:pt-0">
             <legend className="float-left mb-1 w-full text-[13px] font-semibold tracking-tight text-foreground">{g.group}</legend>
-            {renderFields(g.fields)}
+            {renderFields(g.fields, g.group)}
           </fieldset>
         ),
       )}
@@ -128,9 +130,19 @@ interface FieldRowProps {
   secretsSet: string[];
   disabled: boolean;
   wide: boolean;
+  /** visible label when it differs from `field.label` (the full label stays available to screen readers) */
+  displayLabel?: string;
 }
 
-function FieldRow({ id, field: f, value, onChange, error, isSet, secretsSet, disabled, wide }: FieldRowProps) {
+function FieldRow({ id, field: f, value, onChange, error, isSet, secretsSet, disabled, wide, displayLabel }: FieldRowProps) {
+  const label = displayLabel ? (
+    <>
+      <span aria-hidden="true">{displayLabel}</span>
+      <span className="sr-only">{f.label}</span>
+    </>
+  ) : (
+    f.label
+  );
   const helpId = `${id}-help`;
   const errId = `${id}-error`;
   const describedBy = [f.help ? helpId : null, error ? errId : null].filter(Boolean).join(' ') || undefined;
@@ -263,17 +275,18 @@ function FieldRow({ id, field: f, value, onChange, error, isSet, secretsSet, dis
       <div className="flex items-center gap-2">
         {labelFor ? (
           <Label htmlFor={labelFor}>
-            {f.label}
+            {label}
             {f.required ? <span className="text-destructive" aria-hidden="true">*</span> : null}
           </Label>
         ) : (
           <span id={`${id}-label`} className="text-sm leading-none font-medium select-none">
-            {f.label}
+            {label}
             {f.required ? <span className="text-destructive" aria-hidden="true">*</span> : null}
           </span>
         )}
         {secret ? (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">
+          // -my-0.5: the 16px badge must not make this label row taller than its neighbours'
+          <Badge variant="outline" className="-my-0.5 h-4 px-1.5 text-[10px] font-normal text-muted-foreground">
             write-only
           </Badge>
         ) : null}
@@ -553,13 +566,25 @@ function StatusCodesEditor({
         <Button type="button" variant="outline" disabled={disabled || draft.trim() === ''} onClick={() => add(draft)}>
           Add
         </Button>
-        <span className="flex flex-wrap gap-1">
-          {STATUS_PRESETS.filter((p) => !list.includes(p)).map((p) => (
-            <Button key={p} type="button" variant="ghost" size="sm" className="font-mono text-xs" disabled={disabled} onClick={() => add(p)}>
-              +{p}
-            </Button>
-          ))}
-        </span>
+        {STATUS_PRESETS.some((p) => !list.includes(p)) ? (
+          <span className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Quick add">
+            {STATUS_PRESETS.filter((p) => !list.includes(p)).map((p) => (
+              <Button
+                key={p}
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-dashed bg-transparent font-mono text-xs text-muted-foreground hover:text-foreground dark:bg-transparent"
+                disabled={disabled}
+                onClick={() => add(p)}
+                aria-label={`Add ${p}`}
+              >
+                <PlusIcon aria-hidden="true" />
+                {p}
+              </Button>
+            ))}
+          </span>
+        ) : null}
       </div>
       {draftError ? (
         <p className="text-xs text-destructive" role="alert">

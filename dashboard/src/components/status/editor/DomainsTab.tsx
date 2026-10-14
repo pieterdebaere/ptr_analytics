@@ -10,7 +10,19 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { formatDateLong } from '@/components/uptime/lib';
 import { displayText, normalizeDomain } from '@/lib/safety';
+
+const DAY = 86_400_000;
+
+/** "Expires in 6 days" for an unverified claim (dropped 7 days after it was added). */
+export function claimExpiry(expiresAt: number, now = Date.now()): string {
+  const ms = expiresAt - now;
+  if (ms <= 0) return 'Expired — add it again';
+  if (ms < DAY) return 'Expires today';
+  const days = Math.ceil(ms / DAY);
+  return `Expires in ${days} ${days === 1 ? 'day' : 'days'}`;
+}
 
 /** Hostname for a custom status domain, or null (no wildcards, localhost or IP literals). */
 export function normalizeStatusDomain(input: string): string | null {
@@ -66,7 +78,12 @@ export function DomainsTab({ page, onPageChange, publicHost, readOnly }: { page:
     try {
       const r = await statusApi.verifyDomain(page.uid, d.domain);
       onPageChange({ ...page, domains: page.domains.map((x) => (x.domain === r.domain ? r : x)) });
-      setNotes((n) => ({ ...n, [d.domain]: r.verified ? '' : 'The TXT record was not found yet. DNS changes can take a while to propagate.' }));
+      setNotes((n) => ({
+        ...n,
+        [d.domain]: r.verified
+          ? ''
+          : 'Not verified yet: the TXT record with this page’s value was not found. DNS changes can take a while to propagate. If another status page already verified this domain, it keeps it while its own TXT record is published.',
+      }));
     } catch (e) {
       setNotes((n) => ({ ...n, [d.domain]: errorMessage(e) }));
     } finally {
@@ -80,8 +97,8 @@ export function DomainsTab({ page, onPageChange, publicHost, readOnly }: { page:
         <CardHeader>
           <CardTitle>Custom domains</CardTitle>
           <CardDescription>
-            Serve this page at your own address, e.g. <span className="font-mono">status.example.com</span>. Prove ownership with a DNS TXT record, then point the
-            domain at this server (your reverse proxy handles TLS).
+            Serve this page at your own address, e.g. <span className="font-mono">status.example.com</span>. Prove ownership with a DNS TXT record within 7 days
+            (unverified domains are removed then), then point the domain at this server (your reverse proxy handles TLS).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -125,16 +142,21 @@ export function DomainsTab({ page, onPageChange, publicHost, readOnly }: { page:
             <CardHeader className="flex flex-row flex-wrap items-center gap-2">
               <CardTitle className="min-w-0 truncate font-mono text-[0.95rem]">{displayText(d.domain)}</CardTitle>
               {d.verified ? (
-                <Badge className="bg-good/12 text-good">
+                <Badge className="bg-good/12 text-good-text">
                   <CircleCheckIcon aria-hidden="true" />
                   Verified
                 </Badge>
               ) : (
-                <Badge className="bg-warn/15 text-warn">
+                <Badge className="bg-warn/15 text-warn-text">
                   <ClockIcon aria-hidden="true" />
                   Pending verification
                 </Badge>
               )}
+              {!d.verified && d.expiresAt !== null ? (
+                <span className="text-xs text-muted-foreground" title={`Unverified domains are removed on ${formatDateLong(d.expiresAt)}`} data-slot="domain-expiry">
+                  {claimExpiry(d.expiresAt)}
+                </span>
+              ) : null}
               <div className="ml-auto flex items-center gap-1">
                 {!d.verified && !readOnly ? (
                   <Button type="button" variant="outline" disabled={busy === d.domain} onClick={() => void verify(d)}>

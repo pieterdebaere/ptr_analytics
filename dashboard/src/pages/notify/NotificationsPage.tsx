@@ -1,13 +1,15 @@
 // /notifications — notification channels (docs/SPEC.md §8.3, ANALYSIS §4.1).
-import { useMemo, useState } from 'react';
-import { BellIcon, CircleCheckIcon, EllipsisIcon, MailWarningIcon, PencilIcon, PlusIcon, ScrollTextIcon, SendIcon, Trash2Icon, TriangleAlertIcon } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { ArrowLeftIcon, BellIcon, CircleCheckIcon, EllipsisIcon, MailWarningIcon, PencilIcon, PlusIcon, ScrollTextIcon, SendIcon, Trash2Icon, TriangleAlertIcon } from 'lucide-react';
 import { errorMessage } from '@/api/client';
-import { notifyApi, type NotificationChannel, type NotificationProvider, type ProviderCategory } from '@/api/notify';
+import { deliveryEventLabel, notifyApi, type DeliveryLogEntry, type NotificationChannel, type NotificationProvider, type ProviderCategory } from '@/api/notify';
 import { FormMessage } from '@/components/AuthCard';
 import { EmptyState, ErrorState, PageHeader, SkeletonRows } from '@/components/common';
 import { ChannelDialog } from '@/components/notify/ChannelDialog';
 import { DeliveryLogSheet } from '@/components/notify/DeliveryLogSheet';
 import { ProviderIcon } from '@/components/notify/ProviderIcon';
+import { formatRelative } from '@/components/uptime/lib';
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -27,10 +29,51 @@ import { useApi } from '@/hooks/useApi';
 import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 
-/** Consecutive failed deliveries from which a channel is flagged. */
-export const FAILURE_WARNING_THRESHOLD = 3;
+/**
+ * Consecutive final failures (a notification given up after its retries) from which the
+ * badge says "N failed in a row"; a single one, or a failed latest attempt, says
+ * "Last delivery failed".
+ */
+export const FAILURE_WARNING_THRESHOLD = 2;
+/** Channels whose latest delivery is looked up (one small log request each). */
+const LAST_DELIVERY_LOOKUPS = 30;
 
 type RowNotice = { kind: 'ok' | 'error'; text: string };
+
+/** Message after "Resend confirmation". */
+export function resendMessage(sent: number | null): RowNotice {
+  if (sent === null) return { kind: 'ok', text: 'Confirmation e-mail sent again to unconfirmed recipients.' };
+  if (sent === 0) {
+    return {
+      kind: 'error',
+      text: 'No e-mail sent: the remaining recipients unsubscribed or declined, or already got a link in the last 10 minutes.',
+    };
+  }
+  return { kind: 'ok', text: `Confirmation e-mail sent again to ${sent} ${sent === 1 ? 'recipient' : 'recipients'}.` };
+}
+
+/** Latest delivery-log entry per channel (best effort; failures are ignored). */
+function useLastDeliveries(channels: readonly NotificationChannel[] | undefined): Record<string, DeliveryLogEntry | null> {
+  const [last, setLast] = useState<Record<string, DeliveryLogEntry | null>>({});
+  const key = (channels ?? [])
+    .slice(0, LAST_DELIVERY_LOOKUPS)
+    .map((c) => c.uid)
+    .join(',');
+  useEffect(() => {
+    if (!key) return;
+    const ctrl = new AbortController();
+    for (const uid of key.split(',')) {
+      notifyApi.log(uid, 1, ctrl.signal).then(
+        (entries) => setLast((l) => ({ ...l, [uid]: entries[0] ?? null })),
+        () => {
+          /* optional */
+        },
+      );
+    }
+    return () => ctrl.abort();
+  }, [key]);
+  return last;
+}
 
 export function NotificationsPage() {
   const { user, publicConfig } = useAuth();
@@ -45,6 +88,7 @@ export function NotificationsPage() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const lastDeliveries = useLastDeliveries(channels.data ?? undefined);
   const providerMap = useMemo(() => new Map((providers.data ?? []).map((p) => [p.id, p])), [providers.data]);
   const list = (channels.data ?? []).map((c) => ({ ...c, ...overrides[c.uid] }));
 
@@ -71,8 +115,9 @@ export function NotificationsPage() {
 
   const resend = async (c: NotificationChannel) => {
     try {
-      await notifyApi.updateChannel(c.uid, { resendVerification: true });
-      setNotices((n) => ({ ...n, [c.uid]: { kind: 'ok', text: 'Confirmation e-mail sent again to unconfirmed recipients.' } }));
+      const r = await notifyApi.resendVerification(c.uid);
+      setOverrides((o) => ({ ...o, [c.uid]: r.channel }));
+      setNotices((n) => ({ ...n, [c.uid]: resendMessage(r.verificationSent) }));
     } catch (e) {
       setNotices((n) => ({ ...n, [c.uid]: { kind: 'error', text: errorMessage(e) } }));
     }
@@ -97,16 +142,22 @@ export function NotificationsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader
-        title="Notifications"
-        description="Channels that alert you when a monitor goes down or comes back up, and before certificates or domains expire."
-        actions={
-          <Button type="button" onClick={() => setEditing('new')} disabled={!canAdd}>
-            <PlusIcon aria-hidden="true" />
-            Add channel
-          </Button>
-        }
-      />
+      <div className="flex flex-col gap-2">
+        <Link to="/uptime" className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:underline">
+          <ArrowLeftIcon className="size-4" aria-hidden="true" />
+          Uptime
+        </Link>
+        <PageHeader
+          title="Notifications"
+          description="Channels that alert you when a monitor goes down or comes back up, and before certificates or domains expire."
+          actions={
+            <Button type="button" onClick={() => setEditing('new')} disabled={!canAdd}>
+              <PlusIcon aria-hidden="true" />
+              Add channel
+            </Button>
+          }
+        />
+      </div>
 
       <Card className="gap-0 py-0">
         {channels.error ? (
@@ -129,6 +180,7 @@ export function NotificationsPage() {
                 channel={c}
                 provider={providerMap.get(c.type)}
                 notice={notices[c.uid]}
+                lastDelivery={lastDeliveries[c.uid] ?? null}
                 onEdit={() => setEditing(c)}
                 onLog={() => setLogFor(c)}
                 onTest={() => void test(c)}
@@ -188,6 +240,7 @@ function ChannelRow({
   channel: c,
   provider,
   notice,
+  lastDelivery,
   onEdit,
   onLog,
   onTest,
@@ -198,6 +251,7 @@ function ChannelRow({
   channel: NotificationChannel;
   provider: NotificationProvider | undefined;
   notice: RowNotice | 'testing' | undefined;
+  lastDelivery: DeliveryLogEntry | null;
   onEdit: () => void;
   onLog: () => void;
   onTest: () => void;
@@ -206,7 +260,11 @@ function ChannelRow({
   onActive: (active: boolean) => void;
 }) {
   const category: ProviderCategory = provider?.category ?? (c.type === 'email' || c.type === 'smtp' ? 'email' : 'other');
-  const failing = c.consecutiveFailures >= FAILURE_WARNING_THRESHOLD;
+  const lastFailed = lastDelivery !== null && !lastDelivery.ok;
+  const failing = c.consecutiveFailures > 0 || lastFailed;
+  const failTitle = lastFailed
+    ? `${deliveryEventLabel(lastDelivery.event)} notification ${formatRelative(lastDelivery.ts)}: ${lastDelivery.error ?? (lastDelivery.httpStatus ? `HTTP ${lastDelivery.httpStatus}` : 'failed')}`
+    : `The last ${c.consecutiveFailures === 1 ? 'notification' : `${c.consecutiveFailures} notifications`} could not be delivered.`;
   const unverified = !c.verified;
   const confirmed = c.recipients.filter((r) => r.verified && !r.unsubscribed).length;
   return (
@@ -221,7 +279,7 @@ function ChannelRow({
             {c.isDefault ? <Badge variant="secondary">Default</Badge> : null}
             {unverified ? (
               <Badge
-                className="bg-warn/15 text-warn"
+                className="bg-warn/15 text-warn-text"
                 title="Recipients must confirm their address with the link we e-mailed them. Unconfirmed addresses receive no alerts."
                 data-slot="unverified"
               >
@@ -230,14 +288,14 @@ function ChannelRow({
               </Badge>
             ) : null}
             {c.autoDisabled ? (
-              <Badge className="bg-poor/12 text-poor" title="Switched off after repeated failed deliveries. Fix the settings, send a test and turn it back on." data-slot="failing">
+              <Badge className="bg-poor/12 text-poor-text" title="Switched off after repeated failed deliveries. Fix the settings, send a test and turn it back on." data-slot="failing">
                 <TriangleAlertIcon aria-hidden="true" />
                 Disabled after {c.consecutiveFailures} failures
               </Badge>
             ) : failing ? (
-              <Badge className="bg-poor/12 text-poor" title={`The last ${c.consecutiveFailures} deliveries failed.`} data-slot="failing">
+              <Badge className="bg-poor/12 text-poor-text" title={displayText(failTitle)} data-slot="failing">
                 <TriangleAlertIcon aria-hidden="true" />
-                {c.consecutiveFailures} failed in a row
+                {c.consecutiveFailures >= FAILURE_WARNING_THRESHOLD ? `${c.consecutiveFailures} failed in a row` : 'Last delivery failed'}
               </Badge>
             ) : null}
           </div>
@@ -295,7 +353,7 @@ function ChannelRow({
         <p
           className={cn(
             'ml-11 flex items-start gap-1.5 text-xs',
-            notice === 'testing' ? 'text-muted-foreground' : notice.kind === 'ok' ? 'text-good' : 'text-destructive',
+            notice === 'testing' ? 'text-muted-foreground' : notice.kind === 'ok' ? 'text-good-text' : 'text-destructive',
           )}
           role={notice !== 'testing' && notice.kind === 'error' ? 'alert' : 'status'}
         >

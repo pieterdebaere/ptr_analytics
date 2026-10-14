@@ -385,6 +385,28 @@ describe('HIGH 2: cron maintenance windows are cheap to evaluate', () => {
       }
     });
 
+    it('consecutive cron windows are one maintenance (no end/start notification pair per window)', async () => {
+      const e = startEngine();
+      const m = await createMonitor(a.cookie, siteA);
+      const ch = addChannel(a.id);
+      t.ctx.db.prepare('INSERT INTO monitor_channels (monitor_id, channel_id) VALUES (?, ?)').run(idOf(m.uid), ch.id);
+      const res = await api(t.app, a.cookie, 'POST', '/api/maintenances', { title: 'hourly', strategy: 'cron', cron: '0 * * * *', durationS: 3600, monitorUids: [m.uid] });
+      expect(res.statusCode).toBe(201);
+      const events = (): string[] => {
+        processorFor(t.ctx).flush();
+        return (t.ctx.db.prepare('SELECT event FROM notify_outbox WHERE monitor_id IS NULL ORDER BY id').all() as Array<{ event: string }>).map((r) => r.event);
+      };
+      expect(events()).toEqual(['maint_start']);
+      for (let i = 0; i < 3; i++) {
+        t.clock.t += HOUR;
+        e.maintenanceTick();
+      }
+      expect(events()).toEqual(['maint_start']);
+      const uid = (res.json() as { maintenance: { uid: string } }).maintenance.uid;
+      expect((await api(t.app, a.cookie, 'POST', `/api/maintenances/${uid}/pause`)).statusCode).toBe(200);
+      expect(events()).toEqual(['maint_start', 'maint_end']);
+    });
+
     it('caps cron cardinality and cron windows per member; rate-limits the endpoints', async () => {
       const post = (body: Record<string, unknown>) => api(t.app, a.cookie, 'POST', '/api/maintenances', { title: 'w', strategy: 'cron', durationS: 600, ...body });
       for (const cron of ['* * * * *', '*/5 * * * *', '0-59 0,1 * * *', '0,20,40 * * * 1']) {

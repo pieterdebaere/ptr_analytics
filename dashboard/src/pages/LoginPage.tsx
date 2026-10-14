@@ -1,8 +1,8 @@
-import { useId, useState, type FormEvent } from 'react';
+import { useEffect, useId, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeftIcon, MailWarningIcon, ShieldCheckIcon } from 'lucide-react';
 import { ApiError } from '@/api/client';
-import { isRecoveryCode, isTotpCode, normalizeRecoveryCode, normalizeTotp, securityApi } from '@/api/security';
+import { isRecoveryCode, isTotpCode, normalizeRecoveryCode, normalizeTotp, securityApi, securityError, INVALID_RECOVERY_MESSAGE, INVALID_TOTP_MESSAGE } from '@/api/security';
 import type { User } from '@/api/types';
 import { AuthCard, FormMessage, PasswordField } from '@/components/AuthCard';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,9 @@ import { useAuth } from '@/hooks/auth';
 import { safeNextPath } from '@/lib/safety';
 
 const linkCls = 'font-medium text-foreground underline-offset-4 hover:underline';
+
+/** After a 429 the submit button pauses for a moment (the server refuses anyway). */
+export const RATE_LIMIT_PAUSE_MS = 30_000;
 
 export function LoginPage() {
   const { user, setUser, publicConfig } = useAuth();
@@ -137,8 +140,15 @@ export function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDo
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [paused, setPaused] = useState(false);
   const codeId = useId();
   const hintId = useId();
+
+  useEffect(() => {
+    if (!paused) return;
+    const t = window.setTimeout(() => setPaused(false), RATE_LIMIT_PAUSE_MS);
+    return () => window.clearTimeout(t);
+  }, [paused]);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -158,11 +168,14 @@ export function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDo
     } catch (err) {
       setBusy(false);
       setCode('');
-      if (err instanceof ApiError && err.status === 429) setError('Too many attempts. Please wait a few minutes and try again.');
-      else if (err instanceof ApiError && (err.code === 'mfa_expired' || err.status === 410))
+      if (err instanceof ApiError && err.status === 429) {
+        // mfa_locked: too many wrong codes for this account; the message names the wait.
+        setError(securityError(err).message);
+        setPaused(true);
+      } else if (err instanceof ApiError && (err.code === 'mfa_expired' || err.status === 410))
         onCancel('Your login attempt expired. Please log in again.');
       else if (err instanceof ApiError && (err.status === 401 || err.status === 400))
-        setError(mode === 'totp' ? 'Invalid code. Check your authenticator app and try again.' : 'Invalid or already used recovery code.');
+        setError(mode === 'totp' ? INVALID_TOTP_MESSAGE : INVALID_RECOVERY_MESSAGE);
       else setError(err instanceof ApiError ? err.message : 'Login failed.');
     }
   };
@@ -252,7 +265,7 @@ export function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDo
           </p>
         </div>
         {error ? <FormMessage>{error}</FormMessage> : null}
-        <Button type="submit" className="w-full" disabled={busy}>
+        <Button type="submit" className="w-full" disabled={busy || paused}>
           {busy ? 'Verifying…' : 'Verify'}
         </Button>
       </form>

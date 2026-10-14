@@ -344,7 +344,7 @@ export function PushPanel({ monitor, pushUrl, onPushUrl, canManage }: { monitor:
         ) : null}
         <div className="flex min-w-0 flex-col gap-2">
           <Tabs value={lang} onValueChange={(v) => setLang(v as PushExampleLang)}>
-            <TabsList variant="line" aria-label="Example" className="scrollbar-none h-8 w-full justify-start overflow-x-auto">
+            <TabsList variant="line" aria-label="Example" className="scrollbar-none h-8 w-full justify-start overflow-x-auto max-sm:h-10">
               {PUSH_EXAMPLE_LANGS.map((l) => (
                 <TabsTrigger key={l.key} value={l.key} className="flex-none px-2 text-[13px]">
                   {l.label}

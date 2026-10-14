@@ -57,9 +57,11 @@ export function StatusCountCards({
   onSelect: (s: DisplayStatus | '') => void;
 }) {
   const order: DisplayStatus[] = ['up', 'down', 'pending', 'maintenance', 'paused'];
+  const short: Partial<Record<DisplayStatus, string>> = { maintenance: 'Maint.' };
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" role="group" aria-label="Filter by status">
-      {order.map((s, i) => {
+    // < sm: one compact row of five; sm: 3 + 2; lg: one row
+    <div className="grid grid-cols-5 gap-1.5 sm:grid-cols-3 sm:gap-3 lg:grid-cols-5" role="group" aria-label="Filter by status">
+      {order.map((s) => {
         const n = counts[s] + (s === 'pending' ? counts.unknown : 0);
         const selected = active === s;
         const st = STATUS_STYLES[s];
@@ -68,19 +70,23 @@ export function StatusCountCards({
             key={s}
             type="button"
             aria-pressed={selected}
+            aria-label={`${STATUS_LABELS[s]}: ${n}`}
             onClick={() => onSelect(selected ? '' : s)}
             className={cn(
-              'flex min-w-0 flex-col gap-1.5 rounded-xl bg-card p-4 text-left ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50',
+              'flex min-w-0 flex-col-reverse gap-0.5 rounded-xl bg-card px-2 py-2.5 text-left ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50 sm:flex-col sm:gap-1.5 sm:p-4',
               s === 'down' && n > 0 && 'bg-poor/5 ring-poor/30 hover:ring-poor/50',
               selected && 'ring-2 ring-foreground/60 hover:ring-foreground/60',
-              i === order.length - 1 && 'col-span-2 sm:col-span-1',
             )}
           >
-            <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <span className={cn('size-2 rounded-full', st.bg)} aria-hidden="true" />
-              {STATUS_LABELS[s]}
+            <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground sm:text-xs" aria-hidden="true">
+              <span className={cn('hidden size-2 shrink-0 rounded-full sm:inline-block', st.bg)} />
+              <span className="truncate sm:hidden">{short[s] ?? STATUS_LABELS[s]}</span>
+              <span className="hidden truncate sm:inline">{STATUS_LABELS[s]}</span>
             </span>
-            <span className={cn('text-2xl font-semibold tracking-tight tabular-nums', n > 0 && s === 'down' ? st.text : 'text-foreground')}>{n}</span>
+            <span className={cn('flex items-center gap-1.5 text-xl font-semibold tracking-tight tabular-nums sm:text-2xl', n > 0 && s === 'down' ? st.text : 'text-foreground')} aria-hidden="true">
+              <span className={cn('size-2 shrink-0 rounded-full sm:hidden', st.bg)} />
+              {n}
+            </span>
           </button>
         );
       })}

@@ -67,7 +67,7 @@ export function ProviderPicker({
                     type="button"
                     disabled={disabled}
                     onClick={() => onPick(p)}
-                    title={disabled ? 'Not available on the hosted service' : undefined}
+                    title={disabled ? `${displayText(p.label)} — not available on the hosted service` : displayText(p.label)}
                     className={cn(
                       'flex h-12 min-w-0 items-center gap-2 rounded-lg border bg-background px-2 text-left text-sm font-medium sm:gap-2.5 sm:px-2.5 outline-none transition-colors hover:border-foreground/20 hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/20',
                       disabled && 'cursor-not-allowed opacity-50 hover:border-border hover:bg-background',
@@ -328,20 +328,25 @@ export function ChannelDialog({
                   <Switch checked={applyToExisting} onCheckedChange={setApplyToExisting} />
                 </label>
               </div>
-
-              {test.kind === 'ok' ? (
-                <p className="flex items-center gap-2 rounded-lg border border-good/30 bg-good/[0.07] px-3 py-2 text-sm text-good" role="status" data-slot="test-result">
-                  <CircleCheckIcon className="size-4 shrink-0" aria-hidden="true" />
-                  Test notification sent. Check that it arrived.
-                </p>
-              ) : test.kind === 'error' ? (
-                <p className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-sm text-destructive" role="alert" data-slot="test-result">
-                  <CircleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-                  <span className="bidi-isolate min-w-0 break-words">{displayText(test.message)}</span>
-                </p>
-              ) : null}
-              {saveError ? <FormMessage>{saveError}</FormMessage> : null}
             </div>
+
+            {/* Outside the scrolling body: always visible next to the buttons. */}
+            {test.kind === 'ok' || test.kind === 'error' || saveError ? (
+              <div className="flex flex-col gap-2" aria-live="polite">
+                {test.kind === 'ok' ? (
+                  <p className="flex items-center gap-2 rounded-lg border border-good/30 bg-good/[0.07] px-3 py-2 text-sm text-good-text" role="status" data-slot="test-result">
+                    <CircleCheckIcon className="size-4 shrink-0" aria-hidden="true" />
+                    Test notification sent. Check that it arrived.
+                  </p>
+                ) : test.kind === 'error' ? (
+                  <p className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-sm text-destructive" role="alert" data-slot="test-result">
+                    <CircleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                    <span className="bidi-isolate max-h-24 min-w-0 overflow-y-auto break-words">Test failed: {displayText(test.message)}</span>
+                  </p>
+                ) : null}
+                {saveError ? <FormMessage>{saveError}</FormMessage> : null}
+              </div>
+            ) : null}
 
             <DialogFooter className="mt-auto sm:items-center sm:justify-between">
               <Button type="button" variant="outline" onClick={() => void runTest()} disabled={test.kind === 'testing' || busy}>
@@ -349,7 +354,7 @@ export function ChannelDialog({
                 {test.kind === 'testing' ? 'Sending…' : 'Send test'}
               </Button>
               <div className="flex flex-col-reverse gap-2 sm:flex-row">
-                <Button type="button" variant="ghost" onClick={onClose}>
+                <Button type="button" variant="outline" onClick={onClose}>
                   Cancel
                 </Button>
                 <Button type="submit" disabled={busy}>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { CreditCardIcon, LogOutIcon, ShieldCheckIcon, UserRoundIcon } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -104,14 +104,29 @@ export function AppLayout() {
   const showBilling = useShowBilling();
   const location = useLocation();
   const navRef = useRef<HTMLElement>(null);
-  // Mobile: the nav is a horizontally scrolling row; keep the active item in view.
+  // Mobile: the nav is a horizontally scrolling row. Keep the active item in view and fade
+  // the edge that has more items behind it (scroll cue).
+  const [fade, setFade] = useState<{ start: boolean; end: boolean }>({ start: false, end: false });
+  const updateFade = () => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const max = nav.scrollWidth - nav.clientWidth;
+    const next = { start: max > 1 && nav.scrollLeft > 1, end: max > 1 && nav.scrollLeft < max - 1 };
+    setFade((f) => (f.start === next.start && f.end === next.end ? f : next));
+  };
   useEffect(() => {
     const nav = navRef.current;
     const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
-    if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
-    const left = active.offsetLeft - nav.offsetLeft;
-    if (left < nav.scrollLeft || left + active.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left - 16;
-  }, [location.pathname, user]);
+    if (nav && active && nav.scrollWidth > nav.clientWidth) {
+      const left = active.offsetLeft - nav.offsetLeft;
+      if (left < nav.scrollLeft || left + active.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left - 16;
+    }
+    updateFade();
+  }, [location.pathname, user]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    window.addEventListener('resize', updateFade);
+    return () => window.removeEventListener('resize', updateFade);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (user === undefined) {
     return (
@@ -138,7 +153,13 @@ export function AppLayout() {
           {/* < md: second row that scrolls sideways; >= md: inline after the logo */}
           <nav
             ref={navRef}
-            className="scrollbar-none order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto border-t px-4 py-1.5 sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-6 md:order-none md:mx-0 md:w-auto md:border-t-0 md:p-0"
+            onScroll={updateFade}
+            className={cn(
+              'scrollbar-none order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto border-t px-4 py-1.5 sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-6 md:order-none md:mx-0 md:w-auto md:border-t-0 md:p-0',
+              fade.end && !fade.start && 'mask-r-from-[calc(100%-2.5rem)]',
+              fade.start && !fade.end && 'mask-l-from-[calc(100%-2.5rem)]',
+              fade.start && fade.end && 'mask-x-from-[calc(100%-2.5rem)]',
+            )}
             aria-label="Main"
           >
             <NavItem to="/" end>

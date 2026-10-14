@@ -13,6 +13,7 @@ export const DEFAULT_PUBLIC_CONFIG: PublicConfig = {
   currency: 'eur',
   termsUrl: null,
   privacyUrl: null,
+  statusPageOrigin: null,
 };
 
 /** Routes that work without a session (never redirected to /login on 401). */
@@ -91,6 +92,15 @@ export function normalizePublicConfig(raw: unknown): PublicConfig {
     currency: typeof r.currency === 'string' && /^[a-z]{3}$/i.test(r.currency) ? r.currency.toLowerCase() : 'eur',
     termsUrl: url(r.termsUrl),
     privacyUrl: url(r.privacyUrl),
+    statusPageOrigin: (() => {
+      const v = url(r.statusPageOrigin);
+      if (!v) return null;
+      try {
+        return new URL(v).origin;
+      } catch {
+        return null;
+      }
+    })(),
   };
 }
 

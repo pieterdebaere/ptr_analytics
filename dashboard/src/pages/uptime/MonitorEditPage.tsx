@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { AlertCircleIcon, ArrowLeftIcon, ArrowRightIcon, CheckIcon, ChevronRightIcon, SaveIcon } from 'lucide-react';
+import { AlertCircleIcon, ArrowRightIcon, CheckIcon, ChevronRightIcon, SaveIcon } from 'lucide-react';
 import { api, errorMessage } from '@/api/client';
 import type { Site } from '@/api/types';
 import { uptimeApi, type Monitor, type MonitorTypeInfo, type Tag, type UptimeLimits } from '@/api/uptime';
-import { EmptyState, ErrorState, PageHeader } from '@/components/common';
+import { BackLink, EmptyState, ErrorState, PageHeader } from '@/components/common';
 import { FieldDefForm, initialFieldValues, validateFieldValues } from '@/components/forms/FieldDefForm';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -101,15 +101,12 @@ export function MonitorEditPage() {
   if (!editing && !typeName) {
     return (
       <div className="flex flex-col gap-6">
-        <PageHeader
-          title="New monitor"
-          description={site ? <span className="bidi-isolate">For {displayText(site.name)} · choose what to check</span> : 'Choose what to check'}
-          actions={
-            <Link to={site ? `/sites/${encodeURIComponent(site.id)}/uptime` : '/uptime'} className={cn(buttonVariants({ variant: 'outline' }), 'bg-background')}>
-              Cancel
-            </Link>
-          }
-        />
+        <div className="flex flex-col gap-2">
+          <BackLink to={site ? `/sites/${encodeURIComponent(site.id)}/uptime` : '/uptime'} label={site ? `${displayText(site.name)} uptime` : undefined}>
+            {site ? `${displayText(site.name)} uptime` : 'Uptime'}
+          </BackLink>
+          <PageHeader title="New monitor" description={site ? <span className="bidi-isolate">For {displayText(site.name)} · choose what to check</span> : 'Choose what to check'} />
+        </div>
         <TypePicker
           types={types.data.types}
           hosted={hosted}
@@ -162,6 +159,36 @@ export function MonitorEditPage() {
       }
     />
   );
+}
+
+/** Example names per monitor type (shown until a URL/host gives a better one). */
+const NAME_PLACEHOLDERS: Record<string, string> = {
+  http: 'e.g. Homepage',
+  keyword: 'e.g. Checkout page',
+  json: 'e.g. API health',
+  tcp: 'e.g. Database port',
+  tls: 'e.g. Shop certificate',
+  dns: 'e.g. DNS records',
+  push: 'e.g. Nightly backup job',
+  group: 'e.g. Storefront',
+  manual: 'e.g. Payment provider',
+  ping: 'e.g. Web server',
+  websocket: 'e.g. Realtime API',
+  smtp: 'e.g. Mail server',
+  ntp: 'e.g. Time server',
+  redis: 'e.g. Cache',
+  ssh: 'e.g. Bastion host',
+  grpc_health: 'e.g. Orders service',
+  postgres: 'e.g. Main database',
+  mysql: 'e.g. Main database',
+  mongodb: 'e.g. Document store',
+  mqtt: 'e.g. MQTT broker',
+  docker: 'e.g. Worker container',
+  domain: 'e.g. Domain registration',
+};
+
+function namePlaceholder(type: string): string {
+  return NAME_PLACEHOLDERS[type] ?? 'e.g. My service';
 }
 
 function Section({ id, title, description, children, icon }: { id?: string; title: string; description?: ReactNode; children: ReactNode; icon?: ReactNode }) {
@@ -323,16 +350,22 @@ function MonitorEditor({
   const cancelHref = editing ? `/monitors/${encodeURIComponent(monitor.uid)}` : initialSiteId ? `/sites/${encodeURIComponent(initialSiteId)}/uptime` : '/uptime';
   const errorCount = Object.keys(commonErrors).length + Object.keys(fieldErrors).length;
   const siteName = sites.find((s) => s.id === form.siteId)?.name;
+  const backLabel = editing ? displayText(monitor.name) : initialSiteId && siteName ? `${displayText(siteName)} uptime` : 'Uptime';
 
   return (
-    <form className="mx-auto flex w-full max-w-3xl flex-col gap-6" onSubmit={onSubmit} noValidate data-slot="monitor-editor">
+    <form
+      // controls scrolled into view (focus, first invalid field) keep their error text clear of the sticky action bar
+      className="mx-auto flex w-full max-w-3xl flex-col gap-6 [&_input]:scroll-mb-28 [&_button]:scroll-mb-28 [&_textarea]:scroll-mb-28"
+      onSubmit={onSubmit}
+      noValidate
+      data-slot="monitor-editor"
+    >
       <div className="flex flex-col gap-2">
-        <Link to={cancelHref} className="inline-flex items-center gap-1 self-start text-sm text-muted-foreground hover:text-foreground">
-          <ArrowLeftIcon className="size-3.5" aria-hidden="true" />
-          {editing ? 'Back to monitor' : 'Back'}
-        </Link>
+        <BackLink to={cancelHref} label={backLabel}>
+          {backLabel}
+        </BackLink>
         <PageHeader
-          title={editing ? <span className="bidi-isolate">Edit {displayText(monitor.name)}</span> : `New ${type.label} monitor`}
+          title={editing ? <span className="bidi-isolate" title={displayText(monitor.name)}>Edit {displayText(monitor.name)}</span> : `New ${type.label} monitor`}
           description={
             <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="inline-flex items-center gap-1.5">
@@ -373,7 +406,7 @@ function MonitorEditor({
                 id={id}
                 value={form.name}
                 maxLength={100}
-                placeholder={derivedName ?? 'My website'}
+                placeholder={derivedName ?? namePlaceholder(type.type)}
                 aria-invalid={invalid || undefined}
                 aria-describedby={describedBy}
                 onChange={(e) => set('name', e.target.value)}
@@ -559,14 +592,23 @@ function MonitorEditor({
         </Alert>
       ) : null}
 
-      <div className="sticky bottom-3 z-20 flex flex-wrap items-center justify-end gap-2 rounded-xl bg-background/90 p-2 shadow-lg ring-1 ring-foreground/10 backdrop-blur-md supports-backdrop-filter:bg-background/75">
-        <Link to={cancelHref} className={cn(buttonVariants({ variant: 'ghost' }), 'mr-auto')}>
+      {/* one row at every width: the secondary action is icon-only on phones */}
+      <div className="sticky bottom-3 z-20 flex items-center justify-end gap-2 rounded-xl bg-background/90 p-2 shadow-lg ring-1 ring-foreground/10 backdrop-blur-md supports-backdrop-filter:bg-background/75">
+        <Link to={cancelHref} className={cn(buttonVariants({ variant: 'outline' }), 'mr-auto bg-background')}>
           Cancel
         </Link>
         {!passive ? (
-          <Button type="button" variant="outline" className="bg-background" disabled={busy !== null || unavailable !== null || !form.active} onClick={() => void submit(true)}>
+          <Button
+            type="button"
+            variant="outline"
+            className="bg-background max-sm:w-8 max-sm:px-0"
+            disabled={busy !== null || unavailable !== null || !form.active}
+            onClick={() => void submit(true)}
+            aria-label={busy === 'check' ? 'Saving…' : 'Save & check now'}
+            title="Save & check now"
+          >
             <ArrowRightIcon aria-hidden="true" />
-            {busy === 'check' ? 'Saving…' : 'Save & check now'}
+            <span className="max-sm:hidden">{busy === 'check' ? 'Saving…' : 'Save & check now'}</span>
           </Button>
         ) : null}
         <Button type="submit" disabled={busy !== null || unavailable !== null}>

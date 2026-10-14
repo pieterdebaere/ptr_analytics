@@ -72,7 +72,7 @@ export function TypePicker({ types, hosted, onPick }: { types: readonly MonitorT
           <h2 id={`cat-${g.category}`} className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
             {CATEGORY_LABELS[g.category]}
           </h2>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {g.types.map((t) => {
               const reason = unavailableReason(t, hosted);
               return (
@@ -82,6 +82,7 @@ export function TypePicker({ types, hosted, onPick }: { types: readonly MonitorT
                   disabled={reason !== null}
                   onClick={() => onPick(t.type)}
                   data-type={t.type}
+                  title={t.description}
                   className={cn(
                     'group/type flex min-w-0 items-start gap-3 rounded-xl bg-card p-4 text-left ring-1 ring-foreground/10 outline-none transition-all hover:ring-foreground/30 focus-visible:ring-3 focus-visible:ring-ring/50',
                     'disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:ring-foreground/10',

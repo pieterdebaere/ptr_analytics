@@ -29,6 +29,8 @@ export interface PublicConfig {
   privacyUrl: string | null;
   /** max sites per member when billing is disabled */
   memberSiteLimit?: number;
+  /** STATUS_PAGE_ORIGIN: origin public status pages are served on; null = this origin. */
+  statusPageOrigin?: string | null;
 }
 
 export interface AppConfig {

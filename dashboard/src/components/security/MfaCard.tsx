@@ -423,7 +423,7 @@ function ConfirmDialog({ mode, account, onClose, onChanged }: { mode: 'disable' 
         onChanged();
       }
     } catch (err) {
-      const f = securityError(err);
+      const f = securityError(err, factorMode);
       if (f.field === 'password') setPasswordError(f.message);
       else if (f.field === 'code') {
         setCodeError(f.message);

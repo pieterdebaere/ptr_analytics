@@ -152,7 +152,7 @@ export function SiteUptimePage() {
                   ) : (
                     <span className={cn('text-2xl font-semibold tracking-tight tabular-nums', uptimeTone(v?.uptime))}>{formatUptime(v?.uptime ?? null)}</span>
                   )}
-                  <span className={cn('min-h-4 truncate text-xs', d?.tone ?? 'text-muted-foreground')}>{d?.text ?? (tiles.error ? 'Unavailable' : ' ')}</span>
+                  <span className={cn('min-h-4 truncate text-xs', d?.tone ?? 'text-muted-foreground')} title={d?.text}>{d?.text ?? (tiles.error ? 'Unavailable' : ' ')}</span>
                 </div>
               );
             })}

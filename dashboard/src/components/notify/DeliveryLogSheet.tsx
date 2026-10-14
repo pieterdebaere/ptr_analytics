@@ -14,13 +14,13 @@ import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 
 const EVENT_TONE: Record<string, string> = {
-  down: 'bg-poor/12 text-poor',
-  resend: 'bg-poor/12 text-poor',
-  up: 'bg-good/12 text-good',
-  cert: 'bg-warn/15 text-warn',
-  domain: 'bg-warn/15 text-warn',
-  maint_start: 'bg-chart-1/12 text-chart-1',
-  maint_end: 'bg-chart-1/12 text-chart-1',
+  down: 'bg-poor/12 text-poor-text',
+  resend: 'bg-poor/12 text-poor-text',
+  up: 'bg-good/12 text-good-text',
+  cert: 'bg-warn/15 text-warn-text',
+  domain: 'bg-warn/15 text-warn-text',
+  maint_start: 'bg-maint/12 text-maint-text',
+  maint_end: 'bg-maint/12 text-maint-text',
 };
 
 /** Right-hand sheet built on the dialog primitive (focus trap, Escape, scroll lock). */
@@ -94,7 +94,7 @@ export function DeliveryLogSheet({ channel, onClose }: { channel: NotificationCh
                       </TableCell>
                       <TableCell className="max-w-56 pr-4 align-top whitespace-normal sm:pr-5">
                         {e.ok ? (
-                          <span className="inline-flex items-center gap-1 text-good">
+                          <span className="inline-flex items-center gap-1 text-good-text">
                             <CircleCheckIcon className="size-4" aria-hidden="true" />
                             Delivered
                             {e.httpStatus ? <span className="text-xs text-muted-foreground tabular-nums">({e.httpStatus})</span> : null}

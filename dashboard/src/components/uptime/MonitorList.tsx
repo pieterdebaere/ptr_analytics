@@ -78,8 +78,8 @@ function FilterSelect({
 }) {
   return (
     <Select<string> value={value || '__all'} onValueChange={(v) => onChange(!v || v === '__all' ? '' : v)}>
-      <SelectTrigger aria-label={label} className={cn('min-w-0 bg-background', className)}>
-        <SelectValue>{(v: string) => (v === '__all' ? allLabel : (options.find((o) => o.value === v)?.label ?? allLabel))}</SelectValue>
+      <SelectTrigger aria-label={label} className={cn('w-full min-w-0 bg-background', className)}>
+        <SelectValue className="block min-w-0 truncate whitespace-nowrap">{(v: string) => (v === '__all' ? allLabel : (options.find((o) => o.value === v)?.label ?? allLabel))}</SelectValue>
       </SelectTrigger>
       <SelectContent alignItemWithTrigger={false} align="start">
         <SelectItem value="__all">{allLabel}</SelectItem>
@@ -141,8 +141,9 @@ export function MonitorList({ monitors, beats, sites, typeLabels, canManage, emp
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2" role="search">
-        <div className="relative min-w-0 flex-1 basis-full sm:basis-56">
+      {/* < lg: search on its own row, filters in an even grid below; lg: one row */}
+      <div className="grid grid-cols-2 items-center gap-2 sm:grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] lg:flex lg:flex-wrap" role="search">
+        <div className="relative col-span-full min-w-0 lg:flex-1 lg:basis-56">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
           <Input
             type="search"
@@ -160,7 +161,7 @@ export function MonitorList({ monitors, beats, sites, typeLabels, canManage, emp
           onChange={(v) => setFilters({ status: v as DisplayStatus | '' })}
           allLabel="All statuses"
           options={STATUS_FILTERS.map((s) => ({ value: s, label: STATUS_LABELS[s] }))}
-          className="flex-1 sm:w-36 sm:flex-none"
+          className="lg:w-36"
         />
         {multiSite ? (
           <FilterSelect
@@ -169,14 +170,14 @@ export function MonitorList({ monitors, beats, sites, typeLabels, canManage, emp
             onChange={(v) => setFilters({ siteId: v })}
             allLabel="All sites"
             options={(sites ?? []).map((s) => ({ value: s.id, label: displayText(s.name) }))}
-            className="flex-1 sm:w-40 sm:flex-none"
+            className="lg:w-40"
           />
         ) : null}
         {tagOptions.length > 0 ? (
-          <FilterSelect label="Tag" value={filters.tag ?? ''} onChange={(v) => setFilters({ tag: v })} allLabel="All tags" options={tagOptions} className="flex-1 sm:w-36 sm:flex-none" />
+          <FilterSelect label="Tag" value={filters.tag ?? ''} onChange={(v) => setFilters({ tag: v })} allLabel="All tags" options={tagOptions} className="lg:w-36" />
         ) : null}
         {typeOptions.length > 1 ? (
-          <FilterSelect label="Type" value={filters.type ?? ''} onChange={(v) => setFilters({ type: v })} allLabel="All types" options={typeOptions} className="flex-1 sm:w-36 sm:flex-none" />
+          <FilterSelect label="Type" value={filters.type ?? ''} onChange={(v) => setFilters({ type: v })} allLabel="All types" options={typeOptions} className="lg:w-36" />
         ) : null}
         {filtering ? (
           <Button type="button" variant="ghost" onClick={clearFilters}>
@@ -279,7 +280,7 @@ function MonitorRow({
         {childCount > 0 ? (
           <button
             type="button"
-            className="relative z-10 -ml-1.5 inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+            className="relative z-10 -my-1.5 -ml-2.5 inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 md:-ml-1.5 md:size-6"
             aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${displayText(m.name)}`}
             aria-expanded={!collapsed}
             onClick={onToggle}
@@ -296,6 +297,7 @@ function MonitorRow({
                 'bidi-isolate truncate font-medium outline-none after:absolute after:inset-0 after:content-[""] focus-visible:underline',
                 status === 'paused' && 'text-muted-foreground',
               )}
+              title={displayText(m.name)}
             >
               {displayText(m.name)}
             </Link>
@@ -309,19 +311,20 @@ function MonitorRow({
           </div>
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
             <span className="shrink-0">{typeLabel(m.type, typeLabels)}</span>
-            {target ? (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="bidi-isolate truncate" title={target}>
-                  {target}
-                </span>
-              </>
-            ) : null}
             {siteName ? (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="bidi-isolate shrink-0 truncate">{displayText(siteName)}</span>
+                <span className="bidi-isolate max-w-[45%] shrink-0 truncate" title={displayText(siteName)}>
+                  {displayText(siteName)}
+                </span>
               </>
+            ) : null}
+            {target ? (
+              // the target goes last: it is the part that truncates (never collapses to an empty "· ·" segment)
+              <span className="flex min-w-6 items-center gap-1.5 overflow-hidden" title={target}>
+                <span aria-hidden="true">·</span>
+                <span className="bidi-isolate truncate">{target}</span>
+              </span>
             ) : null}
           </div>
         </div>
@@ -334,10 +337,16 @@ function MonitorRow({
       </div>
       <div className="relative z-10 flex items-center gap-3 md:contents">
         <HeartbeatBar beats={beats ?? []} slots={50} className="min-w-0 flex-1 md:w-[clamp(9rem,24vw,17rem)] md:flex-none" label={`Recent checks of ${displayText(m.name)}`} />
-        <span className="flex w-[5.5rem] shrink-0 items-center justify-end gap-2 text-xs text-muted-foreground md:hidden">
-          <span className="tabular-nums">{m.active ? formatLatency(m.state.latencyMs) : ''}</span>
-          {m.tls ? <CertCell m={m} /> : null}
-        </span>
+        {(m.active && m.state.latencyMs !== null) || m.tls ? (
+          <span className="flex shrink-0 items-center justify-end gap-2 text-xs text-muted-foreground md:hidden">
+            {m.active && m.state.latencyMs !== null ? (
+              <span className="tabular-nums" title="Last response time">
+                {formatLatency(m.state.latencyMs)}
+              </span>
+            ) : null}
+            {m.tls ? <CertCell m={m} /> : null}
+          </span>
+        ) : null}
       </div>
       <span className="hidden w-16 text-right text-sm md:block">{uptime}</span>
       <span className="hidden w-16 text-right text-sm text-muted-foreground tabular-nums md:block">{m.active ? formatLatency(m.state.latencyMs) : '–'}</span>

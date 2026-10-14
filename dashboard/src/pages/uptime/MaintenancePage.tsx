@@ -258,7 +258,7 @@ function MaintenanceRow({
                 <Link
                   key={mon.uid}
                   to={`/monitors/${encodeURIComponent(mon.uid)}`}
-                  className="inline-flex h-6 max-w-48 min-w-0 items-center gap-1.5 rounded-md border bg-background px-2 text-xs hover:bg-muted"
+                  className="inline-flex h-6 max-w-48 min-w-0 items-center gap-1.5 rounded-md border bg-background px-2 text-xs hover:bg-muted max-sm:h-8"
                   title={displayText(mon.name)}
                 >
                   <StatusDot status={mon.active ? (mon.state.status === 3 ? 'maintenance' : mon.state.status === 0 ? 'down' : 'up') : 'paused'} pulse={false} halo={false} className="size-1.5" />

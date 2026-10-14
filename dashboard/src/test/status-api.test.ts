@@ -239,6 +239,7 @@ describe('security API client', () => {
     expect(securityError(new ApiError(400, 'password is incorrect'))).toEqual({ field: 'password', message: 'The password is incorrect.' });
     expect(securityError(new ApiError(400, 'invalid code', 'invalid_code')).field).toBe('code');
     expect(securityError(new ApiError(400, 'invalid code', 'invalid_code')).message).toMatch(/^That code didn’t work/);
+    expect(securityError(new ApiError(400, 'invalid code', 'invalid_code'), 'recovery').message).toBe('Invalid or already used recovery code.');
     expect(securityError(new ApiError(400, 'code is required', 'mfa_code_required')).field).toBe('code');
     expect(securityError(new ApiError(429, 'too many wrong codes, try again in 5 min', 'mfa_locked'))).toEqual({ field: 'code', message: 'Too many wrong codes. Try again in 5 minutes.' });
     expect(securityError(new ApiError(409, 'start the setup first')).message).toBe('Start the setup first.');

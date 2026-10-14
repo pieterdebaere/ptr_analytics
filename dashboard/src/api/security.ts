@@ -129,11 +129,15 @@ export function factorError(f: SecondFactor): string | null {
 
 export type SecurityErrorField = 'password' | 'code' | null;
 
+/** Same wording on the login step and in the security settings. */
+export const INVALID_TOTP_MESSAGE = 'That code didn’t work. Check your authenticator app (and the time on your device) and try again.';
+export const INVALID_RECOVERY_MESSAGE = 'Invalid or already used recovery code.';
+
 /**
  * User-facing message for errors of the re-authenticated security endpoints (MFA setup /
  * enable / disable, recovery codes, API keys), with the form field it belongs to.
  */
-export function securityError(err: unknown): { field: SecurityErrorField; message: string } {
+export function securityError(err: unknown, factor: 'totp' | 'recovery' = 'totp'): { field: SecurityErrorField; message: string } {
   if (!(err instanceof ApiError)) return { field: null, message: err instanceof Error && err.name === 'AbortError' ? '' : 'Something went wrong.' };
   const msg = err.message.toLowerCase();
   if (err.code === 'mfa_locked') {
@@ -142,7 +146,7 @@ export function securityError(err: unknown): { field: SecurityErrorField; messag
   }
   if (err.status === 429) return { field: null, message: 'Too many attempts. Please wait a few minutes and try again.' };
   if (err.code === 'invalid_code' || msg === 'invalid code') {
-    return { field: 'code', message: 'That code didn’t work. Check the time on your device and try again, or use an unused recovery code.' };
+    return { field: 'code', message: factor === 'totp' ? INVALID_TOTP_MESSAGE : INVALID_RECOVERY_MESSAGE };
   }
   if (err.code === 'mfa_code_required' || msg === 'code is required') return { field: 'code', message: 'Enter a code from your authenticator app.' };
   if (msg === 'password is incorrect') return { field: 'password', message: 'The password is incorrect.' };

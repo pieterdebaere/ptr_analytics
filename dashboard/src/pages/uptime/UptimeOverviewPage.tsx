@@ -74,9 +74,9 @@ export function UptimeOverviewPage() {
         </Card>
       ) : !monitors ? (
         <div className="flex flex-col gap-4" aria-busy="true" aria-label="Loading">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="grid grid-cols-5 gap-1.5 sm:grid-cols-3 sm:gap-3 lg:grid-cols-5">
             {[0, 1, 2, 3, 4].map((i) => (
-              <Skeleton key={i} className={cn('h-[86px] rounded-xl', i === 4 && 'col-span-2 sm:col-span-1')} />
+              <Skeleton key={i} className="h-[62px] rounded-xl sm:h-[86px]" />
             ))}
           </div>
           <Skeleton className="h-8 w-full rounded-lg" />

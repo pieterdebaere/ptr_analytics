@@ -264,7 +264,7 @@ function CreateKeyDialog({ mfaEnabled, onClose, onCreated }: { mfaEnabled: boole
       setCode('');
       onCreated();
     } catch (err) {
-      const f = securityError(err);
+      const f = securityError(err, factorMode);
       if (f.field === 'password') setPasswordError(f.message);
       else if (f.field === 'code') {
         if (!needCode) {

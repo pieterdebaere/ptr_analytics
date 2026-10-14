@@ -27,6 +27,8 @@ export interface StatusDomain {
   verifyToken: string;
   /** DNS name of the TXT record (`_ptr-status.<domain>`). */
   txtName: string;
+  /** Unverified claims are dropped at this time (7 days after they were added); null once verified. */
+  expiresAt: number | null;
 }
 
 export interface StatusPage {
@@ -46,6 +48,11 @@ export interface StatusPage {
   refreshS: number;
   analyticsSiteId: string | null;
   logoUrl: string | null;
+  /**
+   * Absolute URL of the public page (on STATUS_PAGE_ORIGIN when the server has one), or null
+   * when the server sent none / only a path.
+   */
+  publicUrl: string | null;
   sections: StatusSection[];
   domains: StatusDomain[];
 }
@@ -319,6 +326,7 @@ export function parseStatusPage(raw: unknown): StatusPage | null {
     refreshS: refresh(raw.refreshS),
     analyticsSiteId: typeof raw.analyticsSiteId === 'string' && raw.analyticsSiteId ? raw.analyticsSiteId : null,
     logoUrl: safeAssetUrl(raw.logoUrl),
+    publicUrl: safeHttpUrl(raw.publicUrl),
     sections: arr(raw.sections)
       .filter(isObj)
       .map((s) => ({
@@ -341,7 +349,14 @@ export function parseStatusPage(raw: unknown): StatusPage | null {
 
 function parseDomain(d: Obj): StatusDomain {
   const domain = str(d.domain);
-  return { domain, verified: d.verified === true, verifyToken: str(d.verifyToken), txtName: str(d.txtName, `_ptr-status.${domain}`) };
+  const verified = d.verified === true;
+  return {
+    domain,
+    verified,
+    verifyToken: str(d.verifyToken),
+    txtName: str(d.txtName, `_ptr-status.${domain}`),
+    expiresAt: verified ? null : numOrNull(d.expiresAt),
+  };
 }
 
 export function parseIncident(raw: unknown): Incident | null {
@@ -548,7 +563,24 @@ export const statusApi = {
     request<unknown>('GET', `/public/status/${enc(slug)}`, { signal, redirectOn401: false }).then(parsePublicStatus),
 };
 
-/** Absolute URLs for a page (public page, badge, RSS). `origin` = PUBLIC_URL or the current origin. */
+/**
+ * Origin public status pages are served on: the page's own `publicUrl`, else the server's
+ * STATUS_PAGE_ORIGIN (public config), else `fallback` (PUBLIC_URL or this origin).
+ */
+export function statusOrigin(page: Pick<StatusPage, 'publicUrl'> | null, statusPageOrigin: string | null | undefined, fallback: string): string {
+  for (const v of [page?.publicUrl, statusPageOrigin]) {
+    if (!v) continue;
+    try {
+      const u = new URL(v);
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin;
+    } catch {
+      /* next */
+    }
+  }
+  return fallback;
+}
+
+/** Absolute URLs for a page (public page, badge, RSS). `origin` = see statusOrigin(). */
 export function statusUrls(origin: string, slug: string) {
   const o = origin.replace(/\/+$/, '');
   const s = enc(slug);

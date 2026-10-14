@@ -43,13 +43,18 @@ export function CreateStatusPageDialog({
   const [slugServerError, setSlugServerError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
   const titleId = useId();
+  const titleErrId = useId();
   const slugId = useId();
   const slugHint = useId();
 
   const site = sites.find((s) => s.id === siteId);
-  const liveSlugError = slug ? slugError(slug) : null;
-  const shownSlugError = slugServerError ?? (slugTouched || slug ? liveSlugError : null);
+  // Inline errors: the slug as you type, everything else once "Create page" was clicked.
+  const liveSlugError = slug || submitted ? slugError(slug) : null;
+  const shownSlugError = slugServerError ?? liveSlugError;
+  const titleError = submitted && !title.trim() ? 'Enter a title, e.g. the name of your service.' : null;
+  const siteError = submitted && !siteId ? 'Choose a site.' : null;
 
   const onTitle = (v: string) => {
     setTitle(v);
@@ -61,11 +66,8 @@ export function CreateStatusPageDialog({
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setSlugTouched(true);
-    if (!siteId) return setError('Choose a site.');
-    if (!title.trim()) return setError('Enter a title.');
-    const se = slugError(slug);
-    if (se) return;
+    setSubmitted(true);
+    if (!siteId || !title.trim() || slugError(slug)) return;
     setBusy(true);
     setError(null);
     try {
@@ -92,7 +94,7 @@ export function CreateStatusPageDialog({
           <div className="flex flex-col gap-2">
             <Label>Site</Label>
             <Select value={siteId} onValueChange={(v) => setSiteId(String(v))}>
-              <SelectTrigger className="w-full" aria-label="Site">
+              <SelectTrigger className="w-full" aria-label="Site" aria-invalid={siteError ? true : undefined}>
                 <SelectValue>{() => (site ? <span className="bidi-isolate truncate">{displayText(site.name)}</span> : 'Choose a site')}</SelectValue>
               </SelectTrigger>
               <SelectContent alignItemWithTrigger={false}>
@@ -103,10 +105,25 @@ export function CreateStatusPageDialog({
                 ))}
               </SelectContent>
             </Select>
+            {siteError ? <p className="text-xs text-destructive">{siteError}</p> : null}
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor={titleId}>Title</Label>
-            <Input id={titleId} value={title} maxLength={100} placeholder="Acme status" onChange={(e) => onTitle(e.target.value)} autoFocus />
+            <Input
+              id={titleId}
+              value={title}
+              maxLength={100}
+              placeholder="e.g. Acme status"
+              aria-invalid={titleError ? true : undefined}
+              aria-describedby={titleError ? titleErrId : undefined}
+              onChange={(e) => onTitle(e.target.value)}
+              autoFocus
+            />
+            {titleError ? (
+              <p id={titleErrId} className="text-xs text-destructive">
+                {titleError}
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor={slugId}>Address</Label>
@@ -122,7 +139,7 @@ export function CreateStatusPageDialog({
                 spellCheck={false}
                 aria-invalid={shownSlugError ? true : undefined}
                 aria-describedby={slugHint}
-                placeholder="acme"
+                placeholder="e.g. acme-status"
                 onChange={(e) => {
                   setSlug(e.target.value.toLowerCase().replace(/\s+/g, '-'));
                   setSlugTouched(true);
@@ -139,7 +156,7 @@ export function CreateStatusPageDialog({
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy || !!liveSlugError || !slug || !title.trim() || !siteId}>
+            <Button type="submit" disabled={busy}>
               {busy ? 'Creating…' : 'Create page'}
             </Button>
           </DialogFooter>

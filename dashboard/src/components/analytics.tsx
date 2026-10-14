@@ -280,7 +280,7 @@ export function PanelTabs<K extends string>({
 }) {
   return (
     <Tabs value={value} onValueChange={(v) => onChange(v as K)} className="min-w-0">
-      <TabsList variant="line" aria-label={label} className="scrollbar-none -mx-1 h-8 w-[calc(100%+0.5rem)] justify-start overflow-x-auto px-1">
+      <TabsList variant="line" aria-label={label} className="scrollbar-none -mx-1 h-8 w-[calc(100%+0.5rem)] justify-start overflow-x-auto px-1 max-sm:h-10">
         {tabs.map((t) => (
           <TabsTrigger key={t.key} value={t.key} className="flex-none px-2 text-[13px]">
             {t.label}
