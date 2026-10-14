@@ -10,7 +10,11 @@
 // Secret fields (`secret: true`, kind `password`) are never prefilled:
 //   undefined | ""  -> keep the stored value (omitted from the payload)
 //   null            -> clear the stored value (sent as null)
-//   string / rows   -> replace the stored value
+//   string          -> replace the stored value
+// Secret key/value fields (e.g. `secretHeaders`): the names are stored in the config, the
+// values are write-only (`secretsSet` lists "<field>.<name>"). Rows are prefilled with the
+// names and an empty value; a row with value "" keeps that stored value, `[]`/null clears all,
+// undefined (field omitted) keeps everything.
 import type { FieldDef } from '@/api/uptime';
 
 export type FieldValues = Record<string, unknown>;
@@ -21,6 +25,16 @@ export interface KeyValueRow {
 
 export function isSecretField(f: FieldDef): boolean {
   return f.secret === true || f.kind === 'password';
+}
+
+/** Whether a stored secret exists for the field (or, for key/value secrets, for one of its rows). */
+export function hasStoredSecret(key: string, secretsSet: readonly string[]): boolean {
+  return secretsSet.some((s) => s === key || s.startsWith(`${key}.`));
+}
+
+/** Stored value exists for row `name` of a secret key/value field. */
+export function isRowSecretSet(key: string, name: string, secretsSet: readonly string[]): boolean {
+  return name !== '' && (secretsSet.includes(`${key}.${name}`) || secretsSet.includes(`${key}.${name.toLowerCase()}`));
 }
 
 const STATUS_CODE_RE = /^[1-5]\d{2}(?:-[1-5]\d{2})?$/;
@@ -66,8 +80,12 @@ function coerce(f: FieldDef, v: unknown): unknown {
     case 'keyvalue':
       if (Array.isArray(v)) {
         return v
-          .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
-          .map((r) => ({ key: String(r.key ?? ''), value: typeof r.value === 'string' ? r.value : String(r.value ?? '') }));
+          .filter((r): r is Record<string, unknown> | string => (typeof r === 'object' && r !== null) || typeof r === 'string')
+          .map((r) =>
+            typeof r === 'string'
+              ? { key: r, value: '' }
+              : { key: String(r.key ?? r.name ?? ''), value: typeof r.value === 'string' ? r.value : r.value === undefined || r.value === null ? '' : String(r.value) },
+          );
       }
       if (typeof v === 'object') {
         return Object.entries(v as Record<string, unknown>).map(([key, value]) => ({ key, value: String(value ?? '') }));
@@ -90,7 +108,9 @@ export function initialFieldValues(fields: readonly FieldDef[], config?: Record<
   const out: FieldValues = {};
   for (const f of fields) {
     if (isSecretField(f)) {
-      out[f.key] = undefined;
+      // key/value secrets: names are not secret -> rows with empty (= keep) values
+      const rows = f.kind === 'keyvalue' && config ? coerce(f, config[f.key]) : undefined;
+      out[f.key] = Array.isArray(rows) && rows.length > 0 ? rows.map((r: KeyValueRow) => ({ key: r.key, value: '' })) : undefined;
       continue;
     }
     const stored = config ? coerce(f, config[f.key]) : undefined;
@@ -191,8 +211,16 @@ export function validateFieldValues(
   for (const f of visibleFields(fields, values, opts.hosted)) {
     const v = values[f.key];
     if (isSecretField(f)) {
-      const keeps = (v === undefined || v === '') && secretsSet.has(f.key);
-      if (f.required && !keeps && (v === null || isBlank(v) || (f.kind === 'keyvalue' && cleanRows(v).length === 0))) {
+      const stored = hasStoredSecret(f.key, [...secretsSet]);
+      if (f.kind === 'keyvalue') {
+        const rows = v === undefined ? null : cleanRows(v);
+        if (f.required && (v === null || (rows !== null && rows.length === 0) || (rows === null && !stored))) errors[f.key] = `${f.label} is required.`;
+        else if (rows?.some((r) => r.key === '')) errors[f.key] = 'Every entry needs a name.';
+        else if (rows?.some((r) => r.value === '' && !isRowSecretSet(f.key, r.key, [...secretsSet]))) errors[f.key] = 'Enter a value for every new entry.';
+        continue;
+      }
+      const keeps = (v === undefined || v === '') && stored;
+      if (f.required && !keeps && (v === null || isBlank(v))) {
         errors[f.key] = `${f.label} is required.`;
       } else if (typeof v === 'string' && f.maxLength !== undefined && v.length > f.maxLength) {
         errors[f.key] = `At most ${f.maxLength} characters.`;

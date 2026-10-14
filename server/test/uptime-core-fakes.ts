@@ -21,6 +21,8 @@ export class FakeClock implements EngineClock {
     t: number | { t: number },
     /** wall = t + wallOffset (lets tests step the wall clock independently). */
     public wallOffset = 0,
+    /** mono = t + monoOffset: a monotonic origin unrelated to the epoch, like performance.now(). */
+    public monoOffset = 0,
   ) {
     this.state = typeof t === 'number' ? { t } : t;
   }
@@ -38,7 +40,7 @@ export class FakeClock implements EngineClock {
   }
 
   mono(): number {
-    return this.t;
+    return this.t + this.monoOffset;
   }
 
   setTimer(fn: () => void, ms: number): unknown {

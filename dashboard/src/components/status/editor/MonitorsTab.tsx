@@ -142,14 +142,14 @@ export function MonitorsTab({
                           aria-label="Public display name"
                           title="Public display name (leave empty to use the monitor name)"
                           disabled={readOnly}
-                          className="min-w-0 flex-1 sm:w-48 sm:flex-none"
+                          className="min-w-0 basis-full sm:w-48 sm:basis-auto"
                           onChange={(e) => setMonitor({ displayName: e.target.value || null })}
                         />
                         <label className="flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-xs whitespace-nowrap" title="Link the name to the monitored URL (HTTP monitors)">
                           <Switch size="sm" checked={sm.showUrl} disabled={readOnly} onCheckedChange={(v) => setMonitor({ showUrl: v })} />
                           Show URL
                         </label>
-                        <div className="flex items-center">
+                        <div className="ml-auto flex items-center">
                           <Button
                             type="button"
                             variant="ghost"

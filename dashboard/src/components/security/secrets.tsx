@@ -70,10 +70,10 @@ export function RecoveryCodes({ codes, account, onSavedChange }: { codes: readon
 }
 
 /** A secret shown once, in a monospace box with copy. */
-export function SecretValue({ value, label, className }: { value: string; label: string; className?: string }) {
+export function SecretValue({ value, label, className, wrap = false }: { value: string; label: string; className?: string; wrap?: boolean }) {
   return (
     <div className={cn('flex min-w-0 items-center gap-2 rounded-lg border bg-muted/50 py-1.5 pr-1.5 pl-3', className)}>
-      <code className="min-w-0 flex-1 overflow-x-auto py-1 text-[0.8rem] whitespace-nowrap select-all" aria-label={label}>
+      <code className={cn('min-w-0 flex-1 py-1 text-[0.8rem] select-all', wrap ? 'break-all' : 'overflow-x-auto whitespace-nowrap')} aria-label={label}>
         {value}
       </code>
       <CopyButton text={value} className="shrink-0 bg-background" />

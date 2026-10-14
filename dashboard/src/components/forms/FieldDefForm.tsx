@@ -16,10 +16,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
-import { groupFields, isFieldVisible, isSecretField, isStatusCodeRange, type FieldValues, type KeyValueRow } from './field-values';
+import { groupFields, hasStoredSecret, isFieldVisible, isRowSecretSet, isSecretField, isStatusCodeRange, type KeyValueRow } from './field-values';
 
 export {
   fieldValuesToConfig,
+  hasStoredSecret,
+  isRowSecretSet,
   groupFields,
   initialFieldValues,
   isFieldVisible,
@@ -63,7 +65,8 @@ export function FieldDefForm({ fields, values, onChange, errors = {}, secretsSet
           value={values[f.key]}
           onChange={(v) => set(f.key, v)}
           error={errors[f.key]}
-          isSet={secretsSet.includes(f.key)}
+          isSet={hasStoredSecret(f.key, secretsSet)}
+          secretsSet={secretsSet}
           disabled={disabled}
           wide={WIDE_KINDS.has(f.kind) || list.length === 1}
         />
@@ -83,7 +86,7 @@ export function FieldDefForm({ fields, values, onChange, errors = {}, secretsSet
           </CollapsibleGroup>
         ) : (
           <fieldset key={g.group} className="flex min-w-0 flex-col gap-4 border-t pt-5 first:border-t-0 first:pt-0">
-            <legend className="float-left mb-4 w-full text-[13px] font-semibold tracking-tight text-foreground">{g.group}</legend>
+            <legend className="float-left mb-1 w-full text-[13px] font-semibold tracking-tight text-foreground">{g.group}</legend>
             {renderFields(g.fields)}
           </fieldset>
         ),
@@ -122,11 +125,12 @@ interface FieldRowProps {
   onChange: (v: unknown) => void;
   error?: string;
   isSet: boolean;
+  secretsSet: string[];
   disabled: boolean;
   wide: boolean;
 }
 
-function FieldRow({ id, field: f, value, onChange, error, isSet, disabled, wide }: FieldRowProps) {
+function FieldRow({ id, field: f, value, onChange, error, isSet, secretsSet, disabled, wide }: FieldRowProps) {
   const helpId = `${id}-help`;
   const errId = `${id}-error`;
   const describedBy = [f.help ? helpId : null, error ? errId : null].filter(Boolean).join(' ') || undefined;
@@ -231,7 +235,7 @@ function FieldRow({ id, field: f, value, onChange, error, isSet, disabled, wide 
         );
         break;
       case 'keyvalue':
-        control = <KeyValueEditor id={id} field={f} value={value} onChange={onChange} isSet={isSet} disabled={disabled} invalid={!!error} />;
+        control = <KeyValueEditor id={id} field={f} value={value} onChange={onChange} isSet={isSet} secretsSet={secretsSet} disabled={disabled} invalid={!!error} />;
         break;
       case 'statuscodes':
         control = <StatusCodesEditor id={id} value={value} onChange={onChange} disabled={disabled} invalid={!!error} describedBy={describedBy} />;
@@ -390,6 +394,7 @@ function KeyValueEditor({
   value,
   onChange,
   isSet,
+  secretsSet,
   disabled,
   invalid,
 }: {
@@ -398,6 +403,7 @@ function KeyValueEditor({
   value: unknown;
   onChange: (v: unknown) => void;
   isSet: boolean;
+  secretsSet: string[];
   disabled: boolean;
   invalid: boolean;
 }) {
@@ -413,71 +419,60 @@ function KeyValueEditor({
       </div>
     );
   }
-  if (secret && isSet && !Array.isArray(value)) {
-    return (
-      <div className="flex min-h-8 flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 py-1 pr-1 pl-2.5 text-sm" data-secret-state="set">
-        <span className="text-muted-foreground">•••• set — leave unchanged to keep</span>
-        <span className="flex gap-1">
-          <Button type="button" variant="outline" size="sm" onClick={() => onChange([{ key: '', value: '' }])} disabled={disabled}>
-            Replace
-          </Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => onChange(null)} disabled={disabled} aria-label={`Clear stored ${f.label}`}>
-            Clear
-          </Button>
-        </span>
-      </div>
-    );
-  }
   const rows = asRows(value);
   const update = (i: number, patch: Partial<KeyValueRow>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   return (
     <div className="flex flex-col gap-2" role="group" aria-labelledby={`${id}-label`}>
       {rows.length > 0 ? (
         <div className="flex flex-col gap-2">
-          {rows.map((r, i) => (
-            <div key={i} className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)_auto] gap-2">
-              <Input
-                aria-label={`Name ${i + 1}`}
-                placeholder="Name"
-                value={r.key}
-                disabled={disabled}
-                autoComplete="off"
-                spellCheck={false}
-                aria-invalid={invalid && r.key.trim() === '' ? true : undefined}
-                onChange={(e) => update(i, { key: e.target.value })}
-              />
-              <Input
-                aria-label={`Value ${i + 1}`}
-                placeholder="Value"
-                type={secret ? 'password' : 'text'}
-                autoComplete={secret ? 'new-password' : 'off'}
-                spellCheck={false}
-                value={r.value}
-                disabled={disabled}
-                onChange={(e) => update(i, { value: e.target.value })}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={`Remove entry ${i + 1}`}
-                disabled={disabled}
-                onClick={() => onChange(rows.filter((_, j) => j !== i))}
-              >
-                <Trash2Icon aria-hidden="true" />
-              </Button>
-            </div>
-          ))}
+          {rows.map((r, i) => {
+            const stored = secret && isRowSecretSet(f.key, r.key, secretsSet);
+            return (
+              <div key={i} className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)_auto] gap-2" data-secret-state={secret ? (stored ? 'set' : 'empty') : undefined}>
+                <Input
+                  aria-label={`Name ${i + 1}`}
+                  placeholder="Name"
+                  value={r.key}
+                  disabled={disabled}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-invalid={invalid && r.key.trim() === '' ? true : undefined}
+                  onChange={(e) => update(i, { key: e.target.value })}
+                />
+                <Input
+                  aria-label={`Value ${i + 1}`}
+                  placeholder={stored ? '•••• set — leave empty to keep' : 'Value'}
+                  type={secret ? 'password' : 'text'}
+                  autoComplete={secret ? 'new-password' : 'off'}
+                  spellCheck={false}
+                  value={r.value}
+                  disabled={disabled}
+                  aria-invalid={invalid && secret && !stored && r.value === '' && r.key !== '' ? true : undefined}
+                  onChange={(e) => update(i, { value: e.target.value })}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Remove entry ${i + 1}`}
+                  disabled={disabled}
+                  onClick={() => onChange(rows.filter((_, j) => j !== i))}
+                >
+                  <Trash2Icon aria-hidden="true" />
+                </Button>
+              </div>
+            );
+          })}
         </div>
       ) : null}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onChange([...rows, { key: '', value: '' }])}>
           <PlusIcon aria-hidden="true" />
           Add entry
         </Button>
         {secret && isSet ? (
-          <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => onChange(undefined)}>
-            Keep stored entries
+          <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => onChange(null)} aria-label={`Clear all stored ${f.label}`}>
+            Clear all
           </Button>
         ) : null}
       </div>

@@ -244,7 +244,7 @@ function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreate
               <DialogTitle>API key created</DialogTitle>
               <DialogDescription>Copy the key now — it is shown only once. Treat it like a password.</DialogDescription>
             </DialogHeader>
-            <SecretValue value={created.key} label="API key" />
+            <SecretValue value={created.key} label="API key" wrap />
             {created.apiKey.scopes.includes('metrics') ? (
               <div className="flex min-w-0 flex-col gap-2">
                 <p className="text-sm font-medium">Prometheus scrape config</p>
@@ -262,7 +262,7 @@ function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreate
             </DialogFooter>
           </>
         ) : (
-          <form onSubmit={onSubmit} className="grid gap-4">
+          <form onSubmit={onSubmit} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
             <DialogHeader>
               <DialogTitle>New API key</DialogTitle>
               <DialogDescription>Keys are scoped and can expire. You can revoke them at any time.</DialogDescription>

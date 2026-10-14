@@ -209,6 +209,31 @@ describe('FieldDefForm', () => {
     expect(container.querySelector<HTMLInputElement>('[data-field="token"] input')!.placeholder).not.toContain('set');
   });
 
+  it('secret key/value: stored names prefilled, values write-only, "" keeps, Clear all sends null', () => {
+    const fields: FieldDef[] = [{ key: 'secretHeaders', label: 'Secret headers', kind: 'keyvalue', secret: true }];
+    const initial = initialFieldValues(fields, { secretHeaders: ['X-Api-Key'] });
+    expect(initial.secretHeaders).toEqual([{ key: 'X-Api-Key', value: '' }]);
+    expect(initialFieldValues(fields, {}).secretHeaders).toBeUndefined();
+    const secretsSet = ['secretHeaders.X-Api-Key'];
+    // unchanged rows keep the stored value; [] clears all; omitted keeps everything
+    expect(fieldValuesToConfig(fields, initial)).toEqual({ secretHeaders: [{ key: 'X-Api-Key', value: '' }] });
+    expect(fieldValuesToConfig(fields, { secretHeaders: [] })).toEqual({ secretHeaders: [] });
+    expect(fieldValuesToConfig(fields, { secretHeaders: undefined })).toEqual({});
+    expect(fieldValuesToConfig(fields, { secretHeaders: null })).toEqual({ secretHeaders: null });
+    expect(validateFieldValues(fields, initial, { secretsSet })).toEqual({});
+    expect(validateFieldValues(fields, { secretHeaders: [{ key: 'X-New', value: '' }] }, { secretsSet }).secretHeaders).toMatch(/value/);
+
+    const onChange = vi.fn();
+    act(() => root.render(<FieldDefForm fields={fields} values={initial} onChange={onChange} secretsSet={secretsSet} />));
+    const value = container.querySelector<HTMLInputElement>('[aria-label="Value 1"]')!;
+    expect(value.type).toBe('password');
+    expect(value.value).toBe('');
+    expect(value.placeholder).toBe('•••• set — leave empty to keep');
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Name 1"]')!.value).toBe('X-Api-Key');
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Clear all stored Secret headers"]')!.click());
+    expect(onChange).toHaveBeenLastCalledWith({ secretHeaders: null });
+  });
+
   it('hides self-hosted-only fields in hosted mode', () => {
     act(() => root.render(<Harness initial={initialFieldValues(FIELDS)} hosted onValues={() => {}} />));
     expect(container.textContent).not.toContain('Advanced');

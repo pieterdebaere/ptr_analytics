@@ -166,7 +166,7 @@ function SiteHealthLine({ health }: { health: SiteHealth }) {
   const active = health.total - health.paused;
   return (
     <div data-slot="site-health" className="-mx-4 -mb-4 flex items-center gap-2 rounded-b-xl border-t bg-muted/30 px-4 py-2.5 text-xs text-muted-foreground">
-      <StatusDot status={status} className="size-2" />
+      <StatusDot status={status} halo={false} className="size-2" />
       <span className={cn('font-medium', status === 'down' ? 'text-poor' : 'text-foreground')}>
         {health.down > 0 ? `${health.down} down` : `${health.up}/${active} up`}
       </span>

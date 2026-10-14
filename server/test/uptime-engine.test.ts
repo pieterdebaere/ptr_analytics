@@ -28,7 +28,7 @@ beforeEach(async () => {
   admin = await login(t.app);
   const res = await api(t.app, admin, 'POST', '/api/sites', { name: 'Site', domains: ['example.com'] });
   siteId = (res.json() as { site: { id: string } }).site.id;
-  clock = new FakeClock(t.clock);
+  clock = new FakeClock(t.clock, 0, 12_345 - t.clock.t);
   engine = null;
 });
 
@@ -212,6 +212,22 @@ describe('engine: checks, scheduling and persistence', () => {
     expect(b[0]?.msg).toMatch(/Timeout after 2s/);
   });
 
+  it('editing a monitor while its check is running keeps it scheduled', async () => {
+    start();
+    const m = await createMonitor({});
+    let release: (() => void) | null = null;
+    results.set(m.uid, () => new Promise((r) => (release = () => r({ status: 'up', msg: 'slow', latencyMs: 1 }))));
+    await clock.advance(1);
+    expect(engine!.stats().inFlight).toBe(1);
+    expect((await api(t.app, admin, 'PATCH', `/api/monitors/${m.uid}`, { name: 'Renamed' })).statusCode).toBe(200);
+    (release as unknown as () => void)();
+    await clock.advance(1);
+    results.set(m.uid, { status: 'up', msg: 'fast', latencyMs: 1 });
+    const before = results.calls.length;
+    await clock.advance(3 * MIN);
+    expect(results.calls.length).toBeGreaterThanOrEqual(before + 2);
+  });
+
   it('a throwing checker is recorded as a failure, never crashes the engine', async () => {
     start();
     const m = await createMonitor({});
@@ -319,6 +335,22 @@ describe('engine: push monitors', () => {
     await clock.advance(120 * SEC);
     flush();
     expect(beats(m.id).map((b) => b.status)).toEqual([0, 1, 1, 1, 1, 0, 0]);
+  });
+
+  it('push monitors in maintenance record one maintenance beat per interval (no busy loop)', async () => {
+    start();
+    const m = await createMonitor({ type: 'push', intervalS: 60, config: {} });
+    await api(t.app, admin, 'POST', '/api/maintenances', { title: 'M', strategy: 'manual', monitorUids: [m.uid] });
+    await clock.advance(10 * MIN);
+    flush();
+    const statuses = beats(m.id).map((b) => b.status);
+    expect(statuses.length).toBeGreaterThanOrEqual(8);
+    expect(statuses.length).toBeLessThanOrEqual(11);
+    expect(statuses.every((s) => s === 3)).toBe(true);
+    // a push during maintenance is recorded as maintenance too
+    await t.app.inject({ method: 'GET', url: m.pushUrl! });
+    flush();
+    expect(beats(m.id).at(-1)?.status).toBe(3);
   });
 
   it('status=down pushes count as failures; upside-down flips them', async () => {

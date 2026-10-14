@@ -334,7 +334,7 @@ describe('actions and history', () => {
     const m = await createMonitor(a.cookie, siteA);
     // no engine running
     expect((await api(t.app, a.cookie, 'POST', `/api/monitors/${m.uid}/check`)).statusCode).toBe(503);
-    const clock = new FakeClock(t.clock);
+    const clock = new FakeClock(t.clock, 0, 12_345 - t.clock.t);
     engine = createEngine(t.ctx, { clock, netFactory: () => nullNet });
     expect(uptimeRuntime(t.ctx).engine).toBe(engine);
     const ok = await api(t.app, a.cookie, 'POST', `/api/monitors/${m.uid}/check`);

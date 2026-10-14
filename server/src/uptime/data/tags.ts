@@ -26,7 +26,7 @@ const toTag = (r: TagRow): TagRecord => ({ id: r.id, uid: r.uid, ownerId: r.owne
 export class TagRepo {
   constructor(private readonly db: DB) {}
 
-  /** null = every tag (admins / viewers). */
+  /** A user's (or the operators', null) tags, or 'all' (admins / viewers). */
   list(ownerId: number | null | 'all'): TagRecord[] {
     const rows =
       ownerId === 'all'

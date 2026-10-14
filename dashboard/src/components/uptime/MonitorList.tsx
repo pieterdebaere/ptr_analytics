@@ -334,7 +334,7 @@ function MonitorRow({
       </div>
       <div className="relative z-10 flex items-center gap-3 md:contents">
         <HeartbeatBar beats={beats ?? []} slots={50} className="min-w-0 flex-1 md:w-[clamp(9rem,24vw,17rem)] md:flex-none" label={`Recent checks of ${displayText(m.name)}`} />
-        <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground md:hidden">
+        <span className="flex w-[5.5rem] shrink-0 items-center justify-end gap-2 text-xs text-muted-foreground md:hidden">
           <span className="tabular-nums">{m.active ? formatLatency(m.state.latencyMs) : ''}</span>
           {m.tls ? <CertCell m={m} /> : null}
         </span>

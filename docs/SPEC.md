@@ -554,7 +554,10 @@ Schema: migration v6 (`server/src/uptime/schema/*.ts`).
   connect to that exact address; redirects re-checked; `dns.Resolver` with timeouts, never
   `dns.lookup`). Policy: `UPTIME_PRIVATE_TARGETS` (`allow` self-hosted default, forced `deny` in
   hosted mode), link-local/metadata always denied unless `UPTIME_ALLOW_METADATA`, allow/deny lists,
-  the server's own addresses always denied.
+  in hosted mode the server's own addresses (`PUBLIC_URL` host, local interfaces) are always denied
+  (self-hosted installs may monitor sites behind the same reverse proxy). Monitor and notification
+  traffic never uses `HTTP(S)_PROXY` / `NODE_USE_ENV_PROXY`; `/etc/hosts` is not consulted (names are
+  resolved with c-ares).
 * Realtime: Server-Sent Events (`GET /api/uptime/stream`), the dashboard falls back to polling.
 * Two-factor authentication (TOTP + recovery codes) for all accounts; API keys (bearer, scoped)
   for `/metrics` (Prometheus) and read-only API automation.

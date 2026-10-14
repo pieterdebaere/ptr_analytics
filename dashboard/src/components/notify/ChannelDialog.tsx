@@ -2,7 +2,7 @@
 // shared <FieldDefForm>, defaults, "apply to existing monitors" and a test button.
 import { useId, useMemo, useState, type FormEvent } from 'react';
 import { ArrowLeftIcon, CircleAlertIcon, CircleCheckIcon, LockKeyholeIcon, SearchIcon, SendIcon } from 'lucide-react';
-import { errorMessage } from '@/api/client';
+import { ApiError, errorMessage } from '@/api/client';
 import {
   PROVIDER_CATEGORIES,
   PROVIDER_CATEGORY_LABELS,
@@ -10,6 +10,7 @@ import {
   type ChannelInput,
   type NotificationChannel,
   type NotificationProvider,
+  type WebhookPreset,
 } from '@/api/notify';
 import { FormMessage } from '@/components/AuthCard';
 import { FieldDefForm, fieldValuesToConfig, initialFieldValues, validateFieldValues } from '@/components/forms/FieldDefForm';
@@ -57,7 +58,7 @@ export function ProviderPicker({
         {groups.map((g) => (
           <section key={g.category} aria-label={PROVIDER_CATEGORY_LABELS[g.category]}>
             <h3 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">{PROVIDER_CATEGORY_LABELS[g.category]}</h3>
-            <div className="grid grid-cols-1 gap-2 min-[400px]:grid-cols-2 sm:grid-cols-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {g.items.map((p) => {
                 const disabled = hosted && !p.hostedAllowed;
                 return (
@@ -68,7 +69,7 @@ export function ProviderPicker({
                     onClick={() => onPick(p)}
                     title={disabled ? 'Not available on the hosted service' : undefined}
                     className={cn(
-                      'flex h-12 min-w-0 items-center gap-2.5 rounded-lg border bg-background px-2.5 text-left text-sm font-medium outline-none transition-colors hover:border-foreground/20 hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/20',
+                      'flex h-12 min-w-0 items-center gap-2 rounded-lg border bg-background px-2 text-left text-sm font-medium sm:gap-2.5 sm:px-2.5 outline-none transition-colors hover:border-foreground/20 hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/20',
                       disabled && 'cursor-not-allowed opacity-50 hover:border-border hover:bg-background',
                     )}
                   >
@@ -122,7 +123,7 @@ export function ChannelDialog({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [test, setTest] = useState<TestState>({ kind: 'idle' });
-  const [dirty, setDirty] = useState(false);
+  const [presetHelp, setPresetHelp] = useState<string | null>(null);
   const nameId = useId();
   const secretsSet = channel?.secretsSet ?? [];
 
@@ -154,10 +155,12 @@ export function ChannelDialog({
     if (!validate()) return;
     setTest({ kind: 'testing' });
     try {
-      const r = channel && !dirty ? await notifyApi.testChannel(channel.uid) : await notifyApi.testUnsaved({ ...payload(), ...(channel ? { uid: channel.uid } : {}) });
+      // With `uid`, the server fills omitted secret fields from the stored channel.
+      const r = await notifyApi.testUnsaved({ ...payload(), ...(channel ? { uid: channel.uid } : {}) });
       setTest(r.ok ? { kind: 'ok' } : { kind: 'error', message: r.error ?? 'Sending failed.' });
     } catch (err) {
-      setTest({ kind: 'error', message: errorMessage(err) || 'Sending failed.' });
+      if (!mapFieldError(err)) setTest({ kind: 'error', message: errorMessage(err) || 'Sending failed.' });
+      else setTest({ kind: 'idle' });
     }
   };
 
@@ -172,15 +175,49 @@ export function ChannelDialog({
       const saved = channel ? await notifyApi.updateChannel(channel.uid, body) : await notifyApi.createChannel(body);
       onSaved(saved);
     } catch (err) {
-      setSaveError(errorMessage(err));
+      if (!mapFieldError(err)) setSaveError(errorMessage(err));
     } finally {
       setBusy(false);
     }
   };
 
+  /** Shows a server validation error next to its field; false when it names no known field. */
+  const mapFieldError = (err: unknown): boolean => {
+    if (!(err instanceof ApiError) || !err.field || !provider) return false;
+    const key = err.field.replace(/^config\./, '');
+    if (key === 'name') {
+      setNameError(err.message);
+      return true;
+    }
+    if (provider.fields.some((f) => f.key === key)) {
+      setErrors((e) => ({ ...e, [key]: err.message }));
+      return true;
+    }
+    return false;
+  };
+
+  const applyPreset = (preset: WebhookPreset) => {
+    if (!provider) return;
+    const merged = { ...fieldValuesToConfig(provider.fields, values, hosted), ...preset.config };
+    const next = initialFieldValues(provider.fields, merged);
+    // keep secrets the user already typed; add the preset's header names as empty rows
+    for (const f of provider.fields) if (f.secret && values[f.key] !== undefined) next[f.key] = values[f.key];
+    if (preset.headerNames.length > 0 && provider.fields.some((f) => f.key === 'headers')) {
+      const rows = Array.isArray(values.headers) ? (values.headers as Array<{ key: string; value: string }>) : [];
+      next.headers = [...rows, ...preset.headerNames.filter((h) => !rows.some((r) => r.key === h)).map((key) => ({ key, value: '' }))];
+    }
+    setValues(next);
+    setPresetHelp(preset.help || null);
+  };
+
+  const insertVar = (v: string) => {
+    if (!provider?.fields.some((f) => f.key === 'bodyTemplate')) return;
+    const cur = typeof values.bodyTemplate === 'string' ? values.bodyTemplate : '';
+    change({ ...values, bodyTemplate: `${cur}{{${v}}}` });
+  };
+
   const change = (v: Record<string, unknown>) => {
     setValues(v);
-    setDirty(true);
     if (test.kind !== 'idle' && test.kind !== 'testing') setTest({ kind: 'idle' });
   };
 
@@ -242,15 +279,34 @@ export function ChannelDialog({
                 {nameError ? <p className="text-xs text-destructive">{nameError}</p> : null}
               </div>
 
+              {provider.presets.length > 0 ? (
+                <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3" data-slot="presets">
+                  <span className="text-xs font-medium text-muted-foreground">Start from a preset</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {provider.presets.map((p) => (
+                      <Button key={p.id} type="button" variant="outline" size="sm" onClick={() => applyPreset(p)}>
+                        {displayText(p.label)}
+                      </Button>
+                    ))}
+                  </div>
+                  {presetHelp ? <p className="text-xs text-muted-foreground">{displayText(presetHelp)}</p> : null}
+                </div>
+              ) : null}
+
               <FieldDefForm fields={provider.fields} values={values} onChange={change} errors={errors} secretsSet={secretsSet} hosted={hosted} disabled={busy} />
 
               {provider.templateVars.length > 0 ? (
                 <details className="group rounded-lg border px-3 py-2 text-sm" data-slot="template-vars">
                   <summary className="cursor-pointer text-xs font-medium text-muted-foreground select-none hover:text-foreground">Template variables</summary>
-                  <p className="mt-2 text-xs text-muted-foreground">Use these placeholders in custom bodies and headers:</p>
+                  <p className="mt-2 text-xs text-muted-foreground">Click to append a placeholder to the body template:</p>
                   <div className="mt-2 flex flex-wrap gap-1">
                     {provider.templateVars.map((v) => (
-                      <code key={v} className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">{`{{${v}}}`}</code>
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => insertVar(v)}
+                        className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] outline-none hover:bg-foreground/10 focus-visible:ring-2 focus-visible:ring-ring/50"
+                      >{`{{${v}}}`}</button>
                     ))}
                   </div>
                 </details>

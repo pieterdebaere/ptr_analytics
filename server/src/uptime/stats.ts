@@ -272,7 +272,15 @@ export function heartbeatSeries(
   const interval = chooseInterval(range.from, to, now, rawRetentionHours);
   if (interval === 'raw') return { interval, points: rawSeries(db, monitorId, range.from, to) };
   let buckets = interval === 'hour' ? hourBuckets(range.from, to, range.tz) : dayBuckets(range.from, to, range.tz);
-  if (buckets.length > MAX_POINTS) buckets = buckets.slice(buckets.length - MAX_POINTS);
+  if (buckets.length > MAX_POINTS) {
+    // Down-sample: merge k consecutive buckets.
+    const k = Math.ceil(buckets.length / MAX_POINTS);
+    const merged: Bucket[] = [];
+    for (let i = 0; i < buckets.length; i += k) {
+      merged.push({ start: (buckets[i] as Bucket).start, end: (buckets[Math.min(buckets.length, i + k) - 1] as Bucket).end });
+    }
+    buckets = merged;
+  }
   const totals = bucketTotals(db, monitorId, buckets, now);
   return { interval, points: buckets.map((b, i) => pointOf(b.start, totals[i] as Totals)) };
 }

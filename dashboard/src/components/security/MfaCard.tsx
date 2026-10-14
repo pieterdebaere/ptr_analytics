@@ -205,7 +205,7 @@ function EnableDialog({ account, onClose, onChanged }: { account: string; onClos
             </DialogFooter>
           </>
         ) : (
-          <form onSubmit={onSubmit} className="grid gap-4">
+          <form onSubmit={onSubmit} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
             <DialogHeader>
               <DialogTitle>Enable two-factor authentication</DialogTitle>
               <DialogDescription>Scan the QR code with your authenticator app, then enter the 6-digit code it shows.</DialogDescription>
@@ -220,7 +220,7 @@ function EnableDialog({ account, onClose, onChanged }: { account: string; onClos
                 <div className="flex min-w-0 flex-1 flex-col gap-3 text-sm">
                   <div className="flex flex-col gap-1.5">
                     <span className="text-xs font-medium text-muted-foreground">Can&apos;t scan? Enter this key manually:</span>
-                    <SecretValue value={groupSecret(setup.secret)} label="Secret key" />
+                    <SecretValue value={groupSecret(setup.secret)} label="Secret key" wrap />
                     <a href={setup.otpauthUrl} className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground">
                       Open in an authenticator app on this device
                     </a>

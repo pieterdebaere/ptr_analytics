@@ -51,7 +51,8 @@ export function NotificationsPage() {
   const setActive = async (c: NotificationChannel, active: boolean) => {
     setOverrides((o) => ({ ...o, [c.uid]: { ...o[c.uid], active } }));
     try {
-      await notifyApi.updateChannel(c.uid, { active });
+      const saved = await notifyApi.updateChannel(c.uid, { active });
+      setOverrides((o) => ({ ...o, [c.uid]: saved }));
     } catch (e) {
       setOverrides((o) => ({ ...o, [c.uid]: { ...o[c.uid], active: !active } }));
       setNotices((n) => ({ ...n, [c.uid]: { kind: 'error', text: errorMessage(e) } }));
@@ -65,6 +66,15 @@ export function NotificationsPage() {
       setNotices((n) => ({ ...n, [c.uid]: r.ok ? { kind: 'ok', text: 'Test notification sent.' } : { kind: 'error', text: r.error ?? 'Sending failed.' } }));
     } catch (e) {
       setNotices((n) => ({ ...n, [c.uid]: { kind: 'error', text: errorMessage(e) || 'Sending failed.' } }));
+    }
+  };
+
+  const resend = async (c: NotificationChannel) => {
+    try {
+      await notifyApi.updateChannel(c.uid, { resendVerification: true });
+      setNotices((n) => ({ ...n, [c.uid]: { kind: 'ok', text: 'Confirmation e-mail sent again to unconfirmed recipients.' } }));
+    } catch (e) {
+      setNotices((n) => ({ ...n, [c.uid]: { kind: 'error', text: errorMessage(e) } }));
     }
   };
 
@@ -123,6 +133,7 @@ export function NotificationsPage() {
                 onLog={() => setLogFor(c)}
                 onTest={() => void test(c)}
                 onDelete={() => setDeleting(c)}
+                onResend={() => void resend(c)}
                 onActive={(a) => void setActive(c, a)}
               />
             ))}
@@ -181,6 +192,7 @@ function ChannelRow({
   onLog,
   onTest,
   onDelete,
+  onResend,
   onActive,
 }: {
   channel: NotificationChannel;
@@ -190,6 +202,7 @@ function ChannelRow({
   onLog: () => void;
   onTest: () => void;
   onDelete: () => void;
+  onResend: () => void;
   onActive: (active: boolean) => void;
 }) {
   const category: ProviderCategory = provider?.category ?? (c.type === 'email' || c.type === 'smtp' ? 'email' : 'other');
@@ -264,6 +277,12 @@ function ChannelRow({
               <ScrollTextIcon aria-hidden="true" />
               Delivery log
             </DropdownMenuItem>
+            {unverified && c.recipients.length > 0 ? (
+              <DropdownMenuItem onClick={onResend}>
+                <MailWarningIcon aria-hidden="true" />
+                Resend confirmation
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onClick={onDelete}>
               <Trash2Icon aria-hidden="true" />

@@ -369,6 +369,11 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
   app.setErrorHandler(fieldErrorHandler);
   app.addHook('onRequest', rejectCrossSiteFetch);
   app.addHook('preHandler', requireAuth(ctx));
+  // Results recorded without a running engine (push / manual API paths) are written out on close.
+  app.addHook('onClose', async () => {
+    const p = uptimeRuntime(ctx).processor as { flush?: () => void } | null;
+    p?.flush?.();
+  });
 
   const engine = () => uptimeRuntime(ctx).engine;
   const changed = (id: number): void => {

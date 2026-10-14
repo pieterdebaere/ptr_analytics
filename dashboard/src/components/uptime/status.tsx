@@ -5,14 +5,14 @@ import { cn } from '@/lib/utils';
 import { STATUS_LABELS, STATUS_STYLES } from './lib';
 
 /** Coloured status dot; pulses for down monitors. */
-export function StatusDot({ status, className, pulse = true }: { status: DisplayStatus; className?: string; pulse?: boolean }) {
+export function StatusDot({ status, className, pulse = true, halo = true }: { status: DisplayStatus; className?: string; pulse?: boolean; halo?: boolean }) {
   const s = STATUS_STYLES[status];
   return (
     <span className={cn('relative inline-flex size-2.5 shrink-0', className)} aria-hidden="true" data-status={status}>
       {pulse && (status === 'down' || status === 'pending') ? (
         <span className={cn('live-ping absolute inline-flex size-full rounded-full opacity-60', s.bg)} />
       ) : null}
-      <span className={cn('relative inline-flex size-full rounded-full ring-4', s.bg, s.ring)} />
+      <span className={cn('relative inline-flex size-full rounded-full', halo && 'ring-[3px]', s.bg, s.ring)} />
     </span>
   );
 }

@@ -264,7 +264,7 @@ function MaintenanceRow({
                   to={`/monitors/${encodeURIComponent(mon.uid)}`}
                   className="inline-flex h-6 max-w-48 items-center gap-1.5 rounded-md border bg-background px-2 text-xs hover:bg-muted"
                 >
-                  <StatusDot status={mon.active ? (mon.state.status === 3 ? 'maintenance' : mon.state.status === 0 ? 'down' : 'up') : 'paused'} pulse={false} className="size-1.5" />
+                  <StatusDot status={mon.active ? (mon.state.status === 3 ? 'maintenance' : mon.state.status === 0 ? 'down' : 'up') : 'paused'} pulse={false} halo={false} className="size-1.5" />
                   <span className="bidi-isolate truncate">{displayText(mon.name)}</span>
                 </Link>
               ))}

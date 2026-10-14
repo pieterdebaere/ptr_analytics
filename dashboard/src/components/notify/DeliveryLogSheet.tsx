@@ -103,7 +103,7 @@ export function DeliveryLogSheet({ channel, onClose }: { channel: NotificationCh
                           <span className="flex items-start gap-1 text-destructive">
                             <CircleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
                             <span className="bidi-isolate min-w-0 text-sm break-words">
-                              {e.httpStatus ? `HTTP ${e.httpStatus}${e.error ? ' · ' : ''}` : ''}
+                              {e.httpStatus && !(e.error ?? '').startsWith(`HTTP ${e.httpStatus}`) ? `HTTP ${e.httpStatus}${e.error ? ' · ' : ''}` : ''}
                               {e.error ? displayText(e.error.slice(0, 300)) : e.httpStatus ? '' : 'Failed'}
                             </span>
                           </span>

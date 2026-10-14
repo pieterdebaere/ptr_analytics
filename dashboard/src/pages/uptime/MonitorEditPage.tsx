@@ -559,7 +559,7 @@ function MonitorEditor({
         </Alert>
       ) : null}
 
-      <div className="sticky bottom-0 z-20 -mx-4 flex flex-wrap items-center justify-end gap-2 border-t bg-background/85 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6">
+      <div className="sticky bottom-3 z-20 flex flex-wrap items-center justify-end gap-2 rounded-xl bg-background/90 p-2 shadow-lg ring-1 ring-foreground/10 backdrop-blur-md supports-backdrop-filter:bg-background/75">
         <Link to={cancelHref} className={cn(buttonVariants({ variant: 'ghost' }), 'mr-auto')}>
           Cancel
         </Link>

@@ -100,7 +100,15 @@ export class Engine implements EngineControl, EngineHandle {
     this.maintRepo = new MaintenanceRepo(ctx.db);
     this.maint = new MaintenanceIndex(this.maintRepo);
     this.processor = processorFor(ctx, opts.processor);
-    this.scheduler = new Scheduler(this.clock, (id, due) => this.onDue(id, due));
+    // The scheduler works in engine time (monotonic, wall aligned at start), not raw mono().
+    const clock = this.clock;
+    const engineClock: EngineClock = {
+      wall: () => clock.wall(),
+      mono: () => this.engineNow(),
+      setTimer: (fn, ms) => clock.setTimer(fn, ms),
+      clearTimer: (h) => clock.clearTimer(h),
+    };
+    this.scheduler = new Scheduler(engineClock, (id, due) => this.onDue(id, due));
     const cfg = ctx.config.uptime;
     this.limiter = new CheckLimiter(
       { global: cfg.checkConcurrency, perOwner: opts.perOwnerConcurrency ?? 4, perDestination: opts.perDestinationConcurrency ?? 2 },
@@ -193,15 +201,25 @@ export class Engine implements EngineControl, EngineHandle {
     if (this.stopped) return;
     this.guard(() => {
       this.maint.reload();
-      // Re-evaluate soon so the status reflects the change without waiting a full interval.
-      const now = this.engineNow();
-      for (const e of this.entries.values()) {
-        if (e.m.type === 'push') continue;
-        const due = this.scheduler.dueOf(e.m.id);
-        if (due === undefined || due > now + 2000) this.scheduler.schedule(e.m.id, now + 1000);
-      }
+      this.reevaluateMaintenance();
       this.maintenanceTick();
     });
+  }
+
+  /**
+   * Monitors whose maintenance state differs from their current status are re-evaluated within a
+   * second (instead of waiting a full interval), so windows start and end on time.
+   */
+  private reevaluateMaintenance(): void {
+    const wall = this.clock.wall();
+    const soon = this.engineNow() + 1000;
+    for (const e of this.entries.values()) {
+      if (e.m.type === 'push' || e.running) continue;
+      const inMaint = this.underMaintenance(e.m.id, wall);
+      if ((this.processor.peekStatus(e.m.id) === 3) === inMaint) continue;
+      const due = this.scheduler.dueOf(e.m.id);
+      if (due === undefined || due > soon) this.scheduler.schedule(e.m.id, soon);
+    }
   }
 
   checkNow(id: number): boolean {
@@ -217,7 +235,7 @@ export class Engine implements EngineControl, EngineHandle {
       const m = e?.m ?? this.repo.byId(id);
       if (!m) return;
       const wall = this.clock.wall();
-      const inMaint = e ? this.underMaintenance(id, wall) : false;
+      const inMaint = this.underMaintenance(id, wall);
       this.processor.record(m, { kind: 'check', ok: input.ok, msg: input.msg, latencyMs: input.latencyMs }, inMaint, {
         ts: wall,
         push: true,
@@ -247,18 +265,16 @@ export class Engine implements EngineControl, EngineHandle {
     } catch {
       target = null;
     }
+    const phase = phaseOf(m.uid, intervalMs);
+    const dest = destinationOf(host ?? target);
     const prev = this.entries.get(m.id);
-    const e: Entry = {
-      m,
-      phase: phaseOf(m.uid, intervalMs),
-      intervalMs,
-      lastDue: prev?.lastDue ?? this.engineNow(),
-      running: prev?.running ?? false,
-      sinceWall: prev?.sinceWall ?? this.clock.wall(),
-      target,
-      host,
-      dest: destinationOf(host ?? target),
-    };
+    if (prev) {
+      // Update in place: a check may be running for this entry (its `running` flag and the
+      // identity checks in reschedule() must stay valid).
+      Object.assign(prev, { m, phase, intervalMs, target, host, dest });
+      return prev;
+    }
+    const e: Entry = { m, phase, intervalMs, lastDue: this.engineNow(), running: false, sinceWall: this.clock.wall(), target, host, dest };
     this.entries.set(m.id, e);
     return e;
   }
@@ -281,15 +297,22 @@ export class Engine implements EngineControl, EngineHandle {
     return next > now ? next : now + spread;
   }
 
-  /** Engine time at which a missing push turns into a failure (grace of one interval after start / creation). */
+  /** Wall time after which a missing push is a failure (grace of one interval after start / creation). */
+  private noPushDeadline(e: Entry): number {
+    const rt = this.processor.runtime(e.m);
+    return Math.max(rt.lastPushAt ?? 0, this.startWall, e.sinceWall) + e.intervalMs + PUSH_BUFFER_MS;
+  }
+
+  /**
+   * Next evaluation of a push monitor (engine time): the no-push deadline, and while the engine
+   * itself records beats (failing / maintenance) every (retry) interval after the last beat, like Kuma.
+   */
   private pushDeadline(e: Entry): number {
     const rt = this.processor.runtime(e.m);
-    const base = Math.max(rt.lastPushAt ?? 0, this.startWall, e.sinceWall);
-    const failing = rt.status === 0 || rt.status === 2;
-    // While failing without pushes, re-check every (retry) interval like Kuma.
-    const lastBeat = rt.lastBeatTs ?? 0;
-    let wall = base + e.intervalMs + PUSH_BUFFER_MS;
-    if (failing && lastBeat > base) wall = lastBeat + (rt.status === 2 ? e.m.retryIntervalS * 1000 : e.intervalMs);
+    let wall = this.noPushDeadline(e);
+    if (rt.lastBeatTs !== null && (rt.status === 0 || rt.status === 2 || rt.status === 3)) {
+      wall = Math.max(wall, rt.lastBeatTs + (rt.status === 2 ? e.m.retryIntervalS * 1000 : e.intervalMs));
+    }
     return this.wallToEngine(wall);
   }
 
@@ -356,14 +379,8 @@ export class Engine implements EngineControl, EngineHandle {
   }
 
   private duePush(e: Entry, wall: number, inMaint: boolean): void {
-    const rt = this.processor.runtime(e.m);
-    const base = Math.max(rt.lastPushAt ?? 0, this.startWall, e.sinceWall);
-    const failing = rt.status === 0 || rt.status === 2;
-    if (!inMaint && !failing && wall < base + e.intervalMs + PUSH_BUFFER_MS) {
-      this.scheduler.schedule(e.m.id, this.pushDeadline(e));
-      return;
-    }
-    if (!inMaint && failing && (rt.lastPushAt ?? 0) > (rt.lastBeatTs ?? 0)) {
+    if (!inMaint && wall < this.noPushDeadline(e)) {
+      // A push arrived in time (it recorded its own beat): just move the deadline.
       this.scheduler.schedule(e.m.id, this.pushDeadline(e));
       return;
     }
@@ -594,6 +611,7 @@ export class Engine implements EngineControl, EngineHandle {
   /** maint_start / maint_end notifications (once per window, persisted across restarts). */
   maintenanceTick(): void {
     const wall = this.clock.wall();
+    this.reevaluateMaintenance();
     for (const m of this.maintRepo.list('all')) {
       const w = m.active ? currentWindow(m, wall) : null;
       const start = w ? w.start : null;

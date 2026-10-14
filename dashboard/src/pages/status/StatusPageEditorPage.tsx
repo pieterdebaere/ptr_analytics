@@ -173,7 +173,7 @@ export function StatusPageEditorPage() {
               <h1 className="bidi-isolate min-w-0 truncate text-2xl font-semibold tracking-tight">{displayText(page.title) || 'Untitled'}</h1>
               {page.published ? <Badge className="bg-good/12 text-good">Published</Badge> : <Badge variant="secondary">Draft</Badge>}
             </div>
-            <p className="mt-1 truncate font-mono text-sm text-muted-foreground">
+            <p className="mt-1 truncate text-sm text-muted-foreground">
               {origin}
               {publicPath}
             </p>
