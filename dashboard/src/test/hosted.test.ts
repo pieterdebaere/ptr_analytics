@@ -15,6 +15,7 @@ describe('public config', () => {
       currency: 'USD',
       termsUrl: 'javascript:alert(1)',
       privacyUrl: 'https://example.com/privacy',
+      statusPageOrigin: 'https://status.example.com/ignored-path',
     });
     expect(c).toEqual({
       signupEnabled: true,
@@ -24,7 +25,9 @@ describe('public config', () => {
       currency: 'usd',
       termsUrl: null,
       privacyUrl: 'https://example.com/privacy',
+      statusPageOrigin: 'https://status.example.com',
     });
+    expect(normalizePublicConfig({ statusPageOrigin: 'javascript:x' }).statusPageOrigin).toBeNull();
   });
 
   it('knows the public routes and role labels', () => {

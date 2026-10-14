@@ -1,11 +1,10 @@
 // /notifications — notification channels (docs/SPEC.md §8.3, ANALYSIS §4.1).
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowLeftIcon, BellIcon, CircleCheckIcon, EllipsisIcon, MailWarningIcon, PencilIcon, PlusIcon, ScrollTextIcon, SendIcon, Trash2Icon, TriangleAlertIcon } from 'lucide-react';
+import { BellIcon, CircleCheckIcon, EllipsisIcon, MailWarningIcon, PencilIcon, PlusIcon, ScrollTextIcon, SendIcon, Trash2Icon, TriangleAlertIcon } from 'lucide-react';
 import { errorMessage } from '@/api/client';
 import { deliveryEventLabel, notifyApi, type DeliveryLogEntry, type NotificationChannel, type NotificationProvider, type ProviderCategory } from '@/api/notify';
 import { FormMessage } from '@/components/AuthCard';
-import { EmptyState, ErrorState, PageHeader, SkeletonRows } from '@/components/common';
+import { BackLink, EmptyState, ErrorState, PageHeader, SkeletonRows } from '@/components/common';
 import { ChannelDialog } from '@/components/notify/ChannelDialog';
 import { DeliveryLogSheet } from '@/components/notify/DeliveryLogSheet';
 import { ProviderIcon } from '@/components/notify/ProviderIcon';
@@ -143,10 +142,7 @@ export function NotificationsPage() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <Link to="/uptime" className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:underline">
-          <ArrowLeftIcon className="size-4" aria-hidden="true" />
-          Uptime
-        </Link>
+        <BackLink to="/uptime">Uptime</BackLink>
         <PageHeader
           title="Notifications"
           description="Channels that alert you when a monitor goes down or comes back up, and before certificates or domains expire."

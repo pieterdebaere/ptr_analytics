@@ -111,7 +111,10 @@ export function ApiKeysCard({ mfaEnabled = false, reloadKey = 0 }: { mfaEnabled?
     <Card className="gap-0 pb-0">
       <CardHeader className="pb-4">
         <CardTitle>API keys</CardTitle>
-        <CardDescription>Bearer tokens for scripts and Prometheus. A key acts with your permissions, limited to its scopes.</CardDescription>
+        <CardDescription>
+          Bearer tokens for scripts and Prometheus. A key acts with your permissions, limited to its scopes. Changing your password or turning two-factor
+          authentication on or off revokes all keys.
+        </CardDescription>
         <CardAction>
           <Button type="button" variant="outline" onClick={() => setCreating(true)}>
             <PlusIcon aria-hidden="true" />

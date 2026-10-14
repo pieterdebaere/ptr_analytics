@@ -18,16 +18,17 @@ const LINK_REL = 'noopener noreferrer nofollow ugc';
 const SAME_ORIGIN_PATH_RE = /^\/(?![/\\])[A-Za-z0-9._~!$&'()*+,;=:@%/?#-]*$/;
 
 /**
- * Returns a normalised href for http(s)/mailto URLs and same-origin paths ("/status/acme/feed.xml"),
+ * Returns a normalised href for http(s)/mailto URLs and (with `allowPath`, for `[text](target)`
+ * links) same-origin paths ("/status/acme/feed.xml"),
  * or null for anything else (javascript:, data:, vbscript:, "relative/paths", protocol-relative
  * "//host", backslashes, control chars …).
  */
-export function safeMarkdownHref(raw: string): string | null {
+export function safeMarkdownHref(raw: string, allowPath = true): string | null {
   const v = raw.trim();
   if (!v || v.length > MAX_URL_LENGTH) return null;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000- \u007f-\u009f‪-‮⁦-⁩\\]/.test(v)) return null;
-  if (v.startsWith('/')) return SAME_ORIGIN_PATH_RE.test(v) ? v : null;
+  if (v.startsWith('/')) return allowPath && SAME_ORIGIN_PATH_RE.test(v) ? v : null;
   if (!/^(?:https?:\/\/|mailto:)/i.test(v)) return null;
   let url: URL;
   try {
@@ -231,7 +232,8 @@ export function parseInline(s: string, depth = 0, inLink = false): Inline[] {
     if (ch === '<' && !inLink) {
       const end = search('>', i + 1, () => s.indexOf('>', i + 1));
       if (end > i) {
-        const href = safeMarkdownHref(s.slice(i + 1, end));
+        // <…> autolinks: absolute URLs only (else "</b>" would turn into a link to "/b").
+        const href = safeMarkdownHref(s.slice(i + 1, end), false);
         if (href) {
           flush();
           out.push({ t: 'link', href, c: [{ t: 'text', v: s.slice(i + 1, end).replace(/^mailto:/i, '') }] });
@@ -243,7 +245,7 @@ export function parseInline(s: string, depth = 0, inLink = false): Inline[] {
     if ((ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') && !inLink && !isWordChar(s[i - 1])) {
       const m = AUTOLINK_RE.exec(rest);
       if (m) {
-        const href = safeMarkdownHref(m[0]);
+        const href = safeMarkdownHref(m[0], false);
         if (href) {
           flush();
           out.push({ t: 'link', href, c: [{ t: 'text', v: m[0].replace(/^mailto:/i, '') }] });

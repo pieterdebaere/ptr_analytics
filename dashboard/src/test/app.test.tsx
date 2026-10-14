@@ -166,6 +166,8 @@ describe('App smoke tests', () => {
   });
 
   it('does not blank the login page for a next= that normalises to //host', async () => {
+    // a browser that had a session: the login page checks it and redirects
+    localStorage.setItem('pa:had-session', '1');
     for (const next of ['/.//evil.example', '/%2e//evil.example', '/a/..//evil.example', '/sites/../..//evil.example']) {
       await renderAt(`/login?next=${encodeURIComponent(next)}`);
       expect(container.textContent, next).toContain('All sites');
@@ -173,6 +175,22 @@ describe('App smoke tests', () => {
       act(() => root.unmount());
       root = createRoot(container);
     }
+  });
+
+  it('does not probe the session on anonymous pages', async () => {
+    me = null;
+    localStorage.removeItem('pa:had-session');
+    const paths = () => fetchMock.mock.calls.map((c) => new URL(String(c[0]), 'http://localhost').pathname);
+    await renderAt('/login');
+    expect(container.textContent).toContain('Log in');
+    expect(paths()).not.toContain('/api/auth/me');
+    act(() => root.unmount());
+    root = createRoot(container);
+    fetchMock.mockClear();
+    await renderAt('/status/acme');
+    expect(paths()).not.toContain('/api/auth/me');
+    expect(paths()).not.toContain('/api/public-config');
+    expect(paths()).toContain('/api/public/status/acme');
   });
 
   it('keeps the shell when a page crashes', async () => {

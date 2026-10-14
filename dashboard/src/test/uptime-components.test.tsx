@@ -251,3 +251,51 @@ describe('MonitorList', () => {
     expect(container.textContent).not.toContain('Nightly job');
   });
 });
+
+describe('ui-audit fixes', () => {
+  it('builds a header-based push example (token out of the URL)', () => {
+    expect(pushExample('curl-header', 'https://a.test/api/push/tok123', 60)).toBe(
+      'curl -fsS -m 10 --retry 3 -H "X-Push-Token: tok123" "https://a.test/api/push?status=up&msg=OK&ping="',
+    );
+    expect(pushExample('curl-header', '<PUSH_URL>', 60)).toContain('X-Push-Token: <PUSH_TOKEN>');
+  });
+
+  it('uses recentBeats from the API and merges newer local beats', async () => {
+    const m = parseMonitor({ uid: 'a', siteId: 's', recentBeats: [{ t: 1, status: 1, latencyMs: 5 }, { t: 2, status: 'down', latencyMs: null }, { t: 'x' }] })!;
+    expect(m.recentBeats).toEqual([
+      { t: 1, status: 1, latencyMs: 5 },
+      { t: 2, status: 0, latencyMs: null },
+    ]);
+    expect(parseMonitor({ uid: 'b' })!.recentBeats).toBeNull();
+    const { mergeRecent } = await import('../components/uptime/live');
+    expect(mergeRecent(m.recentBeats!, [{ t: 2, status: 0 }, { t: 3, status: 1 }]).map((b) => b.t)).toEqual([1, 2, 3]);
+  });
+
+  it('uses one uptime colour scheme for text and bars', async () => {
+    const { uptimeTier, uptimeTone, dayClass } = await import('../components/uptime/lib');
+    expect(uptimeTone(0.9995)).toBe('text-good-text');
+    expect(uptimeTone(0.995)).toBe('text-good-text');
+    expect(uptimeTone(0.97)).toBe('text-warn-text');
+    expect(uptimeTone(0.5)).toBe('text-poor-text');
+    expect(uptimeTone(null)).toBe('text-muted-foreground');
+    expect(dayClass(0.995, false)).toBe(uptimeTier(0.995)!.bar);
+  });
+
+  it('normalises 24-hour times', async () => {
+    const { normalizeTime24 } = await import('../components/uptime/form-parts');
+    expect(normalizeTime24('2')).toBe('02:00');
+    expect(normalizeTime24('230')).toBe('02:30');
+    expect(normalizeTime24('0230')).toBe('02:30');
+    expect(normalizeTime24('2:30')).toBe('02:30');
+    expect(normalizeTime24('24:00')).toBe('24:00');
+    expect(normalizeTime24('abc')).toBe('abc');
+  });
+
+  it('maps maintenance save errors to fields or the form', async () => {
+    const { ApiError } = await import('../api/client');
+    const { mapMaintenanceError } = await import('../components/uptime/maintenance-schedule');
+    expect(mapMaintenanceError(new ApiError(400, 'Runs too often.', undefined, 'cron'))).toEqual({ errors: { cron: 'Runs too often.' }, form: null });
+    expect(mapMaintenanceError(new ApiError(409, 'At most 20 cron windows.')).form).toBe('At most 20 cron windows.');
+    expect(mapMaintenanceError(new ApiError(429, '')).form).toMatch(/try again/);
+  });
+});

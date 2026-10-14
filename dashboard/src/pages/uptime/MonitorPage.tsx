@@ -190,11 +190,11 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
   return (
     <div className="flex flex-col gap-6">
       {/* header */}
+      <BackLink to={`/sites/${encodeURIComponent(m.siteId)}/uptime`} label={site.data ? `${displayText(site.data.name)} uptime` : undefined} className="-mb-4">
+        {site.data ? `${displayText(site.data.name)} uptime` : 'Uptime'}
+      </BackLink>
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 flex-col gap-2.5">
-          <BackLink to={`/sites/${encodeURIComponent(m.siteId)}/uptime`} label={site.data ? `${displayText(site.data.name)} uptime` : undefined} className="-mb-1">
-            {site.data ? `${displayText(site.data.name)} uptime` : 'Uptime'}
-          </BackLink>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
             <h1 className="bidi-isolate min-w-0 truncate text-2xl font-semibold tracking-tight" title={displayText(m.name)}>
               {displayText(m.name)}

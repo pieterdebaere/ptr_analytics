@@ -129,28 +129,53 @@ describe('security page', () => {
     routes['GET /api/auth/mfa'] = () => [200, { enabled: false, recoveryCodesLeft: 0, required: false }];
     routes['GET /api/api-keys'] = () => [200, { apiKeys: [] }];
     routes['POST /api/auth/mfa/setup'] = () => [200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/PTR%20Analytics:admin%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=PTR%20Analytics' }];
-    routes['POST /api/auth/mfa/enable'] = () => [200, { recoveryCodes: ['aaaa-bbbb-cccc-dddd', 'eeee-ffff-gggg-hhhh'] }];
+    let enableCalls = 0;
+    routes['POST /api/auth/mfa/enable'] = () =>
+      ++enableCalls === 1 ? [400, { error: 'invalid code', code: 'invalid_code' }] : [200, { recoveryCodes: ['aaaa-bbbb-cccc-dddd', 'eeee-ffff-gggg-hhhh'], apiKeysRevoked: 2 }];
     await renderAt('/settings/security');
-    await until(() => !!button(/^Enable$/));
-    act(() => button(/^Enable$/)!.click());
+    await until(() => !!button(/^Turn on$/));
+    act(() => button(/^Turn on$/)!.click());
+    // step 1: the password (re-authentication)
+    await until(() => !!document.querySelector('[role=dialog] input[type="password"]'));
+    routes['POST /api/auth/mfa/setup'] = () => [400, { error: 'password is incorrect' }];
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[type="password"]')!, 'wrong');
+    await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
+    await until(() => (document.querySelector('[role=dialog]')?.textContent ?? '').includes('The password is incorrect.'));
+    routes['POST /api/auth/mfa/setup'] = () => [200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/PTR%20Analytics:admin%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=PTR%20Analytics' }];
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[type="password"]')!, 'hunter22');
+    await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
+    expect(body('/api/auth/mfa/setup')).toEqual({ password: 'hunter22' });
     await until(() => !!document.querySelector('svg[role=img][data-qr-version]'));
     const qr = document.querySelector('svg[role=img][data-qr-version]')!;
     expect(qr.querySelector('path')?.getAttribute('d')).toMatch(/^M\d/);
     expect(document.querySelector('img[src^="data:"]')).toBeNull();
     expect(document.body.textContent).toContain('JBSW Y3DP EHPK 3PXP');
+    // a wrong code: a sentence under the code field, not the raw server message
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[autocomplete="one-time-code"]')!, '111111');
+    await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
+    await until(() => (document.querySelector('[role=dialog]')?.textContent ?? '').includes('That code didn’t work'));
+    expect(document.querySelector('[role=dialog]')!.textContent).not.toContain('invalid code');
     setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[autocomplete="one-time-code"]')!, '654321');
     await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
     await until(() => !!document.querySelector('[data-slot="recovery-codes"]'));
     expect(document.querySelector('[data-slot="recovery-codes"]')!.textContent).toContain('eeee-ffff-gggg-hhhh');
-    expect(body('/api/auth/mfa/enable')).toEqual({ code: '654321' });
+    expect(body('/api/auth/mfa/enable')).toEqual({ password: 'hunter22', code: '654321' });
+    expect(document.querySelector('[data-slot="keys-revoked"]')?.textContent).toContain('2 API keys were revoked');
     expect(button(/^Done$/)?.disabled).toBe(true);
+    // the codes cannot be dismissed (Escape) before "I have stored these codes"
+    act(() => {
+      document.querySelector('[role=dialog]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    await tick();
+    expect(document.querySelector('[data-slot="recovery-codes"]')).not.toBeNull();
+    expect(document.querySelector('[role=dialog] [data-slot="dialog-close"]')).toBeNull();
   });
 
   it('lists API keys and creates one with a Prometheus example', async () => {
     me = ADMIN;
     routes['GET /api/auth/mfa'] = () => [200, { enabled: true, recoveryCodesLeft: 2, required: false }];
     routes['GET /api/api-keys'] = () => [200, { apiKeys: [{ uid: 'k1', name: 'Old <b>key</b>', prefix: 'abcd1234', scopes: ['read'], createdAt: 1, expiresAt: 2, lastUsedAt: null }] }];
-    routes['POST /api/api-keys'] = () => [201, { apiKey: { uid: 'k2', name: 'Prom', prefix: 'zzzz9999', scopes: ['metrics'], createdAt: 3, expiresAt: null, lastUsedAt: null }, key: 'pa_zzzz9999_supersecretvalue' }];
+    routes['POST /api/api-keys'] = () => [201, { apiKey: { uid: 'k2', name: 'Prom', prefix: 'zzzz9999', scopes: ['metrics', 'read'], createdAt: 3, expiresAt: null, lastUsedAt: null }, key: 'pa_zzzz9999_supersecretvalue' }];
     await renderAt('/settings/security');
     await until(() => (container.textContent ?? '').includes('Old <b>key</b>'));
     expect(container.querySelector('b')).toBeNull();
@@ -159,10 +184,41 @@ describe('security page', () => {
     act(() => button(/New key/)!.click());
     await until(() => !!document.querySelector('[role=dialog] input'));
     setInput(document.querySelector<HTMLInputElement>('[role=dialog] input')!, 'Prom');
+    // admins are offered the metrics:all scope
+    expect(document.querySelector('[role=dialog]')!.textContent).toContain('Metrics (all accounts)');
+    // 2FA is on: password and a code are required
+    await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
+    expect(document.querySelector('[role=dialog]')!.textContent).toContain('Enter your password.');
+    expect(calls.some((c) => c.path === '/api/api-keys' && c.init?.method === 'POST')).toBe(false);
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[type="password"]')!, 'hunter22');
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[autocomplete="one-time-code"]')!, '123 456');
     await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
     await until(() => (document.body.textContent ?? '').includes('pa_zzzz9999_supersecretvalue'));
-    expect(body('/api/api-keys')).toEqual({ name: 'Prom', scopes: ['metrics'], expiresInDays: 365 });
+    expect(body('/api/api-keys')).toEqual({ name: 'Prom', scopes: ['metrics'], expiresInDays: 365, password: 'hunter22', code: '123456' });
     expect(document.body.textContent).toContain('scrape_configs:');
+    expect(document.querySelector('[data-slot="key-warning"]')?.textContent).toContain(
+      'Anyone with this key can scrape your uptime metrics and read your sites, statistics and monitors on your behalf.',
+    );
+  });
+});
+
+describe('security page without 2FA', () => {
+  it('asks for a code when the server says 2FA is on (mfa_code_required)', async () => {
+    me = { ...ADMIN, role: 'member' };
+    routes['GET /api/auth/mfa'] = () => [200, { enabled: false, recoveryCodesLeft: 0, required: false }];
+    routes['GET /api/api-keys'] = () => [200, { apiKeys: [] }];
+    routes['POST /api/api-keys'] = () => [400, { error: 'code is required', code: 'mfa_code_required' }];
+    await renderAt('/settings/security');
+    await until(() => !!button(/New key/));
+    act(() => button(/New key/)!.click());
+    await until(() => !!document.querySelector('[role=dialog] input'));
+    expect(document.querySelector('[role=dialog]')!.textContent).not.toContain('Metrics (all accounts)');
+    expect(document.querySelector('[role=dialog] input[autocomplete="one-time-code"]')).toBeNull();
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input')!, 'Script');
+    setInput(document.querySelector<HTMLInputElement>('[role=dialog] input[type="password"]')!, 'hunter22');
+    await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
+    await until(() => !!document.querySelector('[role=dialog] input[autocomplete="one-time-code"]'));
+    expect(document.querySelector('[role=dialog]')!.textContent).toContain('enter a code from your authenticator app');
   });
 });
 

@@ -41,7 +41,11 @@ export function StatCard({
         <span className="truncate">{label}</span>
       </div>
       <div className={cn('truncate text-2xl font-semibold tracking-tight tabular-nums', tone)}>{value}</div>
-      {sub ? <div className="min-h-4 truncate text-xs text-muted-foreground">{sub}</div> : null}
+      {sub ? (
+        <div className="min-h-4 truncate text-xs text-muted-foreground" title={typeof sub === 'string' ? sub : undefined}>
+          {sub}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,10 +1,11 @@
 import { useId } from 'react';
-import { SafeMarkdown } from '@/components/markdown/SafeMarkdown';
+import { SafeMarkdown, droppedLinkTargets } from '@/components/markdown/SafeMarkdown';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 
-export const MARKDOWN_HELP = '**bold**, *italic*, `code`, lists, ### headings and [links](https://…)';
+export const MARKDOWN_HELP = '**bold**, *italic*, `code`, lists, ### headings and [links](https://…) or [links](/status/…)';
 
 /** Markdown textarea with a live preview rendered by SafeMarkdown (side by side on wide screens). */
 export function MarkdownField({
@@ -28,6 +29,7 @@ export function MarkdownField({
 }) {
   const id = useId();
   const hintId = useId();
+  const dropped = droppedLinkTargets(value);
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-baseline justify-between gap-2">
@@ -58,6 +60,12 @@ export function MarkdownField({
       <p id={hintId} className={cn('text-xs', error ? 'text-destructive' : 'text-muted-foreground')}>
         {error ?? hint ?? `Markdown: ${MARKDOWN_HELP}. No HTML or images.`}
       </p>
+      {dropped.length > 0 ? (
+        <p className="text-xs text-warn-text" role="status" data-slot="dropped-links">
+          Shown as plain text, not as a link: <span className="bidi-isolate font-mono break-all">{dropped.map((t) => displayText(t.slice(0, 80))).join(', ')}</span>. Links must start
+          with https://, http://, mailto: or a single /.
+        </p>
+      ) : null}
     </div>
   );
 }

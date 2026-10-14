@@ -171,7 +171,7 @@ describe('FieldDefForm', () => {
     expect(last().headers).toEqual([{ key: '', value: '' }]);
     act(() => type(container.querySelector<HTMLInputElement>('[aria-label="Name 1"]')!, 'Authorization'));
     expect(last().headers).toEqual([{ key: 'Authorization', value: '' }]);
-    const preset = [...container.querySelectorAll('button')].find((b) => b.textContent === '+300-399')!;
+    const preset = container.querySelector<HTMLButtonElement>('[aria-label="Add 300-399"]')!;
     act(() => preset.click());
     expect(last().accepted).toEqual(['200-299', '300-399']);
     act(() => container.querySelector<HTMLButtonElement>('[aria-label="Remove 200-299"]')!.click());

@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
+import { overallLabel, sectionSummary } from '../pages/status/PublicStatusPage';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -87,6 +88,23 @@ async function renderAt(path: string) {
   await act(async () => new Promise((r) => setTimeout(r, 0)));
 }
 
+describe('public status page helpers', () => {
+  const sec = (...st: string[]) => ({ monitors: st.map((status) => ({ status })) }) as unknown as Parameters<typeof sectionSummary>[0];
+  it('summarises a section by its worst state with counts', () => {
+    expect(sectionSummary(sec('up', 'up', 'maintenance', 'up')).label).toBe('1 of 4 in maintenance');
+    expect(sectionSummary(sec('maintenance', 'maintenance')).label).toBe('Maintenance');
+    expect(sectionSummary(sec('up', 'down', 'maintenance')).label).toBe('1 of 3 with outage');
+    expect(sectionSummary(sec('down')).label).toBe('Outage');
+    expect(sectionSummary(sec('up', 'up'))).toEqual({ label: 'Operational', tone: 'text-good-text' });
+  });
+  it('does not call the whole page under maintenance when others are up', () => {
+    const data = (overall: string, ...st: string[]) => ({ overall, sections: [sec(...st)] }) as unknown as Parameters<typeof overallLabel>[0];
+    expect(overallLabel(data('maintenance', 'up', 'maintenance'))).toMatch(/^Partial maintenance/);
+    expect(overallLabel(data('maintenance', 'maintenance'))).toBe('Under maintenance');
+    expect(overallLabel(data('up', 'up'))).toBe('All systems operational');
+  });
+});
+
 describe('public status page', () => {
   it('renders the page without app chrome and escapes untrusted content', async () => {
     await renderAt('/status/acme');
@@ -118,7 +136,10 @@ describe('public status page', () => {
     expect(container.querySelector('[data-monitor="m2"]')?.textContent).toContain('Outage');
     expect(container.textContent).toContain('Checkout errors');
     expect(container.textContent).toContain('DB upgrade');
-    expect(container.textContent).toContain('Scheduled');
+    // upcoming windows: a compact list after the services, not a callout above them
+    const upcoming = container.querySelector('[data-slot="upcoming-maintenance"]');
+    expect(upcoming?.textContent).toContain('DB upgrade');
+    expect(container.textContent).toContain('Scheduled maintenance');
     expect(container.textContent).toContain('Old outage');
     expect(container.querySelectorAll('[data-style="warning"] li')).toHaveLength(2);
     expect(container.textContent).toContain('99.91% uptime');

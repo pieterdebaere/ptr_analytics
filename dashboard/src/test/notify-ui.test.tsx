@@ -80,6 +80,7 @@ function setValue(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
+const menuItem = (name: RegExp) => Array.from(document.querySelectorAll<HTMLElement>('[role=menuitem]')).find((b) => name.test(b.textContent ?? ''));
 const button = (name: RegExp) => Array.from(document.querySelectorAll('button')).find((b) => name.test(b.textContent ?? ''));
 const posted = (path: string) => JSON.parse(String(calls.filter((c) => c.path === path && c.init?.method === 'POST').at(-1)?.init?.body ?? 'null')) as Record<string, unknown> | null;
 
@@ -95,6 +96,30 @@ async function open() {
 }
 
 describe('notifications page', () => {
+  it('flags a channel whose latest delivery failed and reports how many opt-in mails were resent', async () => {
+    const third = { uid: 'c3aaaaaaaaaa', type: 'webhook', name: 'Retrying hook', config: {}, secretsSet: [], isDefault: false, active: true, verified: true, consecutiveFailures: 0, monitorCount: 1 };
+    routes['GET /api/notification-channels'] = () => [200, { channels: [...CHANNELS, third] }];
+    routes['GET /api/notification-channels/c3aaaaaaaaaa/log'] = () => [200, { entries: [{ ts: Date.now() - 60_000, event: 'down', ok: false, httpStatus: 502, error: 'HTTP 502 (retry 1/3 in 30s)', monitorUid: null }] }];
+    let resent = 0;
+    routes['PATCH /api/notification-channels/c2aaaaaaaaaa'] = () => [200, { channel: CHANNELS[1], verificationSent: resent }];
+    await open();
+    await until(() => (container.querySelector('[data-channel="c3aaaaaaaaaa"]')?.textContent ?? '').includes('Last delivery failed'));
+    const badge = container.querySelector('[data-channel="c3aaaaaaaaaa"] [data-slot="failing"]')!;
+    expect(badge.getAttribute('title')).toContain('HTTP 502');
+    // resend: 0 mails -> say why nothing was sent
+    const mail = container.querySelector('[data-channel="c2aaaaaaaaaa"]')!;
+    act(() => (mail.querySelector('[aria-label^="Actions for"]') as HTMLButtonElement).click());
+    await until(() => !!menuItem(/Resend confirmation/));
+    await act(async () => menuItem(/Resend confirmation/)!.click());
+    await until(() => (mail.textContent ?? '').includes('No e-mail sent'));
+    expect(JSON.parse(String(calls.filter((c) => c.path === '/api/notification-channels/c2aaaaaaaaaa').at(-1)?.init?.body))).toEqual({ resendVerification: true });
+    resent = 1;
+    act(() => (mail.querySelector('[aria-label^="Actions for"]') as HTMLButtonElement).click());
+    await until(() => !!menuItem(/Resend confirmation/));
+    await act(async () => menuItem(/Resend confirmation/)!.click());
+    await until(() => (mail.textContent ?? '').includes('sent again to 1 recipient.'));
+  });
+
   it('lists channels with safe names and status badges', async () => {
     await open();
     const row = container.querySelector('[data-channel="c1aaaaaaaaaa"]')!;

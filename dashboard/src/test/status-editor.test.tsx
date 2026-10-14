@@ -114,13 +114,20 @@ describe('status pages list', () => {
     expect(container.textContent).toContain('/status/acme');
     act(() => button(/New status page/)!.click());
     await until(() => !!document.querySelector('[role=dialog] input'));
-    const title = document.querySelector<HTMLInputElement>('[role=dialog] input[placeholder="Acme status"]');
-    const slug = document.querySelector<HTMLInputElement>('[role=dialog] input[placeholder="acme"]');
+    const title = document.querySelector<HTMLInputElement>('[role=dialog] input[placeholder="e.g. Acme status"]');
+    const slug = document.querySelector<HTMLInputElement>('[role=dialog] input[placeholder="e.g. acme-status"]');
     setValue(title!, 'Acme Ünited Status!');
     expect(slug!.value).toBe('acme-united-status');
     expect(document.querySelector('[data-slot="slug-hint"]')?.textContent).toBe('https://analytics.example.com/status/acme-united-status');
     setValue(slug!, 'admin');
     expect(document.querySelector('[data-slot="slug-hint"]')?.textContent).toMatch(/reserved/);
+    // inline validation instead of a silently disabled button
+    setValue(title!, '');
+    setValue(slug!, 'acme');
+    await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
+    expect(document.querySelector('[role=dialog]')?.textContent).toContain('Enter a title');
+    expect(sent('POST', `/api/sites/${SITE.id}/status-pages`)).toBeNull();
+    setValue(title!, 'Acme Ünited Status!');
     setValue(slug!, 'acme');
     await act(async () => document.querySelector<HTMLFormElement>('[role=dialog] form')!.requestSubmit());
     await until(() => (document.querySelector('[data-slot="slug-hint"]')?.textContent ?? '').includes('already taken'));
@@ -129,6 +136,39 @@ describe('status pages list', () => {
 });
 
 describe('status page editor', () => {
+  it('publishes a draft from the header and uses the public URL from the server', async () => {
+    const draft = { ...PAGE, published: false, publicUrl: 'https://status.example.net/status/acme', domains: [{ ...PAGE.domains[0], expiresAt: Date.now() + 3 * 86_400_000 - 1000 }] };
+    routes[`GET /api/status-pages/${PAGE.uid}`] = () => [200, { statusPage: draft }];
+    routes[`PATCH /api/status-pages/${PAGE.uid}`] = (init) => [200, { statusPage: { ...draft, ...JSON.parse(String(init?.body)) } }];
+    await renderAt(`/status-pages/${PAGE.uid}`);
+    await until(() => !!button(/^Publish$/));
+    expect(container.textContent).toContain('https://status.example.net/status/acme');
+    expect(container.querySelector('[data-slot="draft-note"]')).not.toBeNull();
+    await act(async () => button(/^Publish$/)!.click());
+    await until(() => !!sent('PATCH', `/api/status-pages/${PAGE.uid}`));
+    expect(sent('PATCH', `/api/status-pages/${PAGE.uid}`)!.published).toBe(true);
+    await until(() => !!Array.from(container.querySelectorAll('a')).find((a) => a.getAttribute('href') === 'https://status.example.net/status/acme'));
+  });
+
+  it('shows when an unverified domain claim expires', async () => {
+    routes[`GET /api/status-pages/${PAGE.uid}`] = () => [200, { statusPage: { ...PAGE, domains: [{ ...PAGE.domains[0], expiresAt: Date.now() + 3 * 86_400_000 - 1000 }] } }];
+    await renderAt(`/status-pages/${PAGE.uid}?tab=domains`);
+    await until(() => !!container.querySelector('[data-slot="domain-expiry"]'));
+    expect(container.querySelector('[data-slot="domain-expiry"]')!.textContent).toBe('Expires in 3 days');
+  });
+
+  it('offers "Show URL" only for monitors with a URL', async () => {
+    routes[`GET /api/sites/${SITE.id}/monitors`] = () => [200, { monitors: [monitor('mon000000001', 'Website'), { ...monitor('mon000000002', 'Beat'), type: 'push', target: null }] }];
+    routes[`GET /api/status-pages/${PAGE.uid}`] = () => [
+      200,
+      { statusPage: { ...PAGE, sections: [{ name: 'Core', monitors: [{ uid: 'mon000000001', displayName: null, showUrl: false }, { uid: 'mon000000002', displayName: null, showUrl: false }] }] } },
+    ];
+    await renderAt(`/status-pages/${PAGE.uid}?tab=monitors`);
+    await until(() => !!container.querySelector('[data-monitor="mon000000002"]'));
+    expect(container.querySelector('[data-monitor="mon000000001"]')!.textContent).toContain('Show URL');
+    expect(container.querySelector('[data-monitor="mon000000002"]')!.textContent).not.toContain('Show URL');
+  });
+
   it('edits sections and saves the draft with one PATCH', async () => {
     routes[`PATCH /api/status-pages/${PAGE.uid}`] = (init) => [200, { statusPage: { ...PAGE, ...JSON.parse(String(init?.body)) } }];
     await renderAt(`/status-pages/${PAGE.uid}?tab=monitors`);

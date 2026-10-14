@@ -267,7 +267,7 @@ function VitalsOverview({ data, metric, onSelect }: { data: VitalsSummaryRespons
                     {formatNumber(s?.count ?? 0)}
                   </span>
                 </span>
-                <span className="truncate text-xs text-muted-foreground">{METRIC_INFO[m].name}</span>
+                <span className="truncate text-xs text-muted-foreground" title={METRIC_INFO[m].name}>{METRIC_INFO[m].name}</span>
               </span>
               <span className="mt-auto flex flex-col gap-2">
                 <span className={cn('text-2xl font-semibold tracking-tight tabular-nums', rating && RATING_TEXT[rating])}>

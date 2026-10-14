@@ -1,8 +1,6 @@
 import { useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowLeftIcon } from 'lucide-react';
 import type { MfaStatus } from '@/api/security';
-import { PageHeader } from '@/components/common';
+import { BackLink, PageHeader } from '@/components/common';
 import { ApiKeysCard } from '@/components/security/ApiKeysCard';
 import { MfaCard } from '@/components/security/MfaCard';
 
@@ -22,13 +20,7 @@ export function SecurityPage() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <Link
-          to="/settings"
-          className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:underline"
-        >
-          <ArrowLeftIcon className="size-4" aria-hidden="true" />
-          Account
-        </Link>
+        <BackLink to="/settings">Account</BackLink>
         <PageHeader title="Security" description="Two-factor authentication and API keys for your account." />
       </div>
       <MfaCard onStatus={onStatus} />

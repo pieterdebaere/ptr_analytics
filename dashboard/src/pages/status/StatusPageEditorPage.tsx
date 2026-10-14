@@ -2,13 +2,13 @@
 // General + Monitors form one draft saved with a single PATCH; logo, domains and incidents
 // are saved immediately.
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeftIcon, EyeIcon, ExternalLinkIcon, SaveIcon, SendIcon } from 'lucide-react';
+import { useParams, useSearchParams } from 'react-router-dom';
+import { EyeIcon, ExternalLinkIcon, SaveIcon, SendIcon } from 'lucide-react';
 import { ApiError, api, errorMessage } from '@/api/client';
 import { statusApi, statusOrigin, type StatusPage } from '@/api/status';
 import { uptimeApi } from '@/api/uptime';
 import { FormMessage } from '@/components/AuthCard';
-import { ErrorState, SkeletonRows } from '@/components/common';
+import { BackLink, ErrorState, SkeletonRows } from '@/components/common';
 import { publicOrigin } from '@/components/status/CreateStatusPageDialog';
 import { BadgesTab } from '@/components/status/editor/BadgesTab';
 import { DomainsTab } from '@/components/status/editor/DomainsTab';
@@ -142,7 +142,7 @@ export function StatusPageEditorPage() {
   if (loaded.error && !page) {
     return (
       <div className="flex flex-col gap-4">
-        <BackLink />
+        <BackLink to="/status-pages">Status pages</BackLink>
         <div className="rounded-xl ring-1 ring-foreground/10">
           <ErrorState message={loaded.error} onRetry={loaded.reload} />
         </div>
@@ -152,7 +152,7 @@ export function StatusPageEditorPage() {
   if (!page || !draft) {
     return (
       <div className="flex flex-col gap-4">
-        <BackLink />
+        <BackLink to="/status-pages">Status pages</BackLink>
         <SkeletonRows rows={6} />
       </div>
     );
@@ -169,7 +169,7 @@ export function StatusPageEditorPage() {
   return (
     <div className="flex flex-col gap-6 pb-20">
       <div className="flex flex-col gap-3">
-        <BackLink />
+        <BackLink to="/status-pages">Status pages</BackLink>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -327,14 +327,6 @@ function TabScroller({ active, children }: { active: string; children: ReactNode
   );
 }
 
-function BackLink() {
-  return (
-    <Link to="/status-pages" className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:underline">
-      <ArrowLeftIcon className="size-4" aria-hidden="true" />
-      Status pages
-    </Link>
-  );
-}
 
 /** The saved page as visitors see it (works for unpublished pages too). */
 function PreviewSheet({ page, onClose, dirty }: { page: StatusPage; onClose: () => void; dirty: boolean }) {

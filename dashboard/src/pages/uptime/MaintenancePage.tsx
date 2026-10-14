@@ -512,9 +512,9 @@ function MaintenanceDialog({
             {draft.strategy === 'weekly' ? (
               <div className="flex flex-col gap-2">
                 <span className="text-sm font-medium">Weekdays</span>
-                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Weekdays">
+                <div className="grid grid-cols-7 gap-1.5 sm:flex sm:flex-wrap" role="group" aria-label="Weekdays">
                   {[1, 2, 3, 4, 5, 6, 0].map((d) => (
-                    <ToggleChip key={d} pressed={draft.weekdays.includes(d)} onClick={() => set({ weekdays: draft.weekdays.includes(d) ? draft.weekdays.filter((x) => x !== d) : [...draft.weekdays, d] })} className="w-12">
+                    <ToggleChip key={d} pressed={draft.weekdays.includes(d)} onClick={() => set({ weekdays: draft.weekdays.includes(d) ? draft.weekdays.filter((x) => x !== d) : [...draft.weekdays, d] })} className="min-w-0 px-0 sm:w-12">
                       {WEEKDAY_SHORT[d]}
                     </ToggleChip>
                   ))}
@@ -681,7 +681,7 @@ function MaintenanceDialog({
           </div>
 
           <DialogFooter className="mt-auto sm:items-center sm:justify-between">
-            <p className={cn('min-h-5 text-sm text-destructive', !formError && Object.keys(errors).length === 0 && 'max-sm:hidden')} role="alert">
+            <p className={cn('min-h-5 text-sm text-destructive max-sm:order-last', !formError && Object.keys(errors).length === 0 && 'max-sm:hidden')} role="alert">
               {formError ?? (Object.keys(errors).length > 0 ? 'Please fix the highlighted fields.' : '')}
             </p>
             <div className="flex flex-col-reverse gap-2 sm:flex-row">

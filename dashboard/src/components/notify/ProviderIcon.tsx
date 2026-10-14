@@ -29,9 +29,9 @@ const CATEGORY_ICON: Record<ProviderCategory, Icon> = {
 const CATEGORY_TINT: Record<ProviderCategory, string> = {
   chat: 'bg-chart-3/12 text-chart-3',
   push: 'bg-chart-4/15 text-chart-4',
-  incident: 'bg-poor/10 text-poor',
-  email: 'bg-chart-1/10 text-chart-1',
-  sms: 'bg-good/10 text-good',
+  incident: 'bg-poor/10 text-poor-text',
+  email: 'bg-maint/10 text-maint-text',
+  sms: 'bg-good/10 text-good-text',
   webhook: 'bg-chart-2/12 text-chart-2',
   other: 'bg-muted text-muted-foreground',
 };

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { SafeMarkdown, parseBlocks, safeMarkdownHref } from '../components/markdown/SafeMarkdown';
+import { SafeMarkdown, droppedLinkTargets, parseBlocks, safeMarkdownHref } from '../components/markdown/SafeMarkdown';
 
 const html = (src: string, maxLength?: number) => renderToStaticMarkup(<SafeMarkdown source={src} maxLength={maxLength} />);
 
@@ -20,7 +20,11 @@ describe('safeMarkdownHref', () => {
     'vbscript:msgbox(1)',
     'data:text/html,<script>alert(1)</script>',
     '//evil.example/x',
-    '/relative/path',
+    'relative/path',
+    '/\\evil.example',
+    '///evil.example',
+    '/a b',
+    '/<script>',
     'file:///etc/passwd',
     'https://user:pass@evil.example/',
     'http://',
@@ -36,6 +40,14 @@ describe('safeMarkdownHref', () => {
     expect(safeMarkdownHref('https://example.com/a?b=c#d')).toBe('https://example.com/a?b=c#d');
     expect(safeMarkdownHref('HTTP://Example.COM')).toBe('http://example.com/');
     expect(safeMarkdownHref('mailto:ops@example.com')).toBe('mailto:ops@example.com');
+  });
+
+  it('accepts same-origin paths in [text](…) links only', () => {
+    expect(safeMarkdownHref('/status/acme/feed.xml')).toBe('/status/acme/feed.xml');
+    expect(safeMarkdownHref('/status/acme/feed.xml', false)).toBeNull();
+    const a = dom('[RSS](/status/acme/feed.xml) and </b> and <//evil.example>').querySelectorAll('a');
+    expect(Array.from(a).map((x) => x.getAttribute('href'))).toEqual(['/status/acme/feed.xml']);
+    expect(droppedLinkTargets('[a](/ok) [b](example.com) [c](ftp://x.io/f) [d](https://x.io)')).toEqual(['example.com', 'ftp://x.io/f']);
   });
 });
 
