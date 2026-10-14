@@ -8,6 +8,11 @@ export interface MailContent {
   subject: string;
   text: string;
   html: string;
+  /**
+   * Extra header lines (e.g. `List-Unsubscribe`). Names must be plain header tokens and values
+   * single-line; CR/LF are stripped again by the transport.
+   */
+  headers?: Record<string, string>;
 }
 
 export interface OutgoingMail extends MailContent {
@@ -50,6 +55,7 @@ export function smtpTransport(
         subject: mail.subject,
         text: mail.text,
         html: mail.html,
+        ...(mail.headers ? { headers: safeHeaders(mail.headers) } : {}),
         // Our content never references files or URLs to embed.
         disableFileAccess: true,
         disableUrlAccess: true,
@@ -59,6 +65,19 @@ export function smtpTransport(
       transporter.close();
     },
   };
+}
+
+const HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+
+/** Only well-formed header names, values without CR/LF/control characters. */
+export function safeHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!HEADER_NAME_RE.test(k) || typeof v !== 'string') continue;
+    // eslint-disable-next-line no-control-regex
+    out[k] = v.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 2000);
+  }
+  return out;
 }
 
 interface MailLog {
@@ -195,12 +214,12 @@ export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-interface Action {
+export interface MailAction {
   label: string;
   url: string;
 }
 
-function layout(title: string, paragraphs: string[], action: Action | undefined, footer: string[]): string {
+function layout(title: string, paragraphs: string[], action: MailAction | undefined, footer: string[]): string {
   const p = (text: string, style = 'margin:0 0 16px') => `<p style="${style}">${escapeHtml(text)}</p>`;
   const button = action
     ? `<p style="margin:24px 0"><a href="${escapeHtml(action.url)}" style="background:#111827;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block">${escapeHtml(action.label)}</a></p>` +
@@ -220,7 +239,12 @@ function layout(title: string, paragraphs: string[], action: Action | undefined,
   );
 }
 
-function render(template: string, subject: string, paragraphs: string[], action?: Action, footer: string[] = []): MailContent {
+/** Render a mail in the standard layout (also used by the uptime notifications). */
+export function renderMail(template: string, subject: string, paragraphs: string[], action?: MailAction, footer: string[] = []): MailContent {
+  return render(template, subject, paragraphs, action, footer);
+}
+
+function render(template: string, subject: string, paragraphs: string[], action?: MailAction, footer: string[] = []): MailContent {
   const text = [...paragraphs, ...(action ? [`${action.label}:\n${action.url}`] : []), ...footer, `-- ${APP}`].join('\n\n');
   return { template, subject, text: `${text}\n`, html: layout(subject, paragraphs, action, footer) };
 }

@@ -1,4 +1,14 @@
-// STUB created by the coordinator — owner: notifications/status/security UI. Replace the implementation, keep the export name.
+import { PageHeader } from '@/components/common';
+import { ApiKeysCard } from '@/components/security/ApiKeysCard';
+import { MfaCard } from '@/components/security/MfaCard';
+
+/** /settings/security — two-factor authentication and API keys. */
 export function SecurityPage() {
-  return <div className="text-sm text-muted-foreground">Security</div>;
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader title="Security" description="Two-factor authentication and API keys for your account." />
+      <MfaCard />
+      <ApiKeysCard />
+    </div>
+  );
 }

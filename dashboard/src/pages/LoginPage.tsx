@@ -1,7 +1,9 @@
 import { useId, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
-import { MailWarningIcon } from 'lucide-react';
-import { ApiError, api } from '@/api/client';
+import { ArrowLeftIcon, MailWarningIcon, ShieldCheckIcon } from 'lucide-react';
+import { ApiError } from '@/api/client';
+import { isRecoveryCode, isTotpCode, normalizeRecoveryCode, normalizeTotp, securityApi } from '@/api/security';
+import type { User } from '@/api/types';
 import { AuthCard, FormMessage, PasswordField } from '@/components/AuthCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -20,18 +22,42 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
   const emailId = useId();
 
   if (user) return <Navigate to={next} replace />;
+
+  const done = (u: User) => {
+    setUser(u);
+    navigate(next, { replace: true });
+  };
+
+  if (mfaToken) {
+    return (
+      <MfaStep
+        mfaToken={mfaToken}
+        onDone={done}
+        onCancel={(message) => {
+          setMfaToken(null);
+          setPassword('');
+          setError(message);
+        }}
+      />
+    );
+  }
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const u = await api.login(email.trim(), password);
-      setUser(u);
-      navigate(next, { replace: true });
+      const r = await securityApi.login(email.trim(), password);
+      if (r.kind === 'mfa') {
+        setMfaToken(r.mfaToken);
+        setBusy(false);
+        return;
+      }
+      done(r.user);
     } catch (err) {
       // Unverified accounts get the same 401 as a wrong password (no account enumeration).
       if (err instanceof ApiError && err.status === 401) setError('Invalid email or password.');
@@ -99,6 +125,135 @@ export function LoginPage() {
         ) : null}
         <Button type="submit" className="w-full" disabled={busy}>
           {busy ? 'Logging in…' : 'Log in'}
+        </Button>
+      </form>
+    </AuthCard>
+  );
+}
+
+/** Second login step for accounts with two-factor authentication. */
+function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDone: (u: User) => void; onCancel: (message: string | null) => void }) {
+  const [mode, setMode] = useState<'totp' | 'recovery'>('totp');
+  const [code, setCode] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const codeId = useId();
+  const hintId = useId();
+
+  const onSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    const valid = mode === 'totp' ? isTotpCode(code) : isRecoveryCode(code);
+    if (!valid) {
+      setError(mode === 'totp' ? 'Enter the 6-digit code from your authenticator app.' : 'Enter one of your recovery codes.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const u = await securityApi.loginMfa(
+        mfaToken,
+        mode === 'totp' ? { code: normalizeTotp(code) } : { recoveryCode: normalizeRecoveryCode(code) },
+      );
+      onDone(u);
+    } catch (err) {
+      setBusy(false);
+      setCode('');
+      if (err instanceof ApiError && err.status === 429) setError('Too many attempts. Please wait a few minutes and try again.');
+      else if (err instanceof ApiError && (err.code === 'mfa_expired' || err.status === 410 || err.status === 403))
+        onCancel('Your login attempt expired. Please log in again.');
+      else if (err instanceof ApiError && (err.status === 401 || err.status === 400))
+        setError(mode === 'totp' ? 'Invalid code. Check your authenticator app and try again.' : 'Invalid or already used recovery code.');
+      else setError(err instanceof ApiError ? err.message : 'Login failed.');
+    }
+  };
+
+  const switchMode = () => {
+    setMode((m) => (m === 'totp' ? 'recovery' : 'totp'));
+    setCode('');
+    setError(null);
+  };
+
+  return (
+    <AuthCard
+      icon={<ShieldCheckIcon aria-hidden="true" />}
+      title="Two-factor authentication"
+      description={
+        mode === 'totp'
+          ? 'Enter the 6-digit code from your authenticator app.'
+          : 'Enter one of the recovery codes you saved when you turned on two-factor authentication. Each code works once.'
+      }
+      footer={
+        <button type="button" className={linkCls} onClick={() => onCancel(null)}>
+          <span className="inline-flex items-center gap-1">
+            <ArrowLeftIcon className="size-3.5" aria-hidden="true" />
+            Back to log in
+          </span>
+        </button>
+      }
+    >
+      <form className="flex flex-col gap-4" onSubmit={onSubmit} noValidate>
+        <div className="flex flex-col gap-2">
+          <Label htmlFor={codeId}>{mode === 'totp' ? 'Authentication code' : 'Recovery code'}</Label>
+          {mode === 'totp' ? (
+            <Input
+              key="totp"
+              id={codeId}
+              name="totp"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9 ]*"
+              maxLength={7}
+              placeholder="123 456"
+              className="h-10 text-center font-mono text-lg tracking-[0.3em] md:text-lg"
+              value={code}
+              aria-invalid={error ? true : undefined}
+              aria-describedby={hintId}
+              onChange={(e) => {
+                const v = e.target.value.replace(/[^\d ]/g, '');
+                setCode(v);
+                if (error) setError(null);
+              }}
+              autoFocus
+            />
+          ) : (
+            <Input
+              key="recovery"
+              id={codeId}
+              name="recovery-code"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              maxLength={64}
+              placeholder="xxxx-xxxx-xxxx"
+              className="h-10 font-mono"
+              value={code}
+              aria-invalid={error ? true : undefined}
+              aria-describedby={hintId}
+              onChange={(e) => {
+                setCode(e.target.value);
+                if (error) setError(null);
+              }}
+              autoFocus
+            />
+          )}
+          <p id={hintId} className="text-xs text-muted-foreground">
+            {mode === 'totp' ? (
+              <>
+                Lost your device?{' '}
+                <button type="button" className={linkCls} onClick={switchMode}>
+                  Use a recovery code
+                </button>
+              </>
+            ) : (
+              <button type="button" className={linkCls} onClick={switchMode}>
+                Use your authenticator app instead
+              </button>
+            )}
+          </p>
+        </div>
+        {error ? <FormMessage>{error}</FormMessage> : null}
+        <Button type="submit" className="w-full" disabled={busy}>
+          {busy ? 'Verifying…' : 'Verify'}
         </Button>
       </form>
     </AuthCard>

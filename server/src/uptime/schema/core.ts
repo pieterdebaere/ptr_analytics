@@ -21,9 +21,12 @@ CREATE TABLE monitors (
   domain_notify    INTEGER NOT NULL DEFAULT 0 CHECK (domain_notify IN (0, 1)),
   config           TEXT NOT NULL,                           -- validated JSON per type, never secrets
   secrets          BLOB,                                    -- AES-256-GCM envelope (uptime/secrets.ts)
+  secret_keys      TEXT,                                    -- JSON array of the secret field names set (API: secretsSet)
   push_token_hash  TEXT UNIQUE,                             -- sha256 hex of the push token (push monitors)
   public_id        TEXT UNIQUE,                             -- random id for badges; NULL = badges off
   position         INTEGER NOT NULL DEFAULT 0,
+  manual_status    INTEGER,                                 -- manual monitors: 0 down, 1 up, 2 pending; NULL = not set
+  manual_msg       TEXT,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
   deleted_at       INTEGER
@@ -140,7 +143,7 @@ CREATE TABLE domain_expiry (
 CREATE TABLE tags (
   id       INTEGER PRIMARY KEY,
   uid      TEXT NOT NULL UNIQUE,
-  owner_id INTEGER REFERENCES users(id),                    -- NULL = operator tag
+  owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL = operator tag (few rows: cascade is cheap)
   name     TEXT NOT NULL,
   color    TEXT NOT NULL CHECK (color GLOB '#[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
   UNIQUE (owner_id, name)
@@ -156,7 +159,7 @@ CREATE INDEX monitor_tags_tag ON monitor_tags(tag_id);
 CREATE TABLE maintenances (
   id            INTEGER PRIMARY KEY,
   uid           TEXT NOT NULL UNIQUE,
-  owner_id      INTEGER REFERENCES users(id),               -- NULL = operator
+  owner_id      INTEGER REFERENCES users(id) ON DELETE CASCADE, -- NULL = operator
   title         TEXT NOT NULL,
   description   TEXT,
   active        INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
@@ -171,9 +174,12 @@ CREATE TABLE maintenances (
   interval_days INTEGER,
   cron          TEXT,
   duration_s    INTEGER,
+  notified_start INTEGER,                                   -- window start for which maint_start was sent (engine)
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
+CREATE INDEX maintenances_owner ON maintenances(owner_id);
+CREATE INDEX tags_owner ON tags(owner_id);
 CREATE TABLE maintenance_monitors (
   maintenance_id INTEGER NOT NULL REFERENCES maintenances(id) ON DELETE CASCADE,
   monitor_id     INTEGER NOT NULL,

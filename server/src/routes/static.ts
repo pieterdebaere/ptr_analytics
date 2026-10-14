@@ -1,3 +1,4 @@
+import { statusPageForHost } from '../uptime/status/domains.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -66,7 +67,12 @@ export async function staticRoutes(app: FastifyInstance, opts: { ctx: AppContext
     return reply.code(200).type('text/html; charset=utf-8').header('Cache-Control', 'no-cache').send(html);
   };
 
-  app.get('/', async (_request, reply) => sendIndex(reply));
+  app.get('/', async (request, reply) => {
+    // A verified custom status-page domain shows its status page at the root (spec §8.4).
+    const slug = ctx.config.uptime.enabled ? statusPageForHost(ctx, request.host) : null;
+    if (slug) return reply.redirect(`/status/${encodeURIComponent(slug)}`);
+    return sendIndex(reply);
+  });
 
   if (hasDashboard) {
     const assetsDir = path.join(root, 'assets') + path.sep;

@@ -1,4 +1,295 @@
-// STUB created by the coordinator — owner: notifications/status/security UI. Replace the implementation, keep the export name.
+// /notifications — notification channels (docs/SPEC.md §8.3, ANALYSIS §4.1).
+import { useMemo, useState } from 'react';
+import { BellIcon, CircleCheckIcon, EllipsisIcon, MailWarningIcon, PencilIcon, PlusIcon, ScrollTextIcon, SendIcon, Trash2Icon, TriangleAlertIcon } from 'lucide-react';
+import { errorMessage } from '@/api/client';
+import { notifyApi, type NotificationChannel, type NotificationProvider, type ProviderCategory } from '@/api/notify';
+import { FormMessage } from '@/components/AuthCard';
+import { EmptyState, ErrorState, PageHeader, SkeletonRows } from '@/components/common';
+import { ChannelDialog } from '@/components/notify/ChannelDialog';
+import { DeliveryLogSheet } from '@/components/notify/DeliveryLogSheet';
+import { ProviderIcon } from '@/components/notify/ProviderIcon';
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Switch } from '@/components/ui/switch';
+import { useAuth } from '@/hooks/auth';
+import { useApi } from '@/hooks/useApi';
+import { displayText } from '@/lib/safety';
+import { cn } from '@/lib/utils';
+
+/** Consecutive failed deliveries from which a channel is flagged. */
+export const FAILURE_WARNING_THRESHOLD = 3;
+
+type RowNotice = { kind: 'ok' | 'error'; text: string };
+
 export function NotificationsPage() {
-  return <div className="text-sm text-muted-foreground">Notifications</div>;
+  const { user, publicConfig } = useAuth();
+  const hosted = publicConfig.signupEnabled && user?.role === 'member';
+  const providers = useApi((signal) => notifyApi.providers(signal), []);
+  const channels = useApi((signal) => notifyApi.listChannels(signal), []);
+  const [editing, setEditing] = useState<NotificationChannel | 'new' | null>(null);
+  const [logFor, setLogFor] = useState<NotificationChannel | null>(null);
+  const [deleting, setDeleting] = useState<NotificationChannel | null>(null);
+  const [overrides, setOverrides] = useState<Record<string, Partial<NotificationChannel>>>({});
+  const [notices, setNotices] = useState<Record<string, RowNotice | 'testing'>>({});
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const providerMap = useMemo(() => new Map((providers.data ?? []).map((p) => [p.id, p])), [providers.data]);
+  const list = (channels.data ?? []).map((c) => ({ ...c, ...overrides[c.uid] }));
+
+  const setActive = async (c: NotificationChannel, active: boolean) => {
+    setOverrides((o) => ({ ...o, [c.uid]: { ...o[c.uid], active } }));
+    try {
+      await notifyApi.updateChannel(c.uid, { active });
+    } catch (e) {
+      setOverrides((o) => ({ ...o, [c.uid]: { ...o[c.uid], active: !active } }));
+      setNotices((n) => ({ ...n, [c.uid]: { kind: 'error', text: errorMessage(e) } }));
+    }
+  };
+
+  const test = async (c: NotificationChannel) => {
+    setNotices((n) => ({ ...n, [c.uid]: 'testing' }));
+    try {
+      const r = await notifyApi.testChannel(c.uid);
+      setNotices((n) => ({ ...n, [c.uid]: r.ok ? { kind: 'ok', text: 'Test notification sent.' } : { kind: 'error', text: r.error ?? 'Sending failed.' } }));
+    } catch (e) {
+      setNotices((n) => ({ ...n, [c.uid]: { kind: 'error', text: errorMessage(e) || 'Sending failed.' } }));
+    }
+  };
+
+  const remove = async (c: NotificationChannel) => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await notifyApi.deleteChannel(c.uid);
+      setDeleting(null);
+      channels.reload();
+    } catch (e) {
+      setActionError(errorMessage(e));
+      setDeleting(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const canAdd = !!providers.data && providers.data.length > 0;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="Notifications"
+        description="Channels that alert you when a monitor goes down or comes back up, and before certificates or domains expire."
+        actions={
+          <Button type="button" onClick={() => setEditing('new')} disabled={!canAdd}>
+            <PlusIcon aria-hidden="true" />
+            Add channel
+          </Button>
+        }
+      />
+
+      <Card className="gap-0 py-0">
+        {channels.error ? (
+          <ErrorState message={channels.error} onRetry={channels.reload} />
+        ) : channels.loading && !channels.data ? (
+          <SkeletonRows rows={3} className="p-4" />
+        ) : list.length === 0 ? (
+          <EmptyState title="No notification channels yet" icon={<BellIcon />} className="py-14">
+            <p>Add e-mail, Slack, Discord, Telegram, webhooks and more. Then pick the channels per monitor.</p>
+            <Button type="button" className="mt-4" onClick={() => setEditing('new')} disabled={!canAdd}>
+              <PlusIcon aria-hidden="true" />
+              Add channel
+            </Button>
+          </EmptyState>
+        ) : (
+          <ul className="divide-y" aria-label="Notification channels">
+            {list.map((c) => (
+              <ChannelRow
+                key={c.uid}
+                channel={c}
+                provider={providerMap.get(c.type)}
+                notice={notices[c.uid]}
+                onEdit={() => setEditing(c)}
+                onLog={() => setLogFor(c)}
+                onTest={() => void test(c)}
+                onDelete={() => setDeleting(c)}
+                onActive={(a) => void setActive(c, a)}
+              />
+            ))}
+          </ul>
+        )}
+      </Card>
+      {actionError ? <FormMessage>{actionError}</FormMessage> : null}
+      {providers.error ? <FormMessage>Could not load the provider list: {providers.error}</FormMessage> : null}
+
+      {editing && providers.data ? (
+        <ChannelDialog
+          providers={providers.data}
+          channel={editing === 'new' ? null : editing}
+          hosted={hosted}
+          onClose={() => setEditing(null)}
+          onSaved={(saved) => {
+            setEditing(null);
+            setOverrides((o) => {
+              const { [saved.uid]: _drop, ...rest } = o;
+              return rest;
+            });
+            channels.reload();
+          }}
+        />
+      ) : null}
+      {logFor ? <DeliveryLogSheet channel={logFor} onClose={() => setLogFor(null)} /> : null}
+
+      <AlertDialog open={deleting !== null} onOpenChange={(o) => (o ? undefined : setDeleting(null))}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete channel</AlertDialogTitle>
+            <AlertDialogDescription>
+              Delete <strong className="bidi-isolate break-all text-foreground">{deleting ? displayText(deleting.name) : ''}</strong>?
+              {deleting && deleting.monitorCount > 0
+                ? ` ${deleting.monitorCount} ${deleting.monitorCount === 1 ? 'monitor stops' : 'monitors stop'} sending alerts to it.`
+                : ''}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button type="button" variant="destructive" disabled={busy || !deleting} onClick={() => deleting && void remove(deleting)}>
+              Delete channel
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+function ChannelRow({
+  channel: c,
+  provider,
+  notice,
+  onEdit,
+  onLog,
+  onTest,
+  onDelete,
+  onActive,
+}: {
+  channel: NotificationChannel;
+  provider: NotificationProvider | undefined;
+  notice: RowNotice | 'testing' | undefined;
+  onEdit: () => void;
+  onLog: () => void;
+  onTest: () => void;
+  onDelete: () => void;
+  onActive: (active: boolean) => void;
+}) {
+  const category: ProviderCategory = provider?.category ?? (c.type === 'email' || c.type === 'smtp' ? 'email' : 'other');
+  const failing = c.consecutiveFailures >= FAILURE_WARNING_THRESHOLD;
+  const unverified = !c.verified;
+  const confirmed = c.recipients.filter((r) => r.verified && !r.unsubscribed).length;
+  return (
+    <li className={cn('flex flex-col gap-2 px-4 py-3.5 sm:px-5', !c.active && 'bg-muted/30')} data-channel={c.uid}>
+      <div className="flex items-center gap-3">
+        <ProviderIcon id={c.type} category={category} className={cn(!c.active && 'opacity-50')} />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <button type="button" onClick={onEdit} className="bidi-isolate min-w-0 truncate text-left font-medium outline-none hover:underline hover:underline-offset-4 focus-visible:underline">
+              {displayText(c.name) || 'Unnamed channel'}
+            </button>
+            {c.isDefault ? <Badge variant="secondary">Default</Badge> : null}
+            {unverified ? (
+              <Badge
+                className="bg-warn/15 text-warn"
+                title="Recipients must confirm their address with the link we e-mailed them. Unconfirmed addresses receive no alerts."
+                data-slot="unverified"
+              >
+                <MailWarningIcon aria-hidden="true" />
+                {c.recipients.length > 1 ? `${confirmed} of ${c.recipients.length} confirmed` : 'Awaiting confirmation'}
+              </Badge>
+            ) : null}
+            {c.autoDisabled ? (
+              <Badge className="bg-poor/12 text-poor" title="Switched off after repeated failed deliveries. Fix the settings, send a test and turn it back on." data-slot="failing">
+                <TriangleAlertIcon aria-hidden="true" />
+                Disabled after {c.consecutiveFailures} failures
+              </Badge>
+            ) : failing ? (
+              <Badge className="bg-poor/12 text-poor" title={`The last ${c.consecutiveFailures} deliveries failed.`} data-slot="failing">
+                <TriangleAlertIcon aria-hidden="true" />
+                {c.consecutiveFailures} failed in a row
+              </Badge>
+            ) : null}
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+            <span>{provider ? displayText(provider.label) : displayText(c.type)}</span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {c.monitorCount === 0 ? 'No monitors' : `${c.monitorCount} ${c.monitorCount === 1 ? 'monitor' : 'monitors'}`}
+            </span>
+            {!c.active ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>Paused</span>
+              </>
+            ) : null}
+          </div>
+        </div>
+        <Switch checked={c.active} onCheckedChange={onActive} aria-label={`${c.active ? 'Pause' : 'Activate'} ${c.name}`} />
+        <Button type="button" variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onLog}>
+          <ScrollTextIcon aria-hidden="true" />
+          Log
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`Actions for ${c.name}`} />}>
+            <EllipsisIcon aria-hidden="true" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem onClick={onEdit}>
+              <PencilIcon aria-hidden="true" />
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onTest} disabled={notice === 'testing'}>
+              <SendIcon aria-hidden="true" />
+              Send test
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onLog}>
+              <ScrollTextIcon aria-hidden="true" />
+              Delivery log
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              <Trash2Icon aria-hidden="true" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {notice ? (
+        <p
+          className={cn(
+            'ml-11 flex items-start gap-1.5 text-xs',
+            notice === 'testing' ? 'text-muted-foreground' : notice.kind === 'ok' ? 'text-good' : 'text-destructive',
+          )}
+          role={notice !== 'testing' && notice.kind === 'error' ? 'alert' : 'status'}
+        >
+          {notice === 'testing' ? (
+            'Sending test notification…'
+          ) : (
+            <>
+              {notice.kind === 'ok' ? <CircleCheckIcon className="mt-px size-3.5 shrink-0" aria-hidden="true" /> : <TriangleAlertIcon className="mt-px size-3.5 shrink-0" aria-hidden="true" />}
+              <span className="bidi-isolate min-w-0 break-words">{displayText(notice.text)}</span>
+            </>
+          )}
+        </p>
+      ) : null}
+    </li>
+  );
 }

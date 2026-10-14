@@ -56,7 +56,15 @@ export function registerSecurityHeaders(app: FastifyInstance, config: Config): v
  * the router decodes and normalises paths (`/%61pi/users` routes to `/api/users`), so a check
  * on the raw string could be bypassed. Everything else is checked (default deny).
  */
-const CSRF_EXEMPT_ROUTES = new Set(['/api/event', '/api/billing/webhook']);
+const CSRF_EXEMPT_ROUTES = new Set([
+  '/api/event',
+  '/api/billing/webhook',
+  // RFC 8058 one-click unsubscribe: mail providers POST without our header; authorised by the
+  // 256-bit token in the URL, the only effect is unsubscribing that one recipient.
+  '/api/notification-channels/unsubscribe',
+  // Uptime push monitors (spec 8.4): public, cookie-less, authorised by the token in the URL.
+  '/api/push/:token',
+]);
 
 export function registerCsrfCheck(app: FastifyInstance, config: Config): void {
   app.addHook('onRequest', async (request, reply) => {

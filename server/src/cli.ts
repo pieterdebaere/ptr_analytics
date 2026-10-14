@@ -6,6 +6,8 @@ import { openDatabase } from './db/index.js';
 import { ROLES, UserRepo, type Role } from './data/users.js';
 import { generatePassword } from './lib/ids.js';
 import { hashPassword } from './lib/password.js';
+import { deleteMfa } from './auth/mfa.js';
+import { MONITORS_USAGE, MonitorsCliError, runMonitorsCli } from './uptime/data/cli.js';
 
 const USAGE = `PTR Analytics admin CLI
 
@@ -15,6 +17,8 @@ Usage:
   cli reset-password <email>               generate and print a new password (signs out all sessions)
   cli list-users                           list users
   cli delete-user <email>                  delete a user (the last admin cannot be deleted)
+  cli mfa-reset <email>                    remove two-factor authentication (TOTP + recovery codes) and sign out
+${MONITORS_USAGE}
 
 The database location is taken from DATA_DIR (default ./data).`;
 
@@ -86,6 +90,28 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         users.delete(found.user.id, Date.now());
         out(`Deleted ${printable(found.user.email)}`);
         out('Its sites are hidden now; the server purges their data in the background (at the latest on its next start).');
+        return;
+      }
+      case 'mfa-reset': {
+        needEmail();
+        const found = users.byEmailWithHash(email);
+        if (!found) throw new CliError(`No user with email ${printable(email)}.`);
+        const had = deleteMfa(db, found.user.id);
+        sessions.deleteForUser(found.user.id);
+        out(
+          had
+            ? `Two-factor authentication removed for ${printable(found.user.email)}; all sessions signed out. The user can enrol again after signing in.`
+            : `${printable(found.user.email)} had no two-factor authentication; all sessions signed out.`,
+        );
+        return;
+      }
+      case 'monitors': {
+        try {
+          runMonitorsCli(db, args, out, printable);
+        } catch (err) {
+          if (err instanceof MonitorsCliError) throw new CliError(err.message);
+          throw err;
+        }
         return;
       }
       default:

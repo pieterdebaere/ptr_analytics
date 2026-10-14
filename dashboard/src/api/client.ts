@@ -35,11 +35,14 @@ export class ApiError extends Error {
   readonly status: number;
   /** machine readable error code from the body (e.g. "upgrade_required"), if any */
   readonly code: string | undefined;
-  constructor(status: number, message: string, code?: string) {
+  /** offending input field from a validation error body (`{error, field}`), if any */
+  readonly field: string | undefined;
+  constructor(status: number, message: string, code?: string, field?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.field = field;
   }
 }
 
@@ -109,6 +112,7 @@ export async function request<T>(method: Method, path: string, opts: RequestOpti
   if (!res.ok) {
     let message = friendlyStatus(res.status);
     let code: string | undefined;
+    let field: string | undefined;
     try {
       const data: unknown = await res.json();
       if (data && typeof data === 'object') {
@@ -117,11 +121,13 @@ export async function request<T>(method: Method, path: string, opts: RequestOpti
         if (typeof e === 'string' && e.length > 0 && e.length <= 200) message = e;
         const c = (data as { code?: unknown }).code;
         if (typeof c === 'string' && /^[a-z_]{1,64}$/.test(c)) code = c;
+        const f = (data as { field?: unknown }).field;
+        if (typeof f === 'string' && /^[A-Za-z0-9_.[\]-]{1,100}$/.test(f)) field = f;
       }
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, message, code);
+    throw new ApiError(res.status, message, code, field);
   }
 
   if (res.status === 204) return undefined as T;

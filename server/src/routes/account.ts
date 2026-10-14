@@ -3,6 +3,7 @@ import { PASSWORD_MAX, PASSWORD_MIN, isValidEmail, mailboxKey } from '../config.
 import type { AppContext } from '../context.js';
 import { requireMember } from '../auth/access.js';
 import { requireAuth } from '../auth/guard.js';
+import { isMfaEnabled, issueMfaChallenge } from '../auth/mfa.js';
 import { schedulePurge } from '../jobs/purge.js';
 import { field, objectBody } from '../lib/body.js';
 import { clientIp, rateLimitKey, rateLimitKey48 } from '../lib/client-ip.js';
@@ -150,6 +151,8 @@ export async function accountRoutes(app: FastifyInstance, opts: { ctx: AppContex
       return ctx.users.byId(user.id);
     })();
     if (!verified) throw invalidLink();
+    // Every session-creating path goes through the MFA gate (spec §8.3).
+    if (isMfaEnabled(ctx.db, verified.id)) return { mfaRequired: true, mfaToken: issueMfaChallenge(ctx, verified.id, hash) };
     ctx.limits.loginEmailIp.reset(`${mailbox}\n${key}`);
     const session = ctx.authSessions.create(verified.id, now);
     setSessionCookie(ctx, reply, session.token);

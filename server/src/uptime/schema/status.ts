@@ -4,7 +4,7 @@ export const STATUS_SCHEMA = `
 CREATE TABLE status_pages (
   id                INTEGER PRIMARY KEY,
   uid               TEXT NOT NULL UNIQUE,
-  site_id           TEXT NOT NULL REFERENCES sites(id),
+  site_id           TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE, -- small table: the site purge may cascade
   slug              TEXT NOT NULL UNIQUE,
   title             TEXT NOT NULL,
   description       TEXT,                                   -- Markdown subset
@@ -18,7 +18,8 @@ CREATE TABLE status_pages (
   show_cert_expiry  INTEGER NOT NULL DEFAULT 0 CHECK (show_cert_expiry IN (0, 1)),
   show_powered_by   INTEGER NOT NULL DEFAULT 1 CHECK (show_powered_by IN (0, 1)),
   refresh_s         INTEGER NOT NULL DEFAULT 60,
-  analytics_site_id TEXT REFERENCES sites(id),              -- track the page with our own tracker
+  tz                TEXT NOT NULL DEFAULT 'UTC',            -- IANA zone of the daily bars
+  analytics_site_id TEXT REFERENCES sites(id) ON DELETE SET NULL, -- track the page with our own tracker
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
   deleted_at        INTEGER
@@ -105,4 +106,6 @@ CREATE TABLE api_keys (
   revoked_at   INTEGER
 );
 CREATE INDEX api_keys_user ON api_keys(user_id);
+CREATE INDEX status_pages_analytics_site ON status_pages(analytics_site_id) WHERE analytics_site_id IS NOT NULL;
+CREATE INDEX status_page_domains_page ON status_page_domains(status_page_id);
 `;

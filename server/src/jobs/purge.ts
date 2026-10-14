@@ -1,5 +1,6 @@
 import type { AppContext } from '../context.js';
 import { drainChunks } from './chunks.js';
+import { purgeSiteUptime } from '../uptime/data/purge.js';
 
 /** One purge per context at a time; a request during a run schedules one more run. */
 const state = new WeakMap<AppContext, { running: Promise<number>; again: boolean }>();
@@ -59,6 +60,8 @@ async function purgeOnce(ctx: AppContext): Promise<number> {
     await drainChunks(db, (limit) => delEvents.run(id, limit).changes);
     await drainChunks(db, (limit) => delVitals.run(id, limit).changes);
     await drainChunks(db, (limit) => delSessions.run(id, limit).changes);
+    // Uptime monitors reference the site without a cascade (their history is large): purge them first.
+    await purgeSiteUptime(ctx, id);
     if (!db.open) return removed;
     // Nothing is left to cascade into; ingest never writes to a deleted site meanwhile.
     if (ctx.sites.removeDeleted(id)) removed++;

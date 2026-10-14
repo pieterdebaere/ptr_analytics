@@ -1,6 +1,7 @@
 import type { AppContext } from '../context.js';
 import { drainChunks } from './chunks.js';
 import { purgeDeletedSites } from './purge.js';
+import { runUptimeCleanup } from '../uptime/data/purge.js';
 
 export { CLEANUP_CHUNK } from './chunks.js';
 
@@ -96,6 +97,9 @@ async function cleanup(c: AppContext, result: CleanupResult): Promise<CleanupRes
 
   // Sites deleted while the server was down (or by the CLI), or an interrupted purge.
   result.deletedSites = await purgeDeletedSites(c);
+
+  // Uptime: raw heartbeats / stats / events retention and deleted monitors (spec 8.2).
+  await runUptimeCleanup(c);
 
   c.limits.ingest?.sweep();
   c.limits.loginIp.sweep();

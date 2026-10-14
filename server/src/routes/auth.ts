@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { PASSWORD_MAX, PASSWORD_MIN, mailboxKey } from '../config.js';
 import type { AppContext } from '../context.js';
 import { sessionToken } from '../auth/cookie.js';
-import { currentUser, requireAuth } from '../auth/guard.js';
+import { currentUser, mfaSetupRequired, requireAuth } from '../auth/guard.js';
+import { answerMfaChallenge, challengeUser, dropChallenges, isMfaEnabled, issueMfaChallenge, mfaLimits, mfaStatus } from '../auth/mfa.js';
 import { resendVerification } from '../auth/verification.js';
 import { SESSION_TTL_MS, sessionCookieName } from '../auth/sessions.js';
 import { field, objectBody } from '../lib/body.js';
@@ -70,10 +71,49 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
       resendVerification(ctx, found.user);
       throw new HttpError(401, 'invalid email or password');
     }
+    // Two-factor accounts: no session yet, only a short-lived single-use challenge token
+    // (spec §8.3). The login counters are reset once the second factor succeeded.
+    if (isMfaEnabled(ctx.db, found.user.id)) {
+      return { mfaRequired: true, mfaToken: issueMfaChallenge(ctx, found.user.id, found.passwordHash) };
+    }
     ctx.limits.loginEmailIp.reset(`${email}\n${ipKey}`);
     const { token } = ctx.authSessions.create(found.user.id, ctx.now());
     setSessionCookie(ctx, reply, token);
     return { user: found.user };
+  });
+
+  /**
+   * Second login step: `{mfaToken, code | recoveryCode}` → session. Limited per client IP,
+   * per account and per token (5 attempts); the token is single use and dies with a password
+   * change. Everything after the body checks is synchronous (no interleaving requests).
+   */
+  app.post('/api/auth/login/mfa', async (request, reply) => {
+    const body = objectBody(request.body);
+    const mfaToken = field(body, 'mfaToken');
+    const code = field(body, 'code');
+    const recoveryCode = field(body, 'recoveryCode');
+    if (typeof mfaToken !== 'string' || (typeof code !== 'string' && typeof recoveryCode !== 'string')) {
+      throw badRequest('mfaToken and code (or recoveryCode) are required');
+    }
+    const limits = mfaLimits(ctx);
+    const ipKey = rateLimitKey(clientIp(request));
+    if (!limits.ip.hit(ipKey)) throw new HttpError(429, 'too many attempts, try again later');
+    const owner = challengeUser(ctx, mfaToken);
+    if (owner !== null && !limits.user.hit(String(owner))) throw new HttpError(429, 'too many attempts, try again later');
+    const res = answerMfaChallenge(ctx, mfaToken, { code, recoveryCode }, (id) => ctx.users.passwordHash(id));
+    if (!res.ok) {
+      if (res.reason === 'invalid_token') throw new HttpError(401, 'this sign-in has expired, please sign in again', 'mfa_expired');
+      throw new HttpError(401, 'invalid code', 'invalid_code');
+    }
+    const user = ctx.users.byId(res.userId);
+    if (!user || (user.role === 'member' && !user.emailVerified)) throw new HttpError(401, 'this sign-in has expired, please sign in again', 'mfa_expired');
+    limits.user.reset(String(user.id));
+    ctx.limits.loginEmailIp.reset(`${mailboxKey(user.email)}\n${ipKey}`);
+    const { token } = ctx.authSessions.create(user.id, ctx.now());
+    setSessionCookie(ctx, reply, token);
+    return res.usedRecoveryCode
+      ? { user, recoveryCodesLeft: mfaStatus(ctx.db, user.id).recoveryCodesLeft }
+      : { user };
   });
 
   app.post('/api/auth/logout', async (request, reply) => {
@@ -83,7 +123,12 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     return reply.code(204).send();
   });
 
-  app.get('/api/auth/me', { preHandler: auth }, async (request) => ({ user: currentUser(request) }));
+  app.get('/api/auth/me', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    // mfaSetupRequired: REQUIRE_MFA_FOR_ADMINS and this admin has not enrolled yet (every
+    // other endpoint answers 403 {code: "mfa_required"} until it has).
+    return { user, mfaEnabled: isMfaEnabled(ctx.db, user.id), mfaSetupRequired: mfaSetupRequired(ctx, user) };
+  });
 
   app.post('/api/auth/password', { preHandler: auth }, async (request, reply) => {
     const user = currentUser(request);
@@ -107,6 +152,7 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     ctx.limits.loginEmailIp.reset(`${mailboxKey(user.email)}\n${ipKey}`);
     ctx.users.setPasswordHash(user.id, await hashPassword(newPassword));
     ctx.authSessions.deleteForUser(user.id, request.authTokenHash ?? undefined);
+    dropChallenges(ctx, user.id);
     return reply.code(204).send();
   });
 }

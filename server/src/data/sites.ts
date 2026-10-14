@@ -106,7 +106,14 @@ export class SiteRepo {
    * row last. Never a synchronous cascade over millions of rows on the main thread.
    */
   delete(id: string, now: number): boolean {
-    return this.db.prepare(`UPDATE sites SET deleted_at = ?, suspended = 0 WHERE id = ? AND ${LIVE}`).run(now, id).changes > 0;
+    const deleted = this.db.prepare(`UPDATE sites SET deleted_at = ?, suspended = 0 WHERE id = ? AND ${LIVE}`).run(now, id).changes > 0;
+    // Uptime monitors follow the site (spec 8.1): hidden and unscheduled at once, purged with the site.
+    if (deleted) {
+      this.db
+        .prepare('UPDATE monitors SET deleted_at = ?, active = 0, push_token_hash = NULL, public_id = NULL WHERE site_id = ? AND deleted_at IS NULL')
+        .run(now, id);
+    }
+    return deleted;
   }
 
   /** Remove the row of a soft-deleted site whose data has been purged. */
