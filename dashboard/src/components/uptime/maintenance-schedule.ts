@@ -1,6 +1,7 @@
 // Maintenance editor state, validation and a client-side preview of the next windows
 // (all strategies, IANA time zones via Intl). The server stays authoritative
 // (`nextWindow` in the API); this only powers the live preview while editing.
+import { ApiError } from '@/api/client';
 import type { Maintenance, MaintenanceInput, MaintenanceStrategy } from '@/api/uptime';
 
 export interface MaintenanceDraft {
@@ -349,6 +350,40 @@ export function nextWindows(dr: MaintenanceDraft, now: number, count = 3, horizo
 
 export type DraftErrors = Partial<Record<keyof MaintenanceDraft, string>>;
 
+/** Same limit as the server (400 `field: 'cron'`). */
+export const MAX_CRON_RUNS_PER_DAY = 60;
+
+/** API field -> draft field, for server validation errors. */
+const SERVER_FIELDS: Record<string, keyof MaintenanceDraft> = {
+  title: 'title',
+  description: 'description',
+  tz: 'tz',
+  startsAt: 'startLocal',
+  endsAt: 'endLocal',
+  timeStart: 'timeStart',
+  timeEnd: 'timeEnd',
+  weekdays: 'weekdays',
+  daysOfMonth: 'daysOfMonth',
+  intervalDays: 'intervalDays',
+  cron: 'cron',
+  durationS: 'durationMin',
+  monitorUids: 'monitorUids',
+};
+
+/**
+ * Maps a failed save to a field error (400 with `field`, e.g. a cron that runs too often)
+ * or a form-level message (409 window limit, 429 rate limit, anything else).
+ */
+export function mapMaintenanceError(err: unknown): { errors: DraftErrors; form: string | null } {
+  const status = err instanceof ApiError ? err.status : 0;
+  const message = err instanceof Error && err.message ? err.message : '';
+  const key = err instanceof ApiError && err.field ? SERVER_FIELDS[err.field.replace(/\[\d+\]$/, '')] : undefined;
+  if (key && message) return { errors: { [key]: message }, form: null };
+  if (status === 429) return { errors: {}, form: message || 'Too many changes in a short time. Wait a moment and try again.' };
+  if (status === 409) return { errors: {}, form: message || 'You have reached the maximum number of maintenance windows of this kind.' };
+  return { errors: {}, form: message || 'Could not save.' };
+}
+
 export function validateMaintenance(dr: MaintenanceDraft): DraftErrors {
   const e: DraftErrors = {};
   if (!dr.title.trim()) e.title = 'Enter a title.';
@@ -381,6 +416,7 @@ export function validateMaintenance(dr: MaintenanceDraft): DraftErrors {
   if (dr.strategy === 'cron') {
     const c = parseCron(dr.cron);
     if (typeof c === 'string') e.cron = c;
+    else if (c.minutes.size * c.hours.size > MAX_CRON_RUNS_PER_DAY) e.cron = `Runs ${c.minutes.size * c.hours.size} times a day; at most ${MAX_CRON_RUNS_PER_DAY} are allowed.`;
     if (!Number.isFinite(dr.durationMin) || (dr.durationMin ?? 0) < 1 || (dr.durationMin ?? 0) > 7 * 24 * 60) e.durationMin = 'Enter 1 minute to 7 days.';
   }
   return e;

@@ -311,7 +311,8 @@ export function PushPanel({ monitor, pushUrl, onPushUrl, canManage }: { monitor:
         </CardTitle>
         <CardDescription>
           Call this URL from your job at least {everyText(monitor.intervalS)}. Without a push in that time the monitor goes down.
-          Optional parameters: <code>status=up|down</code>, <code>msg</code>, <code>ping</code> (ms).
+          Optional parameters: <code>status=up|down</code>, <code>msg</code>, <code>ping</code> (ms). The token can also be sent in an{' '}
+          <code>X-Push-Token</code> header to <code>/api/push</code> (keeps it out of access logs; at most 1 push per second).
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">

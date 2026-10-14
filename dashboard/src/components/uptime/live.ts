@@ -20,8 +20,11 @@ export type LiveMode = 'connecting' | 'live' | 'polling' | 'paused';
 export const POLL_INTERVAL_MS = 30_000;
 /** Consecutive errors before an EventSource that never opened is given up for polling. */
 const MAX_SSE_ERRORS = 3;
-/** Retry the stream after falling back to polling. */
+/** Retry the stream after falling back to polling (doubles per failed attempt, capped). */
 const SSE_RETRY_MS = 120_000;
+const SSE_RETRY_MAX_MS = 15 * 60_000;
+/** A connection must stay open this long before its error budget / backoff is reset. */
+const SSE_STABLE_MS = 30_000;
 
 /**
  * Subscribes to the uptime stream while the page is visible. Handlers may change on
@@ -33,6 +36,7 @@ export function useUptimeStream(handlers: { onBeat?: (b: StreamBeat) => void; on
   const ref = useRef(handlers);
   ref.current = handlers;
   const [retryNonce, setRetryNonce] = useState(0);
+  const failures = useRef(0);
 
   useEffect(() => {
     if (!enabled) return;
@@ -48,6 +52,7 @@ export function useUptimeStream(handlers: { onBeat?: (b: StreamBeat) => void; on
     let errors = 0;
     let opened = false;
     let retryTimer: number | undefined;
+    let stableTimer: number | undefined;
     try {
       // same-origin: the session cookie is sent without `withCredentials`
       es = new EventSource(UPTIME_STREAM_URL);
@@ -75,24 +80,34 @@ export function useUptimeStream(handlers: { onBeat?: (b: StreamBeat) => void; on
     es.addEventListener('state', onState as EventListener);
     es.onopen = () => {
       opened = true;
-      errors = 0;
       setMode('live');
+      // only a connection that stays up resets the error budget: a server that accepts and
+      // then closes the stream (e.g. after a role change) must not cause a reconnect loop
+      window.clearTimeout(stableTimer);
+      stableTimer = window.setTimeout(() => {
+        errors = 0;
+        failures.current = 0;
+      }, SSE_STABLE_MS);
     };
     es.onerror = () => {
       errors += 1;
+      window.clearTimeout(stableTimer);
       if (!es) return;
-      // CLOSED = the browser gave up (e.g. 401/404 or wrong content type)
+      // CLOSED = the browser gave up (e.g. 401/403/404 or wrong content type)
       if (es.readyState === EventSource.CLOSED || (!opened && errors >= MAX_SSE_ERRORS) || errors >= MAX_SSE_ERRORS * 3) {
         es.close();
         es = null;
         setMode('polling');
-        retryTimer = window.setTimeout(() => setRetryNonce((n) => n + 1), SSE_RETRY_MS);
+        const delay = Math.min(SSE_RETRY_MAX_MS, SSE_RETRY_MS * 2 ** failures.current);
+        failures.current += 1;
+        retryTimer = window.setTimeout(() => setRetryNonce((n) => n + 1), delay);
       } else {
         setMode((m) => (m === 'live' ? 'connecting' : m));
       }
     };
     return () => {
       window.clearTimeout(retryTimer);
+      window.clearTimeout(stableTimer);
       if (es) {
         es.removeEventListener('beat', onBeat as EventListener);
         es.removeEventListener('state', onState as EventListener);
@@ -126,6 +141,13 @@ export function appendBeat(list: readonly BeatLike[] | undefined, beat: BeatLike
     return cur as BeatLike[];
   }
   return [...cur, beat].slice(-max);
+}
+
+/** Server `recentBeats` (oldest first) plus any locally known beats that are newer. */
+export function mergeRecent(server: readonly BeatLike[], local: readonly BeatLike[] | undefined, max = RECENT_BEATS): BeatLike[] {
+  const lastT = server.length ? server[server.length - 1]!.t : -Infinity;
+  const newer = (local ?? []).filter((b) => b.t > lastT);
+  return [...server, ...newer].slice(-max);
 }
 
 /** Applies a stream beat to a monitor's state (pure). */
@@ -202,10 +224,17 @@ export function useLiveMonitors(load: (signal: AbortSignal) => Promise<Monitor[]
         setMonitors(list);
         setError(null);
         setLoading(false);
-        // extend the bars from the polled state
+        // bars: the server's recentBeats (kept extended by stream beats newer than them),
+        // else extend what we have from the polled state
+        for (const m of list) if (m.recentBeats) requested.current.add(m.uid);
         setBeats((prev) => {
           let next: Map<string, BeatLike[]> | null = null;
           for (const m of list) {
+            if (m.recentBeats) {
+              next ??= new Map(prev);
+              next.set(m.uid, mergeRecent(m.recentBeats, prev.get(m.uid)));
+              continue;
+            }
             const cur = prev.get(m.uid);
             const ts = m.state.lastCheckAt;
             if (!cur || ts === null) continue;
@@ -236,7 +265,8 @@ export function useLiveMonitors(load: (signal: AbortSignal) => Promise<Monitor[]
   // stable while only states change (stream beats must not abort the loads below)
   const uidKey = monitors ? monitors.map((m) => m.uid).join(',') : null;
 
-  // lazy-load recent beats for monitors we have not seen yet
+  // lazy-load recent beats for monitors we have not seen yet (only servers that do not
+  // send `recentBeats` with the list; those monitors are marked as requested on load)
   useEffect(() => {
     if (uidKey === null) return;
     const todo = (uidKey ? uidKey.split(',') : []).filter((uid) => !requested.current.has(uid));

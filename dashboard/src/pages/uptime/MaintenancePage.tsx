@@ -28,6 +28,7 @@ import {
   draftFromMaintenance,
   draftToInput,
   emptyDraft,
+  mapMaintenanceError,
   nextWindows,
   timeZones,
   validateMaintenance,
@@ -442,7 +443,9 @@ function MaintenanceDialog({
       toast(initial ? 'Maintenance window saved' : 'Maintenance window created');
       onSaved();
     } catch (err) {
-      setFormError(errorMessage(err) || 'Could not save.');
+      const mapped = mapMaintenanceError(err);
+      setErrors(mapped.errors);
+      setFormError(mapped.form);
     } finally {
       setBusy(false);
     }
@@ -660,6 +663,11 @@ function MaintenanceDialog({
                   ))
                 )}
               </div>
+              {errors.monitorUids ? (
+                <p className="text-xs text-destructive" role="alert">
+                  {errors.monitorUids}
+                </p>
+              ) : null}
             </div>
 
             <div className="flex items-start justify-between gap-4 rounded-lg border px-3 py-2.5">

@@ -5,13 +5,13 @@
 // is our own same-origin /script.js.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
-import { CirclePauseIcon, ExternalLinkIcon, LockKeyholeIcon, RefreshCwIcon, RssIcon, SearchXIcon, ShieldCheckIcon, WrenchIcon } from 'lucide-react';
+import { CalendarClockIcon, CirclePauseIcon, ExternalLinkIcon, LockKeyholeIcon, RefreshCwIcon, RssIcon, SearchXIcon, ShieldCheckIcon, WrenchIcon } from 'lucide-react';
 import { ApiError } from '@/api/client';
 import type { DisplayStatus } from '@/api/uptime';
 import { statusApi, type PublicBar, type PublicMaintenance, type PublicMonitor, type PublicSection, type PublicStatus, type StatusTheme } from '@/api/status';
 import { SafeMarkdown } from '@/components/markdown/SafeMarkdown';
 import { IncidentCallout, INCIDENT_STYLE_META, OVERALL_META, incidentMeta } from '@/components/status/incidents';
-import { DaysBar } from '@/components/uptime/bars';
+import { DaysBar, UptimeLegend } from '@/components/uptime/bars';
 import { formatDateTime, formatRelative, formatUptime, uptimeTone } from '@/components/uptime/lib';
 import { StatusDot, TagChip } from '@/components/uptime/status';
 import { LogoMark } from '@/components/Logo';
@@ -195,10 +195,10 @@ const MONITOR_LABEL: Record<DisplayStatus, string> = {
 };
 
 const MONITOR_TEXT: Record<DisplayStatus, string> = {
-  up: 'text-good',
-  down: 'text-poor',
-  pending: 'text-warn',
-  maintenance: 'text-chart-1',
+  up: 'text-good-text',
+  down: 'text-poor-text',
+  pending: 'text-warn-text',
+  maintenance: 'text-maint-text',
   unknown: 'text-muted-foreground',
   paused: 'text-muted-foreground',
 };
@@ -213,13 +213,27 @@ function padBars(bars: readonly PublicBar[], days: number): PublicBar[] {
   return pad.concat(shown);
 }
 
-function sectionSummary(s: PublicSection): { label: string; tone: string } {
+/** Section header: the worst state, with counts when only some services are affected. */
+export function sectionSummary(s: Pick<PublicSection, 'monitors'>): { label: string; tone: string } {
   const statuses = s.monitors.map((m) => m.status);
-  if (statuses.some((x) => x === 'down')) return { label: `${statuses.filter((x) => x === 'down').length} with outage`, tone: 'text-poor' };
-  if (statuses.some((x) => x === 'pending')) return { label: 'Degraded', tone: 'text-warn' };
-  if (statuses.some((x) => x === 'maintenance')) return { label: 'Maintenance', tone: 'text-chart-1' };
-  if (statuses.length > 0 && statuses.every((x) => x === 'up')) return { label: 'Operational', tone: 'text-good' };
+  const n = (x: DisplayStatus) => statuses.filter((y) => y === x).length;
+  const total = statuses.length;
+  const down = n('down');
+  const pending = n('pending');
+  const maint = n('maintenance');
+  if (down > 0) return { label: down === total ? 'Outage' : `${down} of ${total} with outage`, tone: 'text-poor-text' };
+  if (pending > 0) return { label: pending === total ? 'Degraded' : `${pending} of ${total} degraded`, tone: 'text-warn-text' };
+  if (maint > 0) return { label: maint === total ? 'Maintenance' : `${maint} of ${total} in maintenance`, tone: 'text-maint-text' };
+  if (total > 0 && statuses.every((x) => x === 'up')) return { label: 'Operational', tone: 'text-good-text' };
   return { label: '', tone: 'text-muted-foreground' };
+}
+
+/** Banner text: "Under maintenance" only when nothing else is running normally. */
+export function overallLabel(data: Pick<PublicStatus, 'overall' | 'sections'>): string {
+  const statuses = data.sections.flatMap((s) => s.monitors.map((m) => m.status));
+  if (statuses.length === 0 && data.overall === 'unknown') return 'No services listed yet';
+  if (data.overall === 'maintenance' && statuses.some((x) => x === 'up')) return 'Partial maintenance — other services operational';
+  return OVERALL_META[data.overall].label;
 }
 
 function maintenanceMeta(m: PublicMaintenance): string {
@@ -296,7 +310,11 @@ export function StatusContent({
     .sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0));
   const overall = OVERALL_META[data.overall];
   const OverallIcon = overall.icon;
-  const monitorCount = data.sections.reduce((n, s) => n + s.monitors.length, 0);
+  // In-progress maintenance is a current notice; upcoming windows go in a compact list after
+  // the services (they would otherwise push the services far down on phones).
+  const maintNow = data.maintenance.filter((m) => m.status === 'under-maintenance');
+  const maintUpcoming = data.maintenance.filter((m) => m.status !== 'under-maintenance').sort((a, b) => (a.start ?? Infinity) - (b.start ?? Infinity));
+  const hasBars = data.sections.some((s) => s.monitors.length > 0);
 
   return (
     <>
@@ -323,10 +341,10 @@ export function StatusContent({
             <OverallIcon className="size-5" aria-hidden="true" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="text-lg leading-tight font-semibold sm:text-xl">{monitorCount === 0 && data.overall === 'unknown' ? 'No services listed yet' : overall.label}</p>
+            <p className="text-lg leading-tight font-semibold sm:text-xl">{overallLabel(data)}</p>
             <p className="mt-1 text-xs text-muted-foreground">
               {refreshError ? (
-                <span className="text-warn">Couldn&apos;t refresh — showing data from {formatRelative(fetchedAt)}.</span>
+                <span className="text-warn-text">Couldn&apos;t refresh — showing data from {formatRelative(fetchedAt)}.</span>
               ) : (
                 <>Updated {formatRelative(data.updatedAt ?? fetchedAt)}</>
               )}
@@ -344,12 +362,12 @@ export function StatusContent({
           </p>
         ) : null}
 
-        {data.maintenance.length > 0 || active.length > 0 ? (
+        {maintNow.length > 0 || active.length > 0 ? (
           <section aria-label="Current notices" className="flex flex-col gap-3">
             {active.map((i) => (
               <IncidentCallout key={i.id} style={i.style} title={i.title} body={i.body} meta={incidentMeta(i)} linkClassName={LINK} className="bg-card" />
             ))}
-            {data.maintenance.map((m, k) => (
+            {maintNow.map((m, k) => (
               <IncidentCallout key={`m${k}`} style="info" icon={WrenchIcon} title={m.title} body={m.description} meta={maintenanceMeta(m)} linkClassName={LINK} className="bg-card" />
             ))}
           </section>
@@ -358,6 +376,9 @@ export function StatusContent({
         {data.sections.map((s, i) => (
           <Section key={i} section={s} days={days} tz={data.tz ?? undefined} />
         ))}
+        {hasBars ? <UptimeLegend className="-mt-5 justify-end" /> : null}
+
+        {maintUpcoming.length > 0 ? <UpcomingMaintenance items={maintUpcoming} /> : null}
 
         <section aria-labelledby="past-incidents" className="flex flex-col gap-3">
           <h2 id="past-incidents" className="text-base font-semibold">
@@ -396,6 +417,43 @@ export function StatusContent({
         </div>
       </footer>
     </>
+  );
+}
+
+/** Scheduled windows: one line each, details on demand. */
+function UpcomingMaintenance({ items }: { items: readonly PublicMaintenance[] }) {
+  return (
+    <section aria-labelledby="upcoming-maintenance" className="flex flex-col gap-3">
+      <h2 id="upcoming-maintenance" className="text-base font-semibold">
+        Scheduled maintenance
+      </h2>
+      <ul className="flex flex-col divide-y rounded-xl border bg-card" data-slot="upcoming-maintenance">
+        {items.map((m, k) => {
+          const when = maintenanceMeta(m).replace(/^Scheduled · /, '');
+          const head = (
+            <>
+              <CalendarClockIcon className="mt-0.5 size-4 shrink-0 text-maint-text" aria-hidden="true" />
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-3">
+                <span className="bidi-isolate min-w-0 text-sm font-medium break-words">{displayText(m.title) || 'Maintenance'}</span>
+                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{when}</span>
+              </span>
+            </>
+          );
+          return (
+            <li key={k} className="px-4 py-3 sm:px-5">
+              {m.description ? (
+                <details className="group">
+                  <summary className="flex cursor-pointer list-none items-start gap-3 outline-none focus-visible:underline [&::-webkit-details-marker]:hidden">{head}</summary>
+                  <SafeMarkdown source={m.description} className="mt-2 pl-7 text-sm text-muted-foreground" linkClassName={LINK} />
+                </details>
+              ) : (
+                <div className="flex items-start gap-3">{head}</div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
@@ -450,7 +508,7 @@ function MonitorRow({ monitor: m, days, tz }: { monitor: PublicMonitor; days: nu
             ))}
           </div>
           {m.certDaysLeft !== null ? (
-            <p className={cn('mt-0.5 inline-flex items-center gap-1 text-xs', m.certDaysLeft < 7 ? 'text-poor' : m.certDaysLeft < 21 ? 'text-warn' : 'text-muted-foreground')}>
+            <p className={cn('mt-0.5 inline-flex items-center gap-1 text-xs', m.certDaysLeft < 7 ? 'text-poor-text' : m.certDaysLeft < 21 ? 'text-warn-text' : 'text-muted-foreground')}>
               {m.certDaysLeft < 0 ? <LockKeyholeIcon className="size-3" aria-hidden="true" /> : <ShieldCheckIcon className="size-3" aria-hidden="true" />}
               {m.certDaysLeft < 0 ? 'Certificate expired' : `Certificate valid for ${m.certDaysLeft} ${m.certDaysLeft === 1 ? 'day' : 'days'}`}
             </p>

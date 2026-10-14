@@ -31,15 +31,26 @@ export function maskPushUrl(url: string): string {
   return `${url.slice(0, i + 1)}${token.slice(0, 3)}${'•'.repeat(Math.max(6, Math.min(16, token.length - 3)))}`;
 }
 
-export type PushExampleLang = 'curl' | 'cron' | 'powershell' | 'node' | 'python';
+export type PushExampleLang = 'curl' | 'curl-header' | 'cron' | 'powershell' | 'node' | 'python';
 
 export const PUSH_EXAMPLE_LANGS: Array<{ key: PushExampleLang; label: string }> = [
   { key: 'curl', label: 'curl' },
+  { key: 'curl-header', label: 'curl (header)' },
   { key: 'cron', label: 'cron' },
   { key: 'powershell', label: 'PowerShell' },
   { key: 'node', label: 'Node.js' },
   { key: 'python', label: 'Python' },
 ];
+
+/**
+ * ".../api/push/<token>" -> { endpoint: ".../api/push", token } for the header variant
+ * (`X-Push-Token`, keeps the token out of access logs). Placeholders for anything else.
+ */
+export function splitPushUrl(url: string): { endpoint: string; token: string } {
+  const i = url.lastIndexOf('/');
+  if (i < 0 || !/\/api\/push$/.test(url.slice(0, i))) return { endpoint: '<BASE_URL>/api/push', token: '<PUSH_TOKEN>' };
+  return { endpoint: url.slice(0, i), token: url.slice(i + 1).split('?')[0] || '<PUSH_TOKEN>' };
+}
 
 /** Example snippets calling the push URL (the URL is inserted verbatim, quoted). */
 export function pushExample(lang: PushExampleLang, url: string, intervalS: number): string {
@@ -48,6 +59,10 @@ export function pushExample(lang: PushExampleLang, url: string, intervalS: numbe
   switch (lang) {
     case 'curl':
       return `curl -fsS -m 10 --retry 3 "${full}"`;
+    case 'curl-header': {
+      const { endpoint, token } = splitPushUrl(url);
+      return `curl -fsS -m 10 --retry 3 -H "X-Push-Token: ${token}" "${endpoint}?status=up&msg=OK&ping="`;
+    }
     case 'cron':
       return `*/${everyMin} * * * * curl -fsS -m 10 --retry 3 "${full}" > /dev/null`;
     case 'powershell':

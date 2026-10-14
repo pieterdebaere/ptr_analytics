@@ -2,7 +2,7 @@
 // Never produces HTML strings and never uses dangerouslySetInnerHTML: raw HTML in the
 // input is shown as text. Supported: paragraphs, line breaks, **bold**, *italic*,
 // `code`, fenced code blocks, bullet/numbered lists, headings (rendered as h3/h4), and
-// links / autolinks restricted to http(s): and mailto:.
+// links / autolinks restricted to http(s):, mailto: and same-origin paths ("/status/…").
 import { Fragment, type ReactNode } from 'react';
 import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
@@ -14,15 +14,20 @@ const LINK_REL = 'noopener noreferrer nofollow ugc';
 
 /* ------------------------------------------------------------------ links */
 
+/** Same-origin absolute path: one leading "/", then URL path / query / fragment characters only. */
+const SAME_ORIGIN_PATH_RE = /^\/(?![/\\])[A-Za-z0-9._~!$&'()*+,;=:@%/?#-]*$/;
+
 /**
- * Returns a normalised href for http(s)/mailto URLs, or null for anything else
- * (javascript:, data:, vbscript:, relative URLs, protocol-relative, control chars …).
+ * Returns a normalised href for http(s)/mailto URLs and same-origin paths ("/status/acme/feed.xml"),
+ * or null for anything else (javascript:, data:, vbscript:, "relative/paths", protocol-relative
+ * "//host", backslashes, control chars …).
  */
 export function safeMarkdownHref(raw: string): string | null {
   const v = raw.trim();
   if (!v || v.length > MAX_URL_LENGTH) return null;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000- \u007f-\u009f‪-‮⁦-⁩\\]/.test(v)) return null;
+  if (v.startsWith('/')) return SAME_ORIGIN_PATH_RE.test(v) ? v : null;
   if (!/^(?:https?:\/\/|mailto:)/i.test(v)) return null;
   let url: URL;
   try {
@@ -40,6 +45,17 @@ export function safeMarkdownHref(raw: string): string | null {
     return `mailto:${addr}`;
   }
   return null;
+}
+
+/** Targets of `[text](target)` links that would be dropped (rendered as plain text). */
+export function droppedLinkTargets(source: string): string[] {
+  const out: string[] = [];
+  const re = /\[[^\]\n]*\]\(\s*<?([^)\s>]*)>?[^)\n]*\)/g;
+  for (let m = re.exec(source); m && out.length < 5; m = re.exec(source)) {
+    const target = m[1] ?? '';
+    if (target && !safeMarkdownHref(target) && !out.includes(target)) out.push(target);
+  }
+  return out;
 }
 
 function decodeURIComponentSafe(s: string): string {

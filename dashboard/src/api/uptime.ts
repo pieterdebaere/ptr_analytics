@@ -164,6 +164,12 @@ export interface DomainExpiry {
   daysLeft: number | null;
 }
 
+export interface RecentBeat {
+  t: number;
+  status: StatusCode;
+  latencyMs: number | null;
+}
+
 export interface Monitor {
   uid: string;
   siteId: string;
@@ -195,6 +201,8 @@ export interface Monitor {
   manualStatus: StatusCode | null;
   /** Optional (not in the base contract): domain expiry when tracked. */
   domain: DomainExpiry | null;
+  /** The last (up to 50) beats, oldest first; null when the server did not send them. */
+  recentBeats: RecentBeat[] | null;
   createdAt: number | null;
   updatedAt: number | null;
 }
@@ -560,6 +568,13 @@ export function parseMonitor(raw: unknown): Monitor | null {
     tls: parseTls(raw.tls),
     manualStatus: raw.manualStatus === null || raw.manualStatus === undefined ? null : toStatusCode(raw.manualStatus),
     domain: parseDomain(raw),
+    recentBeats: Array.isArray(raw.recentBeats)
+      ? raw.recentBeats
+          .filter(isObj)
+          .filter((x) => typeof x.t === 'number' && Number.isFinite(x.t))
+          .slice(-50)
+          .map((x) => ({ t: x.t as number, status: toStatusCode(x.status), latencyMs: numOrNull(x.latencyMs) }))
+      : null,
     createdAt: numOrNull(raw.createdAt),
     updatedAt: numOrNull(raw.updatedAt),
   };

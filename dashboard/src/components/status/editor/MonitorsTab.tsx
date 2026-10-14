@@ -17,6 +17,9 @@ import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 import { DISPLAY_NAME_MAX, SECTION_NAME_MAX, move } from './draft';
 
+/** Monitor types with a public http(s) URL the page can link to ("Show URL"). */
+export const URL_MONITOR_TYPES: ReadonlySet<string> = new Set(['http', 'keyword', 'json']);
+
 export function MonitorsTab({
   sections,
   onChange,
@@ -123,6 +126,8 @@ export function MonitorsTab({
               <ul className="divide-y">
                 {section.monitors.map((sm, j) => {
                   const m = byUid.get(sm.uid);
+                  // Keep the switch while it is on (so it can be turned off), else only for URL monitors.
+                  const urlCapable = sm.showUrl || (m !== undefined && URL_MONITOR_TYPES.has(m.type));
                   const setMonitor = (patch: Partial<typeof sm>) =>
                     setSection(i, { ...section, monitors: section.monitors.map((x, k) => (k === j ? { ...x, ...patch } : x)) });
                   return (
@@ -130,7 +135,9 @@ export function MonitorsTab({
                       <div className="flex min-w-0 flex-1 items-center gap-2.5">
                         <StatusDot status={m ? displayStatus(m) : 'unknown'} pulse={false} />
                         <div className="flex min-w-0 flex-col">
-                          <span className="bidi-isolate truncate text-sm font-medium">{m ? displayText(m.name) : 'Deleted monitor'}</span>
+                          <span className="bidi-isolate truncate text-sm font-medium" title={m ? displayText(m.name) : undefined}>
+                            {m ? displayText(m.name) : 'Deleted monitor'}
+                          </span>
                           <span className="truncate text-xs text-muted-foreground">{m ? `${m.type}${m.target ? ` · ${displayText(m.target)}` : ''}` : sm.uid}</span>
                         </div>
                       </div>
@@ -138,17 +145,19 @@ export function MonitorsTab({
                         <Input
                           value={sm.displayName ?? ''}
                           maxLength={DISPLAY_NAME_MAX}
-                          placeholder={m ? displayText(m.name) : 'Display name'}
+                          placeholder="Public name (optional)"
                           aria-label="Public display name"
-                          title="Public display name (leave empty to use the monitor name)"
+                          title="Name shown on the public page. Leave empty to use the monitor name."
                           disabled={readOnly}
                           className="min-w-0 basis-full sm:w-48 sm:basis-auto"
                           onChange={(e) => setMonitor({ displayName: e.target.value || null })}
                         />
-                        <label className="flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-xs whitespace-nowrap" title="Link the name to the monitored URL (HTTP monitors)">
-                          <Switch size="sm" checked={sm.showUrl} disabled={readOnly} onCheckedChange={(v) => setMonitor({ showUrl: v })} />
-                          Show URL
-                        </label>
+                        {urlCapable ? (
+                          <label className="flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-xs whitespace-nowrap" title="Link the name to the monitored URL">
+                            <Switch size="sm" checked={sm.showUrl} disabled={readOnly} onCheckedChange={(v) => setMonitor({ showUrl: v })} />
+                            Show URL
+                          </label>
+                        ) : null}
                         <div className="ml-auto flex items-center">
                           <Button
                             type="button"
