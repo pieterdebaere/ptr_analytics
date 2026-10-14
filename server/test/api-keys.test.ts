@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { promLabel } from '../src/routes/security.js';
-import { api, createCloudApp, createTestApp, DAY, HOUR, login, signupMember, type TestApp } from './helpers.js';
+import { ADMIN_PASSWORD, api, createCloudApp, createTestApp, DAY, HOUR, login, signupMember, type TestApp } from './helpers.js';
 import { insertHour, insertMonitor, insertTag, insertTls } from './uptime-status-fixtures.js';
 
 let t: TestApp;
@@ -9,8 +9,10 @@ afterEach(async () => {
   await t?.app.close();
 });
 
+const MEMBER_PASSWORD = 'member password 123';
+
 async function createKey(app: FastifyInstance, cookie: string, scopes: string[], extra: Record<string, unknown> = {}) {
-  const res = await api(app, cookie, 'POST', '/api/api-keys', { name: 'ci', scopes, ...extra });
+  const res = await api(app, cookie, 'POST', '/api/api-keys', { name: 'ci', scopes, password: ADMIN_PASSWORD, ...extra });
   expect(res.statusCode).toBe(201);
   return res.json() as { apiKey: { uid: string; prefix: string; scopes: string[] }; key: string };
 }
@@ -55,10 +57,10 @@ describe('API key management', () => {
       { name: 'x', scopes: ['read'], expiresInDays: 0 },
       { name: 'x', scopes: ['read'], expiresInDays: 1.5 },
     ]) {
-      expect((await api(t.app, cookie, 'POST', '/api/api-keys', body)).statusCode).toBe(400);
+      expect((await api(t.app, cookie, 'POST', '/api/api-keys', { ...body, password: ADMIN_PASSWORD })).statusCode).toBe(400);
     }
     for (let i = 0; i < 20; i++) await createKey(t.app, cookie, ['read']);
-    const over = await api(t.app, cookie, 'POST', '/api/api-keys', { name: 'x', scopes: ['read'] });
+    const over = await api(t.app, cookie, 'POST', '/api/api-keys', { name: 'x', scopes: ['read'], password: ADMIN_PASSWORD });
     expect(over.statusCode).toBe(409);
     expect(over.json()).toMatchObject({ code: 'limit_reached' });
   });
@@ -132,13 +134,24 @@ describe('bearer authentication', () => {
     expect(lastUsed()).toBe(t.clock.t);
   });
 
-  it('rate limits failed key attempts per IP', async () => {
+  it('rate limits failed key attempts per IP and prefix, never valid keys', async () => {
     t = await createTestApp();
+    const cookie = await login(t.app);
+    const { key } = await createKey(t.app, cookie, ['read']);
     const bad = `pa_abcdefgh_${'x'.repeat(43)}`;
     let last = 0;
     for (let i = 0; i < 31; i++) last = (await bearer(t.app, bad, 'GET', '/api/sites', undefined, '192.0.2.77')).statusCode;
     expect(last).toBe(429);
     expect((await bearer(t.app, bad, 'GET', '/api/sites', undefined, '192.0.2.78')).statusCode).toBe(401);
+    // the same client (or everyone behind the same NAT) can still use a valid key
+    expect((await bearer(t.app, key, 'GET', '/api/sites', undefined, '192.0.2.77')).statusCode).toBe(200);
+    // another prefix from that IP has its own budget
+    expect((await bearer(t.app, `pa_zzzzzzzz_${'x'.repeat(43)}`, 'GET', '/api/sites', undefined, '192.0.2.77')).statusCode).toBe(401);
+    // a forged secret for the valid key's prefix is counted, the real key keeps working
+    const forged = `${key.slice(0, 12)}${'A'.repeat(43)}`;
+    for (let i = 0; i < 31; i++) last = (await bearer(t.app, forged, 'GET', '/api/sites', undefined, '192.0.2.77')).statusCode;
+    expect(last).toBe(429);
+    expect((await bearer(t.app, key, 'GET', '/api/sites', undefined, '192.0.2.77')).statusCode).toBe(200);
   });
 
   it('member keys only see the member data', async () => {
@@ -150,12 +163,43 @@ describe('bearer authentication', () => {
     const siteB = ((await api(c.app, b.cookie, 'POST', '/api/sites', { name: 'B', domains: ['b.example'] })).json() as { site: { id: string } }).site.id;
     insertMonitor(c.ctx, siteA, { name: 'mine' });
     insertMonitor(c.ctx, siteB, { name: 'theirs' });
-    const { key } = await createKey(c.app, a.cookie, ['read', 'metrics']);
+    const { key } = await createKey(c.app, a.cookie, ['read', 'metrics'], { password: MEMBER_PASSWORD });
     expect((await bearer(c.app, key, 'GET', `/api/sites/${siteA}`)).statusCode).toBe(200);
     expect((await bearer(c.app, key, 'GET', `/api/sites/${siteB}`)).statusCode).toBe(404);
     const metrics = (await bearer(c.app, key, 'GET', '/metrics')).body;
     expect(metrics).toContain('monitor_name="mine"');
     expect(metrics).not.toContain('theirs');
+  });
+});
+
+describe('/metrics scope', () => {
+  it('exports only the key owner\'s monitors; admins the operator sites; metrics:all is explicit', async () => {
+    const c = await createCloudApp();
+    t = c;
+    const admin = await login(c.app);
+    const a = await signupMember(c, 'a@example.org');
+    const opSite = ((await api(c.app, admin, 'POST', '/api/sites', { name: 'Op', domains: ['op.example'] })).json() as { site: { id: string } }).site.id;
+    const siteA = ((await api(c.app, a.cookie, 'POST', '/api/sites', { name: 'A', domains: ['a.example'] })).json() as { site: { id: string } }).site.id;
+    insertMonitor(c.ctx, opSite, { name: 'operator-mon' });
+    insertMonitor(c.ctx, siteA, { name: 'tenant-mon' });
+    const metrics = async (key: string): Promise<string> => (await bearer(c.app, key, 'GET', '/metrics')).body;
+    const adminKey = (await createKey(c.app, admin, ['metrics'])).key;
+    const adminBody = await metrics(adminKey);
+    expect(adminBody).toContain('operator-mon');
+    expect(adminBody).not.toContain('tenant-mon');
+    const allKey = (await createKey(c.app, admin, ['metrics:all'])).key;
+    const allBody = await metrics(allKey);
+    expect(allBody).toContain('operator-mon');
+    expect(allBody).toContain('tenant-mon');
+    // members cannot ask for every tenant, and their keys only see their own monitors
+    const refused = await api(c.app, a.cookie, 'POST', '/api/api-keys', { name: 'x', scopes: ['metrics:all'], password: MEMBER_PASSWORD });
+    expect(refused.statusCode).toBe(403);
+    const memberKey = (await createKey(c.app, a.cookie, ['metrics'], { password: MEMBER_PASSWORD })).key;
+    const memberBody = await metrics(memberKey);
+    expect(memberBody).toContain('tenant-mon');
+    expect(memberBody).not.toContain('operator-mon');
+    // metrics:all never grants API reads
+    expect((await bearer(c.app, allKey, 'GET', '/api/sites')).statusCode).toBe(403);
   });
 });
 

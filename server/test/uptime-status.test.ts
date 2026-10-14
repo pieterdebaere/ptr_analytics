@@ -2,7 +2,7 @@ import { deflateSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance, InjectOptions } from 'fastify';
 import { txtLookup, statusPageForHost } from '../src/uptime/status/domains.js';
-import { sniffImage } from '../src/uptime/status/image.js';
+import { crc32, sniffImage } from '../src/uptime/status/image.js';
 import { renderBadge, textWidth } from '../src/uptime/status/badge.js';
 import { overallStatus } from '../src/uptime/status/render.js';
 import { slugProblem } from '../src/uptime/status/validate.js';
@@ -69,7 +69,9 @@ describe('overall status', () => {
 function pngChunk(type: string, data: Buffer): Buffer {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length);
-  return Buffer.concat([len, Buffer.from(type, 'latin1'), data, Buffer.alloc(4)]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, 'latin1'), data])));
+  return Buffer.concat([len, Buffer.from(type, 'latin1'), data, crc]);
 }
 
 function makePng(w = 2, h = 2, extra: Buffer[] = []): Buffer {
@@ -102,6 +104,7 @@ describe('logo sniffing', () => {
     vp8l.write('RIFF', 0, 'latin1');
     vp8l.writeUInt32LE(22, 4);
     vp8l.write('WEBPVP8L', 8, 'latin1');
+    vp8l.writeUInt32LE(10, 16);
     vp8l[20] = 0x2f;
     vp8l.writeUInt32LE(9 | (4 << 14), 21);
     expect(sniffImage(vp8l)).toMatchObject({ mime: 'image/webp', width: 10, height: 5 });
@@ -114,6 +117,21 @@ describe('logo sniffing', () => {
     expect(sniffImage(Buffer.concat([makeJpeg().subarray(0, -2), Buffer.from('<svg onload=alert(1)>'), Buffer.from([0xff, 0xd9])]))).toBeNull();
     expect(sniffImage(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBeNull();
     expect(sniffImage(Buffer.from('GIF89a'))).toBeNull();
+    // structure is checked end to end: a corrupted chunk CRC, an HTML payload in an
+    // uncompressed ancillary chunk, markup in the JPEG scan data, a broken RIFF chunk list
+    const png = makePng();
+    const badCrc = Buffer.from(png);
+    badCrc[30] = (badCrc[30] as number) ^ 0xff; // inside the IHDR CRC
+    expect(sniffImage(badCrc)).toBeNull();
+    expect(sniffImage(makePng(2, 2, [pngChunk('prVt', Buffer.from('<img src=x onerror=alert(document.domain)>'))]))).toBeNull();
+    expect(sniffImage(makePng(2, 2, [pngChunk('prVt', Buffer.from('<a href="https://evil.example">x</a>'))]))).toBeNull();
+    const jpegScan = makeJpeg();
+    expect(sniffImage(Buffer.concat([jpegScan.subarray(0, -2), Buffer.from('<img src=x onerror=alert(1)>'), Buffer.from([0xff, 0xd9])]))).toBeNull();
+    // EOI inside the data instead of at the end
+    expect(sniffImage(Buffer.concat([jpegScan.subarray(0, -2), Buffer.from([0xff, 0xd9, 0x00, 0x00, 0xff, 0xd9])]))).toBeNull();
+    const riff = Buffer.from(vp8l);
+    riff.writeUInt32LE(4, 16); // chunk size no longer lines up with the file
+    expect(sniffImage(riff)).toBeNull();
   });
 });
 
@@ -261,7 +279,7 @@ describe('public status page', () => {
     t = await createTestApp({ env: { PUBLIC_URL: 'https://analytics.example.com' } });
     const cookie = await login(t.app);
     const site = await createSite(t.app, cookie, 'Pub');
-    const up = insertMonitor(t.ctx, site, { name: 'Website', status: 1, config: { url: 'https://user:pw@www.example.com/health' } });
+    const up = insertMonitor(t.ctx, site, { name: 'Website', status: 1, config: { url: 'https://user:pw@www.example.com/health?token=abc&apikey=SECRET123#frag' } });
     const down = insertMonitor(t.ctx, site, { name: 'Internal DB', status: 0, type: 'tcp', config: { host: '10.0.0.5', port: 5432 } });
     const page = await createPage(t.app, cookie, site, {
       slug: 'pub',
@@ -308,6 +326,8 @@ describe('public status page', () => {
       expect(text, secret).not.toContain(`"${secret}`);
     }
     expect(text).not.toContain('user:pw');
+    expect(text).not.toContain('SECRET123');
+    expect(text).not.toContain('#frag');
     expect(text).not.toContain('10.0.0.5');
     expect(body.overall).toBe('degraded');
     expect(body.paused).toBe(false);
@@ -376,8 +396,22 @@ describe('public status page', () => {
     let body = (await pub(t.app, '/api/public/status/pub')).json() as { incidents: Array<Record<string, unknown>>; maintenance: unknown[] };
     expect(body.incidents).toHaveLength(1);
     expect(body.incidents[0]).toMatchObject({ title: 'Database outage', body: 'Investigating', style: 'danger', pinned: true });
+    // the incident id is opaque per page, never the internal uid
+    expect(body.incidents[0]?.id).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(JSON.stringify(body)).not.toContain(incident.uid);
+    expect((await pub(t.app, '/status/pub/feed.xml')).body).not.toContain(incident.uid);
     expect(body.maintenance).toEqual([{ title: 'Upgrade', description: 'DB upgrade', start: null, end: null, status: 'under-maintenance' }]);
-    // a single window in two days, linked through a monitor of the page → scheduled
+    // a maintenance linked only through a monitor is not announced (its text may be internal)
+    t.ctx.db
+      .prepare(
+        `INSERT INTO maintenances (uid, owner_id, title, description, active, strategy, tz, created_at, updated_at)
+         VALUES ('mnt000000009', NULL, 'Internal: rotate db creds', NULL, 1, 'manual', 'UTC', 0, 0)`,
+      )
+      .run();
+    const internal = (t.ctx.db.prepare("SELECT id FROM maintenances WHERE uid = 'mnt000000009'").get() as { id: number }).id;
+    const web = (t.ctx.db.prepare("SELECT id FROM monitors WHERE name = 'Website'").get() as { id: number }).id;
+    t.ctx.db.prepare('INSERT INTO maintenance_monitors (maintenance_id, monitor_id) VALUES (?, ?)').run(internal, web);
+    // a single window in two days, linked to the page → scheduled
     const start = t.clock.t + 2 * DAY;
     t.ctx.db
       .prepare(
@@ -386,8 +420,7 @@ describe('public status page', () => {
       )
       .run(start, start + HOUR);
     const mid2 = (t.ctx.db.prepare("SELECT id FROM maintenances WHERE uid = 'mnt000000002'").get() as { id: number }).id;
-    const mon = (t.ctx.db.prepare("SELECT id FROM monitors WHERE name = 'Website'").get() as { id: number }).id;
-    t.ctx.db.prepare('INSERT INTO maintenance_monitors (maintenance_id, monitor_id) VALUES (?, ?)').run(mid2, mon);
+    t.ctx.db.prepare('INSERT INTO maintenance_status_pages (maintenance_id, status_page_id) VALUES (?, ?)').run(mid2, pid);
     // a window in 30 days is not listed yet
     t.ctx.db
       .prepare(
@@ -399,6 +432,7 @@ describe('public status page', () => {
     t.ctx.db.prepare('INSERT INTO maintenance_status_pages (maintenance_id, status_page_id) VALUES (?, ?)').run(mid3, pid);
     t.clock.t += 31_000;
     body = (await pub(t.app, '/api/public/status/pub')).json() as typeof body;
+    expect(JSON.stringify(body)).not.toContain('rotate db creds');
     expect(body.maintenance).toEqual([
       { title: 'Upgrade', description: 'DB upgrade', start: null, end: null, status: 'under-maintenance' },
       { title: 'Move', description: null, start, end: start + HOUR, status: 'scheduled' },
@@ -537,7 +571,19 @@ describe('logos', () => {
     // declared type is ignored: the content decides
     const ok = await upload(png, 'image/jpeg');
     expect(ok.statusCode).toBe(200);
-    const logoUrl = (ok.json() as { statusPage: { logoUrl: string } }).statusPage.logoUrl;
+    const dashUrl = (ok.json() as { statusPage: { logoUrl: string } }).statusPage.logoUrl;
+    expect(dashUrl).toMatch(new RegExp(`^/api/status-pages/${page.uid}/logo\\?v=[0-9a-f]{16}$`));
+    // the dashboard reads it with the session, published or not
+    const own = await api(t.app, cookie, 'GET', dashUrl);
+    expect(own.statusCode).toBe(200);
+    expect(own.headers['content-type']).toBe('image/png');
+    expect(own.headers['content-security-policy']).toBe("default-src 'none'; sandbox");
+    expect((await pub(t.app, dashUrl)).statusCode).toBe(401);
+    // the public URL only works while a published page uses the logo (no upload oracle)
+    const preview = (await api(t.app, cookie, 'GET', `/api/status-pages/${page.uid}/preview`)).json() as { logoUrl: string };
+    expect(preview.logoUrl).toBe(dashUrl);
+    await api(t.app, cookie, 'PATCH', `/api/status-pages/${page.uid}`, { published: true });
+    const logoUrl = ((await pub(t.app, '/api/public/status/logo')).json() as { logoUrl: string }).logoUrl;
     expect(logoUrl).toMatch(/^\/api\/public\/assets\/[0-9a-f]{64}$/);
     const served = await pub(t.app, logoUrl);
     expect(served.statusCode).toBe(200);
@@ -546,6 +592,12 @@ describe('logos', () => {
     expect(served.headers['content-security-policy']).toContain("default-src 'none'");
     expect(served.headers['content-disposition']).toBe('inline');
     expect(served.rawPayload.equals(png)).toBe(true);
+    await api(t.app, cookie, 'PATCH', `/api/status-pages/${page.uid}`, { published: false });
+    expect((await pub(t.app, logoUrl)).statusCode).toBe(404);
+    // an asset nobody publishes is never served, even if it exists
+    const sha = logoUrl.split('/').pop() as string;
+    expect(t.ctx.db.prepare('SELECT 1 FROM assets WHERE sha256 = ?').get(sha)).toBeDefined();
+    await api(t.app, cookie, 'PATCH', `/api/status-pages/${page.uid}`, { published: true });
     // replacing / removing the logo garbage-collects the old asset
     const del = await api(t.app, cookie, 'DELETE', `/api/status-pages/${page.uid}/logo`);
     expect(del.json()).toMatchObject({ statusPage: { logoUrl: null } });
@@ -560,14 +612,22 @@ describe('custom domains', () => {
     const cookie = await login(t.app);
     const site = await createSite(t.app, cookie, 'Dom');
     const page = await createPage(t.app, cookie, site, { slug: 'dom', title: 'D', published: true, domains: ['Status.Acme.test.'] });
-    expect(page.domains).toEqual([{ domain: 'status.acme.test', verified: false, verifyToken: expect.stringMatching(/^ptr-status-verify=/), txtName: '_ptr-status.status.acme.test' }]);
+    expect(page.domains).toEqual([
+      {
+        domain: 'status.acme.test',
+        verified: false,
+        verifyToken: expect.stringMatching(/^ptr-status-verify=/),
+        txtName: '_ptr-status.status.acme.test',
+        expiresAt: t.clock.t + 7 * DAY,
+      },
+    ]);
     // invalid / forbidden domains
     for (const d of ['localhost', '10.0.0.1', 'analytics.example.com', 'x.analytics.example.com', 'nodot', 'a..b']) {
       expect((await api(t.app, cookie, 'PATCH', `/api/status-pages/${page.uid}`, { domains: [d] })).statusCode, d).toBe(400);
     }
-    // a domain belongs to one page only
+    // another page may claim the same domain while it is unverified (no squatting, no oracle)
     const other = await createPage(t.app, cookie, site, { slug: 'dom2', title: 'D2' });
-    expect((await api(t.app, cookie, 'PATCH', `/api/status-pages/${other.uid}`, { domains: ['status.acme.test'] })).statusCode).toBe(409);
+    expect((await api(t.app, cookie, 'PATCH', `/api/status-pages/${other.uid}`, { domains: ['status.acme.test'] })).statusCode).toBe(200);
 
     expect(statusPageForHost(t.ctx, 'status.acme.test')).toBeNull();
     const original = txtLookup.resolve;
@@ -589,6 +649,9 @@ describe('custom domains', () => {
       txtLookup.resolve = original;
     }
     expect(queried).toEqual(['_ptr-status.status.acme.test', '_ptr-status.status.acme.test']);
+    // the first to verify won: the other page's pending claim is gone
+    const otherNow = (await api(t.app, cookie, 'GET', `/api/status-pages/${other.uid}`)).json() as { statusPage: PageJson };
+    expect(otherNow.statusPage.domains).toEqual([]);
     expect(statusPageForHost(t.ctx, 'STATUS.acme.test:443')).toBe('dom');
     const host = await pub(t.app, '/api/public/status-host', { headers: { host: 'status.acme.test' } });
     expect(host.json()).toEqual({ slug: 'dom' });
@@ -603,6 +666,62 @@ describe('custom domains', () => {
     expect(statusPageForHost(t.ctx, 'status.acme.test')).toBe('dom');
     await api(t.app, cookie, 'PATCH', `/api/status-pages/${page.uid}`, { domains: [] });
     expect(statusPageForHost(t.ctx, 'status.acme.test')).toBeNull();
+  });
+
+  it('members cannot squat or probe other tenants\' domains; first to verify wins; claims expire', async () => {
+    const c = await createCloudApp();
+    t = c;
+    const a = await signupMember(c, 'a@example.org');
+    const b = await signupMember(c, 'b@example.org');
+    const siteA = await createSite(c.app, a.cookie, 'Alpha');
+    const siteB = await createSite(c.app, b.cookie, 'Beta');
+    const pageA = await createPage(c.app, a.cookie, siteA, { slug: 'alpha', title: 'A', published: true, domains: ['status.b-corp.test'] });
+    // B adds its own domain although A claimed it: same answer as for an unclaimed domain
+    const resB = await api(c.app, b.cookie, 'POST', `/api/sites/${siteB}/status-pages`, { slug: 'beta', title: 'B', published: true, domains: ['status.b-corp.test'] });
+    const resFree = await api(c.app, b.cookie, 'PATCH', `/api/status-pages/${(resB.json() as { statusPage: PageJson }).statusPage.uid}`, {
+      domains: ['status.b-corp.test', 'free.b-corp.test'],
+    });
+    expect(resB.statusCode).toBe(201);
+    expect(resFree.statusCode).toBe(200);
+    const pageB = (resFree.json() as { statusPage: PageJson }).statusPage;
+    expect(pageB.domains.map((d) => d.verified)).toEqual([false, false]);
+    const tokenA = pageA.domains[0]?.verifyToken as string;
+    const tokenB = pageB.domains.find((d) => d.domain === 'status.b-corp.test')?.verifyToken as string;
+    expect(tokenA).not.toBe(tokenB);
+    const original = txtLookup.resolve;
+    let records: string[] = [];
+    txtLookup.resolve = async () => records;
+    const verify = async (cookie: string, uid: string, domain: string) =>
+      (await api(c.app, cookie, 'POST', `/api/status-pages/${uid}/domains/verify`, { domain })).json() as { domain: { verified: boolean } };
+    try {
+      // A cannot verify without DNS control; B (the DNS owner) can
+      records = [tokenB];
+      expect((await verify(a.cookie, pageA.uid, 'status.b-corp.test')).domain.verified).toBe(false);
+      expect((await verify(b.cookie, pageB.uid, 'status.b-corp.test')).domain.verified).toBe(true);
+      expect(statusPageForHost(c.ctx, 'status.b-corp.test')).toBe('beta');
+      // A's pending claim was dropped
+      const aNow = (await api(c.app, a.cookie, 'GET', `/api/status-pages/${pageA.uid}`)).json() as { statusPage: PageJson };
+      expect(aNow.statusPage.domains).toEqual([]);
+      // A re-adds it and even publishes both tokens: the first verification keeps the domain
+      const again = (await api(c.app, a.cookie, 'PATCH', `/api/status-pages/${pageA.uid}`, { domains: ['status.b-corp.test'] })).json() as {
+        statusPage: PageJson;
+      };
+      records = [tokenB, again.statusPage.domains[0]?.verifyToken as string];
+      expect((await verify(a.cookie, pageA.uid, 'status.b-corp.test')).domain.verified).toBe(false);
+      expect(statusPageForHost(c.ctx, 'status.b-corp.test')).toBe('beta');
+      // once the DNS owner only publishes A's token (the domain changed hands), A takes over
+      records = [again.statusPage.domains[0]?.verifyToken as string];
+      expect((await verify(a.cookie, pageA.uid, 'status.b-corp.test')).domain.verified).toBe(true);
+      expect(statusPageForHost(c.ctx, 'status.b-corp.test')).toBe('alpha');
+    } finally {
+      txtLookup.resolve = original;
+    }
+    // unverified claims expire after 7 days
+    c.clock.t += 7 * DAY + 1;
+    const bLater = (await api(c.app, b.cookie, 'GET', `/api/status-pages/${pageB.uid}`)).json() as { statusPage: PageJson };
+    expect(bLater.statusPage.domains.map((d) => d.domain)).toEqual([]);
+    const count = c.ctx.db.prepare("SELECT COUNT(*) AS n FROM status_page_domains WHERE domain = 'free.b-corp.test'").get() as { n: number };
+    expect(count.n).toBe(0);
   });
 
   it('cookies are never set by public endpoints', async () => {

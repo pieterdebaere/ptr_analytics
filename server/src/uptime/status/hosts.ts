@@ -68,7 +68,8 @@ function statusSlug(request: FastifyRequest): string | null {
     const slug = (request.params as { slug?: unknown }).slug;
     return typeof slug === 'string' ? slug : null;
   }
-  if (route !== undefined) return null;
+  // Unrouted, or the static-file wildcard (which falls through to the SPA's index.html).
+  if (route !== undefined && route !== '/*') return null;
   const m = STATUS_PATH_RE.exec(pathOf(request.url));
   if (!m) return null;
   let slug: string;

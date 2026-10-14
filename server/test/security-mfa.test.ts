@@ -370,6 +370,20 @@ describe('REQUIRE_MFA_FOR_ADMINS', () => {
     // cannot switch it off again
     expect((await api(t.app, cookie, 'POST', '/api/auth/mfa/disable', { password: ADMIN_PASSWORD, code: '123456' })).statusCode).toBe(409);
   });
+
+  it('also applies to viewers (they can read every tenant)', async () => {
+    t = await createTestApp({ env: { REQUIRE_MFA_FOR_ADMINS: 'true' } });
+    const admin = await adminCookie();
+    await enrol(t, admin);
+    t.clock.t += 60_000;
+    // the enrolment revoked the other sessions; sign in again with the second factor
+    expect((await api(t.app, admin, 'POST', '/api/users', { email: 'viewer@example.com', password: 'viewer password 1', role: 'viewer' })).statusCode).toBe(201);
+    const viewer = cookieFrom(await loginRaw(t.app, 'viewer@example.com', 'viewer password 1'));
+    expect((await api(t.app, viewer, 'GET', '/api/sites')).json()).toEqual({ error: 'mfa_required', code: 'mfa_required' });
+    expect((await api(t.app, viewer, 'GET', '/api/auth/mfa')).json()).toMatchObject({ required: true });
+    await enrol(t, viewer, 'viewer password 1');
+    expect((await api(t.app, viewer, 'GET', '/api/sites')).statusCode).toBe(200);
+  });
 });
 
 describe('hosted mode: e-mail flows never bypass MFA', () => {
@@ -440,7 +454,12 @@ describe('cli mfa-reset', () => {
     const clock = { t: Date.UTC(2026, 5, 15, 12) };
     const app = await buildApp(loadConfig(env), { logger: false, now: () => clock.t });
     t = { app, ctx: app.ctx, clock, fixtures };
-    await enrol(t, await adminCookie());
+    const cookie = await adminCookie();
+    const { key } = await enrol(t, cookie);
+    t.clock.t += 60_000;
+    expect(
+      (await api(t.app, cookie, 'POST', '/api/api-keys', { name: 'ci', scopes: ['read'], password: ADMIN_PASSWORD, code: totp(key, t.clock.t) })).statusCode,
+    ).toBe(201);
     expect((t.ctx.db.prepare('SELECT COUNT(*) AS n FROM user_mfa').get() as { n: number }).n).toBe(1);
     await app.close();
     const out: string[] = [];
@@ -451,5 +470,156 @@ describe('cli mfa-reset', () => {
     expect((app2.ctx.db.prepare('SELECT COUNT(*) AS n FROM user_mfa').get() as { n: number }).n).toBe(0);
     expect((app2.ctx.db.prepare('SELECT COUNT(*) AS n FROM auth_sessions').get() as { n: number }).n).toBe(0);
     expect((await loginRaw(app2)).json()).toHaveProperty('user');
+    expect((app2.ctx.db.prepare('SELECT COUNT(*) AS n FROM api_keys').get() as { n: number }).n).toBe(0);
+  });
+});
+
+describe('MFA changes need re-authentication (stolen session)', () => {
+  it('setup and enable need the account password; the current session survives', async () => {
+    t = await createTestApp();
+    const victim = await adminCookie();
+    const thief = await adminCookie();
+    // a session alone cannot start or confirm enrolment
+    expect((await api(t.app, thief, 'POST', '/api/auth/mfa/setup')).statusCode).toBe(400);
+    expect((await api(t.app, thief, 'POST', '/api/auth/mfa/setup', { password: 'wrong password 123' })).statusCode).toBe(400);
+    expect((await api(t.app, thief, 'GET', '/api/auth/mfa')).json()).toMatchObject({ pending: false });
+    const setup = await api(t.app, victim, 'POST', '/api/auth/mfa/setup', { password: ADMIN_PASSWORD });
+    expect(setup.statusCode).toBe(200);
+    const key = base32Decode((setup.json() as { secret: string }).secret) as Buffer;
+    // the thief knows no password: the pending secret cannot be confirmed from its session
+    expect((await api(t.app, thief, 'POST', '/api/auth/mfa/enable', { code: totp(key, t.clock.t) })).statusCode).toBe(400);
+    expect((await api(t.app, thief, 'POST', '/api/auth/mfa/enable', { password: 'nope nope nope', code: totp(key, t.clock.t) })).statusCode).toBe(400);
+    expect((await api(t.app, victim, 'GET', '/api/auth/mfa')).json()).toMatchObject({ enabled: false, pending: true });
+    const ok = await api(t.app, victim, 'POST', '/api/auth/mfa/enable', { password: ADMIN_PASSWORD, code: totp(key, t.clock.t) });
+    expect(ok.statusCode).toBe(200);
+    expect((await api(t.app, victim, 'GET', '/api/auth/me')).statusCode).toBe(200);
+    expect((await api(t.app, thief, 'GET', '/api/auth/me')).statusCode).toBe(401);
+  });
+
+  it('enabling and disabling MFA revoke API keys and e-mail the owner', async () => {
+    const c = await createCloudApp();
+    t = c;
+    const email = 'owner@example.org';
+    const password = 'member password 123';
+    const { cookie } = await signupMember(c, email, password);
+    const key1 = await api(c.app, cookie, 'POST', '/api/api-keys', { name: 'before', scopes: ['read'], password });
+    expect(key1.statusCode).toBe(201);
+    const raw1 = (key1.json() as { key: string }).key;
+    const bearer = (k: string) => c.app.inject({ method: 'GET', url: '/api/sites', headers: { authorization: `Bearer ${k}` } });
+    expect((await bearer(raw1)).statusCode).toBe(200);
+    await c.ctx.mailer?.idle();
+    expect(c.mail.sent.at(-1)?.subject).toContain('new API key');
+    expect(c.mail.sent.at(-1)?.to).toBe(email);
+
+    const { key, recoveryCodes } = await enrol(c, cookie, password);
+    await c.ctx.mailer?.idle();
+    expect(c.mail.sent.at(-1)?.subject).toContain('Two-factor authentication was enabled');
+    expect(c.mail.sent.at(-1)?.text).toContain('1 API key was revoked');
+    expect((await bearer(raw1)).statusCode).toBe(401);
+
+    // with MFA, creating a key needs password + a current factor
+    c.clock.t += 60_000;
+    const noCode = await api(c.app, cookie, 'POST', '/api/api-keys', { name: 'x', scopes: ['read'], password });
+    expect(noCode.statusCode).toBe(400);
+    expect(noCode.json()).toMatchObject({ code: 'mfa_code_required' });
+    expect((await api(c.app, cookie, 'POST', '/api/api-keys', { name: 'x', scopes: ['read'], password, code: '000000' })).statusCode).toBe(400);
+    const key2 = await api(c.app, cookie, 'POST', '/api/api-keys', { name: 'after', scopes: ['read'], password, code: totp(key, c.clock.t) });
+    expect(key2.statusCode).toBe(201);
+    const raw2 = (key2.json() as { key: string }).key;
+
+    const regen = await api(c.app, cookie, 'POST', '/api/auth/mfa/recovery-codes', { password, recoveryCode: recoveryCodes[0] });
+    expect(regen.statusCode).toBe(200);
+    await c.ctx.mailer?.idle();
+    expect(c.mail.sent.at(-1)?.subject).toContain('New recovery codes');
+
+    const fresh = (regen.json() as { recoveryCodes: string[] }).recoveryCodes;
+    expect((await api(c.app, cookie, 'POST', '/api/auth/mfa/disable', { password, recoveryCode: fresh[0] })).statusCode).toBe(204);
+    await c.ctx.mailer?.idle();
+    expect(c.mail.sent.at(-1)?.subject).toContain('turned off');
+    expect((await bearer(raw2)).statusCode).toBe(401);
+    // the session that made the change stays signed in
+    expect((await api(c.app, cookie, 'GET', '/api/auth/me')).statusCode).toBe(200);
+    for (const m of c.mail.sent) {
+      expect(m.text).not.toContain(raw1);
+      expect(m.text).not.toContain(raw2);
+    }
+  });
+
+  it('e-mails the owner after repeated wrong codes', async () => {
+    const c = await createCloudApp();
+    t = c;
+    const email = 'target@example.org';
+    const password = 'member password 123';
+    const { cookie } = await signupMember(c, email, password);
+    await enrol(c, cookie, password);
+    await c.ctx.mailer?.idle();
+    const before = c.mail.sent.length;
+    const { mfaToken } = (await loginRaw(c.app, email, password)).json() as { mfaToken: string };
+    for (let i = 0; i < 5; i++) await mfaLogin(c.app, { mfaToken, code: '000000' });
+    await c.ctx.mailer?.idle();
+    const alerts = c.mail.sent.slice(before).filter((m) => m.subject.includes('failed sign-in codes'));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.to).toBe(email);
+  });
+});
+
+describe('API keys do not survive password changes', () => {
+  it('password change, admin reset and hosted reset revoke every key', async () => {
+    t = await createTestApp();
+    const admin = await adminCookie();
+    const mk = async (cookie: string, password: string): Promise<string> => {
+      const r = await api(t.app, cookie, 'POST', '/api/api-keys', { name: 'k', scopes: ['read', 'metrics'], password });
+      expect(r.statusCode, r.body).toBe(201);
+      return (r.json() as { key: string }).key;
+    };
+    const status = async (k: string): Promise<number> =>
+      (await t.app.inject({ method: 'GET', url: '/api/sites', headers: { authorization: `Bearer ${k}` } })).statusCode;
+    // a session alone cannot mint a key
+    expect((await api(t.app, admin, 'POST', '/api/api-keys', { name: 'k', scopes: ['read'] })).statusCode).toBe(400);
+    expect((await api(t.app, admin, 'POST', '/api/api-keys', { name: 'k', scopes: ['read'], password: 'wrong password 1' })).statusCode).toBe(400);
+    const k1 = await mk(admin, ADMIN_PASSWORD);
+    expect(await status(k1)).toBe(200);
+    expect((await api(t.app, admin, 'POST', '/api/auth/password', { currentPassword: ADMIN_PASSWORD, newPassword: 'a brand new password' })).statusCode).toBe(204);
+    expect(await status(k1)).toBe(401);
+    // an admin setting another user's password
+    expect((await api(t.app, admin, 'POST', '/api/users', { email: 'v@example.com', password: 'viewer password 1', role: 'viewer' })).statusCode).toBe(201);
+    const viewer = cookieFrom(await loginRaw(t.app, 'v@example.com', 'viewer password 1'));
+    const k2 = await mk(viewer, 'viewer password 1');
+    const id = t.ctx.users.byEmail('v@example.com')?.id;
+    expect((await api(t.app, admin, 'PATCH', `/api/users/${id}`, { password: 'reset password 99' })).statusCode).toBe(200);
+    expect(await status(k2)).toBe(401);
+  });
+
+  it('a hosted password reset revokes keys too', async () => {
+    const c = await createCloudApp();
+    t = c;
+    const email = 'reset@example.org';
+    const { cookie } = await signupMember(c, email, 'member password 123');
+    const r = await api(c.app, cookie, 'POST', '/api/api-keys', { name: 'k', scopes: ['read'], password: 'member password 123' });
+    const k = (r.json() as { key: string }).key;
+    expect((await post(c.app, '/api/auth/forgot', { email })).statusCode).toBe(202);
+    await c.ctx.mailer?.idle();
+    const token = tokenFromMail(c.mail.sent.filter((m) => m.text.includes('/reset#token=')).at(-1), 'reset');
+    expect((await post(c.app, '/api/auth/reset', { token, password: 'reset password 456' })).statusCode).toBe(204);
+    expect((await c.app.inject({ method: 'GET', url: '/api/sites', headers: { authorization: `Bearer ${k}` } })).statusCode).toBe(401);
+  });
+
+  it('cli reset-password revokes keys', async () => {
+    const fixtures = makeFixtures();
+    const dataDir = path.join(fixtures.root, 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const env = { DATA_DIR: dataDir, ADMIN_EMAIL, ADMIN_PASSWORD, TRACKER_FILE: fixtures.trackerFile, DASHBOARD_DIR: fixtures.dashboardDir };
+    const clock = { t: Date.UTC(2026, 5, 15, 12) };
+    const app = await buildApp(loadConfig(env), { logger: false, now: () => clock.t });
+    t = { app, ctx: app.ctx, clock, fixtures };
+    const cookie = await adminCookie();
+    expect((await api(t.app, cookie, 'POST', '/api/api-keys', { name: 'k', scopes: ['read'], password: ADMIN_PASSWORD })).statusCode).toBe(201);
+    await app.close();
+    const out: string[] = [];
+    await runCli(['reset-password', ADMIN_EMAIL], env, (s) => out.push(s));
+    expect(out.join('\n')).toContain('1 API key(s) revoked');
+    const app2 = await buildApp(loadConfig(env), { logger: false, now: () => clock.t });
+    t = { app: app2, ctx: app2.ctx, clock, fixtures };
+    expect((app2.ctx.db.prepare('SELECT COUNT(*) AS n FROM api_keys').get() as { n: number }).n).toBe(0);
   });
 });

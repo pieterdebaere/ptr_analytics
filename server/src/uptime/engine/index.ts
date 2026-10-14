@@ -721,19 +721,26 @@ export class Engine implements EngineControl, EngineHandle {
     const wall = this.clock.wall();
     this.reevaluateMaintenance();
     const list = [...this.maint.active(), ...this.maintRepo.listPausedAnnounced()];
+    const due: Array<{ m: (typeof list)[number]; start: number | null }> = [];
     for (const m of list) {
       const w = m.active ? this.maint.window(m, wall) : null;
       const start = w ? w.start : null;
-      if (start === m.notifiedStart) continue;
-      if (start !== null && m.notifiedStart !== null && start !== m.notifiedStart) {
-        // a new window while the previous one was never closed: close it first
-        this.processor.maintenanceNotice('maint_end', m, this.maintRepo.monitorIds(m.id));
-      }
-      const event = start !== null ? 'maint_start' : 'maint_end';
-      this.processor.maintenanceNotice(event, m, this.maintRepo.monitorIds(m.id));
-      this.maintRepo.setNotifiedStart(m.id, start);
-      m.notifiedStart = start; // the index keeps this record until its next reload
+      if (start !== m.notifiedStart) due.push({ m, start });
     }
+    if (due.length === 0) return;
+    // One transaction for all bookkeeping writes of this tick.
+    this.ctx.db.transaction(() => {
+      for (const { m, start } of due) {
+        const monitorIds = this.maintRepo.monitorIds(m.id);
+        if (start !== null && m.notifiedStart !== null) {
+          // a new window while the previous one was never closed: close it first
+          this.processor.maintenanceNotice('maint_end', m, monitorIds);
+        }
+        this.processor.maintenanceNotice(start !== null ? 'maint_start' : 'maint_end', m, monitorIds);
+        this.maintRepo.setNotifiedStart(m.id, start);
+      }
+    })();
+    for (const { m, start } of due) m.notifiedStart = start; // the index keeps these records until its next reload
   }
 
   private guard(fn: () => void): void {
