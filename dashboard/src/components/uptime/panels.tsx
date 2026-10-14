@@ -32,6 +32,7 @@ import { daysUntil, expiryTone, formatDateLong, formatDateTime, formatDurationMs
 import { isSafePushUrl, maskPushUrl, pushExample, PUSH_EXAMPLE_LANGS, type PushExampleLang } from './push';
 import { StatusPill } from './status';
 import { toast } from './toast';
+import { everyText } from './monitor-form';
 
 function KV({ label, children, mono }: { label: string; children: ReactNode; mono?: boolean }) {
   return (
@@ -117,7 +118,7 @@ export function EventsCard({ uid, refreshKey }: { uid: string; refreshKey: numbe
 }
 
 function statusBg(s: number): string {
-  return { down: 'bg-poor', up: 'bg-good', pending: 'bg-warn', maintenance: 'bg-chart-1', unknown: 'bg-muted-foreground/40' }[statusName(s)];
+  return { down: 'bg-poor', up: 'bg-good', pending: 'bg-warn', maintenance: 'bg-maint', unknown: 'bg-muted-foreground/40' }[statusName(s)];
 }
 
 /* ---------------- outages ---------------- */
@@ -154,7 +155,7 @@ export function OutagesCard({ uid, refreshKey }: { uid: string; refreshKey: numb
                     <time dateTime={new Date(o.startedAt).toISOString()}>{formatDateTime(o.startedAt)}</time>
                   </TableCell>
                   <TableCell className="text-right text-xs tabular-nums">
-                    {o.endedAt === null ? <span className="font-medium text-poor">Ongoing · {formatDurationMs(now - o.startedAt)}</span> : formatDurationMs(o.endedAt - o.startedAt)}
+                    {o.endedAt === null ? <span className="font-medium text-poor-text">Ongoing · {formatDurationMs(now - o.startedAt)}</span> : formatDurationMs(o.endedAt - o.startedAt)}
                   </TableCell>
                   <TableCell className="pr-4 text-xs text-muted-foreground">
                     <span className="bidi-isolate block truncate" title={o.cause ? displayText(o.cause) : undefined}>
@@ -182,12 +183,12 @@ export function CertificateCard({ monitor }: { monitor: Monitor }) {
     <Card className="gap-3">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm">
-          {ok ? <ShieldCheckIcon className="size-4 text-good" aria-hidden="true" /> : <ShieldAlertIcon className={cn('size-4', tls ? 'text-poor' : 'text-muted-foreground')} aria-hidden="true" />}
+          {ok ? <ShieldCheckIcon className="size-4 text-good-text" aria-hidden="true" /> : <ShieldAlertIcon className={cn('size-4', tls ? 'text-poor-text' : 'text-muted-foreground')} aria-hidden="true" />}
           TLS certificate
         </CardTitle>
         {tls ? (
           <CardAction>
-            <Badge variant="outline" className={cn(ok ? 'border-good/40 text-good' : 'border-poor/40 text-poor')}>
+            <Badge variant="outline" className={cn(ok ? 'border-good/40 text-good-text' : 'border-poor/40 text-poor-text')}>
               {ok ? 'Valid' : 'Invalid'}
             </Badge>
           </CardAction>
@@ -202,7 +203,7 @@ export function CertificateCard({ monitor }: { monitor: Monitor }) {
               <span className={cn('text-3xl font-semibold tracking-tight tabular-nums', expiryTone(days))}>{days ?? '–'}</span>
               <span className="text-sm text-muted-foreground">days left · valid until {formatDateLong(tls.notAfter)}</span>
             </div>
-            {tls.error ? <p className="bidi-isolate rounded-md bg-poor/8 px-2.5 py-1.5 text-xs text-poor">{displayText(tls.error)}</p> : null}
+            {tls.error ? <p className="bidi-isolate rounded-md bg-poor/8 px-2.5 py-1.5 text-xs text-poor-text">{displayText(tls.error)}</p> : null}
             <dl className="flex flex-col gap-2">
               {tls.subject ? <KV label="Subject">{displayText(tls.subject)}</KV> : null}
               <KV label="Issuer">{tls.issuer ? displayText(tls.issuer) : '–'}</KV>
@@ -309,7 +310,7 @@ export function PushPanel({ monitor, pushUrl, onPushUrl, canManage }: { monitor:
           Push URL
         </CardTitle>
         <CardDescription>
-          Call this URL from your job at least every {formatDurationMs(monitor.intervalS * 1000)}. Without a push in that time the monitor goes down.
+          Call this URL from your job at least {everyText(monitor.intervalS)}. Without a push in that time the monitor goes down.
           Optional parameters: <code>status=up|down</code>, <code>msg</code>, <code>ping</code> (ms).
         </CardDescription>
       </CardHeader>
@@ -325,7 +326,7 @@ export function PushPanel({ monitor, pushUrl, onPushUrl, canManage }: { monitor:
               </Button>
               <CopyButton text={url} className="h-8 bg-background" />
             </div>
-            <p className="text-xs text-warn">Copy it now: for your security it is shown only once and cannot be displayed again later.</p>
+            <p className="text-xs text-warn-text">Copy it now: for your security it is shown only once and cannot be displayed again later.</p>
           </div>
         ) : (
           <p className="rounded-lg border border-dashed px-3 py-2.5 text-sm text-muted-foreground">

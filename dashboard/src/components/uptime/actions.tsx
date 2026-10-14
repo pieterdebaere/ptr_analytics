@@ -177,7 +177,7 @@ export function MonitorActionsMenu({ monitor, canManage, className, ...h }: Moni
     <>
       <DropdownMenu>
         <DropdownMenuTrigger
-          render={<Button variant="ghost" size="icon-sm" className={cn('text-muted-foreground', className)} aria-label={`Actions for ${displayText(monitor.name)}`} />}
+          render={<Button variant="ghost" size="icon-sm" className={cn('text-muted-foreground max-sm:size-8', className)} aria-label={`Actions for ${displayText(monitor.name)}`} />}
         >
           {a.busy ? <RefreshCwIcon className="animate-spin" aria-hidden="true" /> : <MoreHorizontalIcon aria-hidden="true" />}
         </DropdownMenuTrigger>

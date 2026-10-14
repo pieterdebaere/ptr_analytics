@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
-import { BellIcon, CreditCardIcon, LogOutIcon, ShieldCheckIcon, UserRoundIcon, WrenchIcon } from 'lucide-react';
+import { CreditCardIcon, LogOutIcon, ShieldCheckIcon, UserRoundIcon } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -61,14 +61,6 @@ function UserMenu() {
             <UserRoundIcon aria-hidden="true" />
             {user.role === 'admin' ? 'Account & users' : 'Account'}
           </DropdownMenuItem>
-          <DropdownMenuItem render={<Link to="/notifications" />}>
-            <BellIcon aria-hidden="true" />
-            Notifications
-          </DropdownMenuItem>
-          <DropdownMenuItem render={<Link to="/maintenance" />}>
-            <WrenchIcon aria-hidden="true" />
-            Maintenance
-          </DropdownMenuItem>
           <DropdownMenuItem render={<Link to="/settings/security" />}>
             <ShieldCheckIcon aria-hidden="true" />
             Security
@@ -97,7 +89,7 @@ function NavItem({ to, end, children }: { to: string; end?: boolean; children: R
       end={end}
       className={({ isActive }) =>
         cn(
-          'inline-flex h-8 items-center rounded-md px-2.5 text-sm font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50',
+          'inline-flex h-8 shrink-0 items-center rounded-md px-2.5 text-sm font-medium whitespace-nowrap text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:ring-inset',
           isActive && 'bg-muted text-foreground',
         )
       }
@@ -111,6 +103,15 @@ export function AppLayout() {
   const { user, config, error, retry } = useAuth();
   const showBilling = useShowBilling();
   const location = useLocation();
+  const navRef = useRef<HTMLElement>(null);
+  // Mobile: the nav is a horizontally scrolling row; keep the active item in view.
+  useEffect(() => {
+    const nav = navRef.current;
+    const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
+    const left = active.offsetLeft - nav.offsetLeft;
+    if (left < nav.scrollLeft || left + active.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left - 16;
+  }, [location.pathname, user]);
 
   if (user === undefined) {
     return (
@@ -126,16 +127,27 @@ export function AppLayout() {
   return (
     <div className="flex min-h-dvh flex-col">
       <header data-slot="navbar" className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70">
-        <div className={cn(CONTAINER, 'flex h-14 items-center gap-2')}>
-          <Link to="/" className="mr-2 rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50" aria-label="PTR Analytics home">
+        <div className={cn(CONTAINER, 'flex flex-wrap items-center gap-x-2 md:h-14 md:flex-nowrap')}>
+          <Link
+            to="/"
+            className="mr-2 inline-flex h-14 min-w-8 items-center rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:h-9"
+            aria-label="PTR Analytics home"
+          >
             <Logo compact />
           </Link>
-          <nav className="flex items-center gap-1" aria-label="Main">
+          {/* < md: second row that scrolls sideways; >= md: inline after the logo */}
+          <nav
+            ref={navRef}
+            className="scrollbar-none order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto border-t px-4 py-1.5 sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-6 md:order-none md:mx-0 md:w-auto md:border-t-0 md:p-0"
+            aria-label="Main"
+          >
             <NavItem to="/" end>
               All sites
             </NavItem>
             <NavItem to="/uptime">Uptime</NavItem>
             <NavItem to="/status-pages">Status pages</NavItem>
+            <NavItem to="/notifications">Notifications</NavItem>
+            <NavItem to="/maintenance">Maintenance</NavItem>
             {showBilling ? <NavItem to="/billing">Billing</NavItem> : null}
           </nav>
           <div className="ml-auto flex items-center gap-1">

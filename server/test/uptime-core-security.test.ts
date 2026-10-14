@@ -350,40 +350,39 @@ describe('HIGH 2: cron maintenance windows are cheap to evaluate', () => {
       }
     }
 
+    /** Median of `n` runs, each in a new minute (memoised answers never help); robust to GC / CI noise. */
+    async function median(n: number, fn: () => Promise<void> | void): Promise<number> {
+      const times: number[] = [];
+      for (let i = 0; i < n; i++) {
+        t.clock.t += 61 * SEC;
+        const start = performance.now();
+        await fn();
+        times.push(performance.now() - start);
+      }
+      return times.sort((x, y) => x - y)[Math.floor(n / 2)] as number;
+    }
+
     it('100 hostile cron windows: GET /api/maintenances < 50 ms, engine tick < 20 ms', async () => {
       await createMonitor(a.cookie, siteA);
-      { const s0 = performance.now(); await api(t.app, a.cookie, 'GET', '/api/maintenances'); console.log('BENCH empty', (performance.now()-s0).toFixed(2)); }
-      { const s0 = performance.now(); await api(t.app, a.cookie, 'GET', '/api/tags'); console.log('BENCH tags', (performance.now()-s0).toFixed(2)); }
-      hostile(100, Date.UTC(2099, 11, 31, 23, 59));
-      { const s0 = performance.now(); const list = new MaintenanceRepo(t.ctx.db).list(a.id); for (const x of list) maintenanceInfo(x, t.ctx.now()); console.log('BENCH info', (performance.now()-s0).toFixed(2)); }
-      let start = performance.now();
-      let res = await api(t.app, a.cookie, 'GET', '/api/maintenances');
-      let ms = performance.now() - start;
-      expect(res.statusCode).toBe(200);
-      expect((res.json() as { maintenances: Array<{ status: string; nextWindow: unknown }> }).maintenances).toHaveLength(100);
-      console.log("BENCH get", ms.toFixed(2));
-      expect(ms).toBeLessThan(50);
       const e = startEngine();
-      start = performance.now();
-      e.maintenanceTick();
-      ms = performance.now() - start;
-      console.log("BENCH tick", ms.toFixed(2));
-      expect(ms).toBeLessThan(20);
-      // past startsAt: every window is open right now (one per minute) — still cheap
-      t.ctx.db.prepare('DELETE FROM maintenances').run();
-      hostile(100, Date.UTC(2020, 0, 1));
-      e.maintenanceChanged();
-      t.clock.t += 61 * SEC; // a new minute: no memoised answers
-      start = performance.now();
-      res = await api(t.app, a.cookie, 'GET', '/api/maintenances');
-      ms = performance.now() - start;
-      expect(res.statusCode).toBe(200);
-      expect((res.json() as { maintenances: Array<{ status: string }> }).maintenances.every((x) => x.status === 'under-maintenance')).toBe(true);
-      console.log("BENCH get", ms.toFixed(2));
-      expect(ms).toBeLessThan(50);
-      start = performance.now();
-      e.maintenanceTick();
-      expect(performance.now() - start).toBeLessThan(20);
+      for (const startsAt of [Date.UTC(2099, 11, 31, 23, 59), Date.UTC(2020, 0, 1)]) {
+        t.ctx.db.prepare('DELETE FROM maintenances').run();
+        hostile(100, startsAt);
+        e.maintenanceChanged();
+        // before the fix: 210–300 ms for ONE such window, 12 s for 57 (audit HIGH 2)
+        const list = async (): Promise<void> => {
+          const res = await api(t.app, a.cookie, 'GET', '/api/maintenances');
+          expect(res.statusCode).toBe(200);
+          const items = (res.json() as { maintenances: Array<{ status: string; nextWindow: unknown }> }).maintenances;
+          expect(items).toHaveLength(100);
+          // far future: scheduled with a next window; past start: every window is open right now
+          expect(items.every((x) => x.status === (startsAt > t.ctx.now() ? 'scheduled' : 'under-maintenance'))).toBe(true);
+          expect(items.every((x) => x.nextWindow !== null)).toBe(true);
+        };
+        await list(); // warm-up (JIT, time-zone data)
+        expect(await median(5, list)).toBeLessThan(50); // measured ≈ 4–5 ms
+        expect(await median(5, () => e.maintenanceTick())).toBeLessThan(20); // measured ≈ 0.2–4 ms
+      }
     });
 
     it('caps cron cardinality and cron windows per member; rate-limits the endpoints', async () => {

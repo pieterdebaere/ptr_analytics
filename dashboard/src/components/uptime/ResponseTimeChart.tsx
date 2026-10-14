@@ -190,7 +190,7 @@ export function ResponseTimeChart({
             return (
               <TooltipContent title={tipFmt.format(t)} rows={rows}>
                 {up !== null && up < 1 ? <div className="text-xs text-chart-tooltip-muted">Uptime {(up * 100).toFixed(2)}%</div> : null}
-                {point.status === 0 ? <div className="text-xs font-medium text-poor">Down</div> : point.status === 3 ? <div className="text-xs text-chart-tooltip-muted">Maintenance</div> : null}
+                {point.status === 0 ? <div className="text-xs font-medium text-poor-text">Down</div> : point.status === 3 ? <div className="text-xs text-chart-tooltip-muted">Maintenance</div> : null}
               </TooltipContent>
             );
           }}

@@ -94,6 +94,31 @@ function dayOffset(d: LocalDate, tz: string): number | null {
   return off;
 }
 
+/** Last offset seen per zone: the first guess of fastLocalDate(). */
+const lastOffset = new Map<string, number>();
+
+/**
+ * localDateOf() without Intl in the common case: a local day whose offset is constant (cached per
+ * zone and day) contains `t` exactly when start ≤ t + offset < start + 1 day.
+ */
+export function fastLocalDate(t: number, tz: string): LocalDate {
+  const guess = lastOffset.get(tz) ?? 0;
+  const base = new Date(t + guess);
+  const d0: LocalDate = { y: base.getUTCFullYear(), m: base.getUTCMonth() + 1, d: base.getUTCDate() };
+  for (const c of [d0, addDays(d0, -1), addDays(d0, 1)]) {
+    const off = dayOffset(c, tz);
+    if (off === null) continue;
+    const local = t + off;
+    const start = dateKey(c);
+    if (local >= start && local < start + DAY) {
+      if (lastOffset.size > 1000) lastOffset.clear();
+      lastOffset.set(tz, off);
+      return c;
+    }
+  }
+  return localDateOf(t, tz);
+}
+
 /** zonedTime() with a fast path for days without a DST transition. */
 export function localInstant(d: LocalDate, h: number, mi: number, tz: string): number {
   const off = dayOffset(d, tz);
@@ -105,7 +130,7 @@ const weekday = (d: LocalDate): number => new Date(dateKey(d)).getUTCDay();
 /** First local day of an `interval` schedule (computed once per evaluation, not per scanned day). */
 function intervalFirst(def: MaintenanceDef): LocalDate | null {
   if (def.strategy !== 'interval' || def.startsAt === null || !def.intervalDays || def.intervalDays < 1) return null;
-  return localDateOf(def.startsAt, def.tz);
+  return fastLocalDate(def.startsAt, def.tz);
 }
 
 /** Does a day-based strategy (weekly, monthly, interval) start a window on local date `d`? */
@@ -165,10 +190,18 @@ export function cronCombinations(spec: CronSpec): number {
   return spec.hours.length * spec.minutes.length;
 }
 
-/** Instant of the i-th (ascending) hour×minute combination of `spec` on local day d. */
-function cronAt(spec: CronSpec, d: LocalDate, tz: string, i: number): number {
+/**
+ * Instants of the hour×minute combinations of `spec` on local day d, by ascending index. On days
+ * without a transition this is plain arithmetic with the day's cached offset.
+ */
+function cronInstants(spec: CronSpec, d: LocalDate, tz: string): (i: number) => number {
   const m = spec.minutes.length;
-  return localInstant(d, spec.hours[Math.floor(i / m)] as number, spec.minutes[i % m] as number, tz);
+  const off = dayOffset(d, tz);
+  if (off !== null) {
+    const base = dateKey(d) - off;
+    return (i) => base + (spec.hours[Math.floor(i / m)] as number) * HOUR + (spec.minutes[i % m] as number) * 60_000;
+  }
+  return (i) => zonedTime(d.y, d.m, d.d, spec.hours[Math.floor(i / m)] as number, spec.minutes[i % m] as number, tz);
 }
 
 /**
@@ -180,17 +213,18 @@ function cronLatest(spec: CronSpec, d: LocalDate, tz: string, limit: number): nu
   if (!cronDayMatches(spec, d.y, d.m, d.d)) return null;
   const n = cronCombinations(spec);
   if (n === 0) return null;
-  const last = cronAt(spec, d, tz, n - 1);
+  const at = cronInstants(spec, d, tz);
+  const last = at(n - 1);
   if (last <= limit) return last;
-  if (cronAt(spec, d, tz, 0) > limit) return null;
+  if (at(0) > limit) return null;
   let lo = 0; // at(lo) <= limit
   let hi = n - 1; // at(hi) > limit
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
-    if (cronAt(spec, d, tz, mid) <= limit) lo = mid;
+    if (at(mid) <= limit) lo = mid;
     else hi = mid;
   }
-  return cronAt(spec, d, tz, lo);
+  return at(lo);
 }
 
 /** First occurrence on local day d at or after `from` (null when none). */
@@ -198,17 +232,18 @@ function cronFirst(spec: CronSpec, d: LocalDate, tz: string, from: number): numb
   if (!cronDayMatches(spec, d.y, d.m, d.d)) return null;
   const n = cronCombinations(spec);
   if (n === 0) return null;
-  const first = cronAt(spec, d, tz, 0);
+  const at = cronInstants(spec, d, tz);
+  const first = at(0);
   if (first >= from) return first;
-  if (cronAt(spec, d, tz, n - 1) < from) return null;
+  if (at(n - 1) < from) return null;
   let lo = 0; // at(lo) < from
   let hi = n - 1; // at(hi) >= from
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
-    if (cronAt(spec, d, tz, mid) >= from) hi = mid;
+    if (at(mid) >= from) hi = mid;
     else lo = mid;
   }
-  return cronAt(spec, d, tz, hi);
+  return at(hi);
 }
 
 /** The window containing `now`, or null. Ignores `active` (see currentWindow). */
@@ -226,7 +261,7 @@ function windowAt(def: MaintenanceDef, now: number): Window | null {
       if (def.startsAt !== null && now < def.startsAt - DAY) return null;
       if (def.endsAt !== null && now >= def.endsAt + 2 * DAY) return null;
       const first = intervalFirst(def);
-      const today = localDateOf(now, def.tz);
+      const today = fastLocalDate(now, def.tz);
       // They started today, yesterday or (DST) the day before.
       for (let back = 0; back <= 2; back++) {
         const d = addDays(today, -back);
@@ -243,7 +278,7 @@ function windowAt(def: MaintenanceDef, now: number): Window | null {
       // Windows start in [startsAt, endsAt) and last `dur`: nothing to evaluate outside that.
       if (def.startsAt !== null && now < def.startsAt) return null;
       if (def.endsAt !== null && now >= def.endsAt + dur) return null;
-      const today = localDateOf(now, def.tz);
+      const today = fastLocalDate(now, def.tz);
       const backDays = Math.ceil(dur / DAY) + 1;
       // Latest occurrence <= now: walk days backwards; the first one found is the latest.
       for (let back = 0; back <= backDays; back++) {
@@ -279,7 +314,7 @@ function upcoming(def: MaintenanceDef, now: number): Window | null {
       if (def.endsAt !== null && now >= def.endsAt) return null;
       const first = intervalFirst(def);
       if (def.strategy === 'interval' && first === null) return null;
-      let d = localDateOf(Math.max(now, def.startsAt !== null && def.strategy !== 'interval' ? def.startsAt - DAY : now), def.tz);
+      let d = fastLocalDate(Math.max(now, def.startsAt !== null && def.strategy !== 'interval' ? def.startsAt - DAY : now), def.tz);
       for (let i = 0; i < MAX_SCAN_DAYS; i++, d = addDays(d, 1)) {
         if (!dayMatches(def, d, first)) continue;
         const w = dayWindow(def, d);
@@ -296,7 +331,7 @@ function upcoming(def: MaintenanceDef, now: number): Window | null {
       // First occurrence strictly after now and not before startsAt.
       const from = Math.max(now + 1, def.startsAt ?? Number.NEGATIVE_INFINITY);
       if (def.endsAt !== null && from >= def.endsAt) return null;
-      let d = localDateOf(from, def.tz);
+      let d = fastLocalDate(from, def.tz);
       // Days that do not match are skipped with plain calendar arithmetic (no Intl calls).
       for (let i = 0; i < MAX_SCAN_DAYS; i++, d = addDays(d, 1)) {
         const t = cronFirst(spec, d, def.tz, from);

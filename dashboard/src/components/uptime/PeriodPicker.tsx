@@ -130,7 +130,7 @@ export function PeriodPicker({ value, onChange }: { value: UptimeQuery; onChange
               </p>
             ) : null}
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
               <Button type="submit">Apply</Button>

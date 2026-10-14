@@ -142,7 +142,7 @@ function GeneralSettings({ readOnly, onSaved }: { readOnly: boolean; onSaved: ()
           </div>
           <DomainsInput value={domains} onChange={setDomains} disabled={readOnly} max={maxDomains} />
           {message ? (
-            <p className={message.kind === 'ok' ? 'text-sm text-good' : 'text-sm text-destructive'} role="status">
+            <p className={message.kind === 'ok' ? 'text-sm text-good-text' : 'text-sm text-destructive'} role="status">
               {message.text}
             </p>
           ) : null}

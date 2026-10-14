@@ -5,7 +5,7 @@ import type { DayBar, HeartbeatInterval, HeartbeatPoint } from '@/api/uptime';
 import { statusName } from '@/api/uptime';
 import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
-import { beatClass, dayClass, formatDateTime, formatDay, formatLatency, formatUptime, STATUS_LABELS } from './lib';
+import { beatClass, dayClass, formatDateTime, formatDay, formatLatency, formatUptime, STATUS_LABELS, UPTIME_LEGEND_EXTRA, UPTIME_TIERS } from './lib';
 
 interface Segment {
   key: string | number;
@@ -169,5 +169,23 @@ export function DaysBar({ bars, tz, className }: { bars: readonly DayBar[]; tz?:
       className={className}
       barClassName="h-9 gap-[2px] sm:gap-[3px]"
     />
+  );
+}
+
+/** Colour legend for the 90-day bar (same tiers as uptime percentages, see UPTIME_TIERS). */
+export function UptimeLegend({ className, maintenance = true }: { className?: string; maintenance?: boolean }) {
+  const items = [
+    ...UPTIME_TIERS.map((t) => ({ label: t.label, bar: t.bar })),
+    ...UPTIME_LEGEND_EXTRA.filter((e) => maintenance || e.label !== 'Maintenance'),
+  ];
+  return (
+    <ul className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground', className)} aria-label="Uptime colour legend">
+      {items.map((it) => (
+        <li key={it.label} className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          <span className={cn('size-2.5 rounded-[2px]', it.bar)} aria-hidden="true" />
+          {it.label}
+        </li>
+      ))}
+    </ul>
   );
 }

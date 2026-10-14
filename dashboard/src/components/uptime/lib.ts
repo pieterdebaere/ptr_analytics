@@ -16,12 +16,15 @@ export const STATUS_LABELS: Record<DisplayStatus, string> = {
   unknown: 'No data',
 };
 
-/** Tailwind classes per status: dot/bar background, text colour and a soft badge style. */
+/**
+ * Tailwind classes per status: dot/bar background (`bg`), text colour (`text`, AA-contrast `*-text` tokens),
+ * a soft badge style and a ring. Use `bg` only for non-text marks; words and numbers use `text`.
+ */
 export const STATUS_STYLES: Record<DisplayStatus, { bg: string; text: string; soft: string; ring: string }> = {
-  up: { bg: 'bg-good', text: 'text-good', soft: 'bg-good/12 text-good', ring: 'ring-good/30' },
-  down: { bg: 'bg-poor', text: 'text-poor', soft: 'bg-poor/12 text-poor', ring: 'ring-poor/30' },
-  pending: { bg: 'bg-warn', text: 'text-warn', soft: 'bg-warn/15 text-warn', ring: 'ring-warn/30' },
-  maintenance: { bg: 'bg-chart-1', text: 'text-chart-1', soft: 'bg-chart-1/12 text-chart-1', ring: 'ring-chart-1/30' },
+  up: { bg: 'bg-good', text: 'text-good-text', soft: 'bg-good/12 text-good-text', ring: 'ring-good/30' },
+  down: { bg: 'bg-poor', text: 'text-poor-text', soft: 'bg-poor/12 text-poor-text', ring: 'ring-poor/30' },
+  pending: { bg: 'bg-warn', text: 'text-warn-text', soft: 'bg-warn/15 text-warn-text', ring: 'ring-warn/30' },
+  maintenance: { bg: 'bg-maint', text: 'text-maint-text', soft: 'bg-maint/12 text-maint-text', ring: 'ring-maint/30' },
   paused: { bg: 'bg-muted-foreground/40', text: 'text-muted-foreground', soft: 'bg-muted text-muted-foreground', ring: 'ring-foreground/10' },
   unknown: { bg: 'bg-muted-foreground/25', text: 'text-muted-foreground', soft: 'bg-muted text-muted-foreground', ring: 'ring-foreground/10' },
 };
@@ -49,7 +52,7 @@ export const BEAT_STYLES: Record<StatusName, string> = {
   up: 'bg-good',
   down: 'bg-poor',
   pending: 'bg-warn',
-  maintenance: 'bg-chart-1',
+  maintenance: 'bg-maint',
   unknown: 'bg-muted-foreground/25',
 };
 
@@ -57,13 +60,47 @@ export function beatClass(status: StatusCode): string {
   return BEAT_STYLES[statusName(status)];
 }
 
+/* ---------------- uptime % colour scheme ----------------
+ * One documented scheme for every uptime percentage (monitor stats, lists, 90-day bars, public pages):
+ *   >= 99.9 %  green        (bar: solid green)
+ *   >= 99 %    green        (bar: light green)
+ *   >= 95 %    amber
+ *   <  95 %    red
+ * Days without data are grey, maintenance-only days blue. Text uses the AA `*-text` tokens.
+ */
+export interface UptimeTier {
+  /** lower bound (ratio 0..1, inclusive) */
+  min: number;
+  /** legend label */
+  label: string;
+  /** 90-day bar / swatch background */
+  bar: string;
+  /** text colour for a percentage in this tier */
+  text: string;
+}
+
+export const UPTIME_TIERS: readonly UptimeTier[] = [
+  { min: 0.999, label: '≥ 99.9%', bar: 'bg-good', text: 'text-good-text' },
+  { min: 0.99, label: '99–99.9%', bar: 'bg-good/55', text: 'text-good-text' },
+  { min: 0.95, label: '95–99%', bar: 'bg-warn', text: 'text-warn-text' },
+  { min: 0, label: '< 95%', bar: 'bg-poor', text: 'text-poor-text' },
+];
+
+/** Legend entries for days without a ratio. */
+export const UPTIME_LEGEND_EXTRA = [
+  { label: 'Maintenance', bar: 'bg-maint' },
+  { label: 'No data', bar: 'bg-muted-foreground/20' },
+] as const;
+
+export function uptimeTier(ratio: number | null | undefined): UptimeTier | null {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return null;
+  return UPTIME_TIERS.find((t) => ratio >= t.min) ?? UPTIME_TIERS[UPTIME_TIERS.length - 1]!;
+}
+
 /** Colour of a day in the 90-day bar from its uptime ratio. */
 export function dayClass(upRatio: number | null, maintenance: boolean): string {
-  if (upRatio === null) return maintenance ? 'bg-chart-1' : 'bg-muted-foreground/20';
-  if (upRatio >= 0.999) return 'bg-good';
-  if (upRatio >= 0.98) return 'bg-good/60';
-  if (upRatio >= 0.95) return 'bg-warn';
-  return 'bg-poor';
+  if (upRatio === null) return maintenance ? 'bg-maint' : 'bg-muted-foreground/20';
+  return uptimeTier(upRatio)!.bar;
 }
 
 /* ---------------- formatting ---------------- */
@@ -77,12 +114,9 @@ export function formatUptime(ratio: number | null | undefined, digits = 2): stri
   return `${pct.toFixed(digits)}%`;
 }
 
+/** Text colour for an uptime percentage (same tiers as the 90-day bars, see UPTIME_TIERS). */
 export function uptimeTone(ratio: number | null | undefined): string {
-  if (ratio === null || ratio === undefined) return 'text-muted-foreground';
-  if (ratio >= 0.999) return 'text-good';
-  if (ratio >= 0.98) return 'text-foreground';
-  if (ratio >= 0.95) return 'text-warn';
-  return 'text-poor';
+  return uptimeTier(ratio)?.text ?? 'text-muted-foreground';
 }
 
 export function formatLatency(ms: number | null | undefined): string {
@@ -163,9 +197,9 @@ export function daysUntil(ts: number | null | undefined, now = Date.now()): numb
 
 export function expiryTone(days: number | null): string {
   if (days === null) return 'text-muted-foreground';
-  if (days < 7) return 'text-poor';
-  if (days < 21) return 'text-warn';
-  return 'text-good';
+  if (days < 7) return 'text-poor-text';
+  if (days < 21) return 'text-warn-text';
+  return 'text-good-text';
 }
 
 /* ---------------- monitors ---------------- */

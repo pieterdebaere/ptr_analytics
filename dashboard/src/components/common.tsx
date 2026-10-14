@@ -1,6 +1,7 @@
 // Small shared building blocks on top of the shadcn/ui components.
 import { useEffect, useState, type ReactNode } from 'react';
-import { AlertCircleIcon, ArrowDownRightIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, InfoIcon, Loader2Icon, RotateCwIcon } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { AlertCircleIcon, ArrowDownRightIcon, ArrowLeftIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, InfoIcon, Loader2Icon, RotateCwIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -8,6 +9,27 @@ import { changeTone, formatChange } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 /* ---------------- Page header ---------------- */
+
+/**
+ * The one back-navigation pattern of the app: "← Parent" link above the page title
+ * (e.g. `<BackLink to="/uptime">Uptime</BackLink>`). `label` is the full text for long names.
+ */
+export function BackLink({ to, children, label, className }: { to: string; children: ReactNode; label?: string; className?: string }) {
+  return (
+    <Link
+      to={to}
+      title={label}
+      data-slot="back-link"
+      className={cn(
+        '-ml-1 inline-flex h-8 max-w-full min-w-0 items-center gap-1.5 self-start rounded-md px-1 text-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50',
+        className,
+      )}
+    >
+      <ArrowLeftIcon className="size-4 shrink-0" aria-hidden="true" />
+      <span className="bidi-isolate truncate">{children}</span>
+    </Link>
+  );
+}
 
 export function PageHeader({
   title,
@@ -116,8 +138,8 @@ export function ChangeBadge({
     <span
       className={cn(
         'inline-flex h-5 items-center gap-0.5 rounded-full px-1.5 text-xs font-medium tabular-nums',
-        tone === 'good' && 'bg-good/12 text-good',
-        tone === 'bad' && 'bg-poor/12 text-poor',
+        tone === 'good' && 'bg-good/12 text-good-text',
+        tone === 'bad' && 'bg-poor/12 text-poor-text',
         tone === 'neutral' && 'bg-muted text-muted-foreground',
         className,
       )}

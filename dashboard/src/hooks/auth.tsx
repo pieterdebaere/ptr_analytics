@@ -22,6 +22,46 @@ export function isPublicPath(pathname: string): boolean {
   return (PUBLIC_PATHS as readonly string[]).includes(pathname);
 }
 
+/** Public status pages: rendered without the app and never need the session. */
+export function isStatusPagePath(pathname: string): boolean {
+  return pathname.startsWith('/status/');
+}
+
+/**
+ * "This browser had a session" (not a secret: the session cookie itself is httpOnly). Pages
+ * that work without a login only probe GET /api/auth/me when it is set, so anonymous
+ * visitors of the login page never get a 401 (and its console error).
+ */
+const SESSION_HINT_KEY = 'pa:had-session';
+
+function readSessionHint(): boolean {
+  try {
+    return window.localStorage.getItem(SESSION_HINT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeSessionHint(on: boolean): void {
+  try {
+    if (on) window.localStorage.setItem(SESSION_HINT_KEY, '1');
+    else window.localStorage.removeItem(SESSION_HINT_KEY);
+  } catch {
+    /* storage unavailable: login pages simply skip the redirect for logged-in users */
+  }
+}
+
+/**
+ * Whether the session must be probed on `pathname`: always on app pages; on login / sign-up
+ * / verification pages only when the browser had a session (to redirect logged-in users);
+ * never on public status pages.
+ */
+export function shouldProbeSession(pathname: string, hadSession: boolean): boolean {
+  if (isStatusPagePath(pathname)) return false;
+  if (isPublicPath(pathname)) return hadSession;
+  return true;
+}
+
 interface AuthState {
   /** undefined = still checking the session */
   user: User | null | undefined;
@@ -62,9 +102,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [nonce, setNonce] = useState(0);
   const navigate = useNavigate();
   const location = useLocation();
+  const statusPage = isStatusPagePath(location.pathname);
 
-  // Probe the session once on start.
+  // Probe the session once, when the first page that needs it is shown (not on anonymous
+  // pages: their visitors have no session, and a 401 is logged as an error by browsers).
+  const probe = user === undefined && shouldProbeSession(location.pathname, readSessionHint());
   useEffect(() => {
+    if (!probe) return;
     const ctrl = new AbortController();
     setError(null);
     api.me(ctrl.signal).then(
@@ -76,10 +120,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
     );
     return () => ctrl.abort();
-  }, [nonce]);
+  }, [probe, nonce]);
+
+  useEffect(() => {
+    if (user) writeSessionHint(true);
+    else if (user === null) writeSessionHint(false);
+  }, [user]);
 
   // Hosted-mode switches (no auth). Older servers answer 404: keep the defaults.
+  // Status pages don't use them.
   useEffect(() => {
+    if (statusPage) return;
     const ctrl = new AbortController();
     api.publicConfig(ctrl.signal).then(
       (c) => setPublicConfig(normalizePublicConfig(c)),
@@ -88,7 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
     );
     return () => ctrl.abort();
-  }, []);
+  }, [statusPage]);
 
   // Load the instance config once logged in (it requires a session).
   useEffect(() => {

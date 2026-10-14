@@ -86,7 +86,9 @@ describe('host split with STATUS_PAGE_ORIGIN', () => {
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain('<div id="root">');
     expect((await get(t.app, '/api/public/status/acme', STATUS)).statusCode).toBe(200);
-    expect((await get(t.app, '/status/acme/feed.xml', STATUS)).statusCode).toBe(200);
+    const feed = await get(t.app, '/status/acme/feed.xml', STATUS);
+    expect(feed.statusCode).toBe(200);
+    expect(feed.body).toContain(`<link>https://${STATUS}/status/acme</link>`);
     expect((await get(t.app, '/assets/app-abc123.js', STATUS)).statusCode).toBe(200);
     expect((await get(t.app, '/favicon.svg', STATUS)).statusCode).toBe(200);
     expect((await get(t.app, '/script.js', STATUS)).statusCode).toBe(200);

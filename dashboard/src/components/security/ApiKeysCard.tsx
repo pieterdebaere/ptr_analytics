@@ -2,8 +2,8 @@
 import { useId, useState, type FormEvent } from 'react';
 import { KeyRoundIcon, PlusIcon, TriangleAlertIcon } from 'lucide-react';
 import { errorMessage } from '@/api/client';
-import { API_KEY_SCOPES, securityApi, type ApiKey, type ApiKeyScope, type CreatedApiKey } from '@/api/security';
-import { FormMessage } from '@/components/AuthCard';
+import { API_KEY_SCOPES, factorError, securityApi, securityError, type ApiKey, type ApiKeyScope, type CreatedApiKey } from '@/api/security';
+import { FormMessage, PasswordField } from '@/components/AuthCard';
 import { CodeBlock, EmptyState, ErrorState, SkeletonRows } from '@/components/common';
 import {
   AlertDialog,
@@ -27,12 +27,26 @@ import { formatDateLong, formatRelative } from '@/components/uptime/lib';
 import { useAuth } from '@/hooks/auth';
 import { useApi } from '@/hooks/useApi';
 import { displayText } from '@/lib/safety';
+import { FieldError, SecondFactorField, factorOf, type FactorMode } from './MfaCard';
 import { SecretValue } from './secrets';
 
-const SCOPE_INFO: Record<ApiKeyScope, { label: string; help: string }> = {
-  read: { label: 'Read', help: 'Read-only access to the REST API (sites, statistics, monitors).' },
-  metrics: { label: 'Metrics', help: 'Scrape /metrics in Prometheus format (your monitors only).' },
+const SCOPE_INFO: Record<ApiKeyScope, { label: string; help: string; can: string }> = {
+  read: { label: 'Read', help: 'Read-only access to the REST API (sites, statistics, monitors).', can: 'read your sites, statistics and monitors' },
+  metrics: { label: 'Metrics', help: 'Scrape /metrics in Prometheus format (your monitors only).', can: 'scrape your uptime metrics' },
+  'metrics:all': {
+    label: 'Metrics (all accounts)',
+    help: 'Scrape /metrics for the monitors of every account on this server (admins only).',
+    can: 'scrape the uptime metrics of every account',
+  },
 };
+
+/** "read your sites … and scrape your uptime metrics" */
+export function scopeAbilities(scopes: readonly ApiKeyScope[]): string {
+  const parts = scopes.map((s) => SCOPE_INFO[s].can);
+  return parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+}
+
+const hasMetrics = (scopes: readonly ApiKeyScope[]) => scopes.includes('metrics') || scopes.includes('metrics:all');
 
 const EXPIRY_OPTIONS = [
   { value: '30', label: '30 days' },
@@ -70,8 +84,9 @@ function keyExpired(k: ApiKey, now = Date.now()): boolean {
   return k.expiresAt !== null && k.expiresAt <= now;
 }
 
-export function ApiKeysCard() {
-  const { data: keys, error, loading, reload } = useApi((signal) => securityApi.listApiKeys(signal), []);
+/** `mfaEnabled`: creating a key also needs a current second factor. A new `reloadKey` reloads the list. */
+export function ApiKeysCard({ mfaEnabled = false, reloadKey = 0 }: { mfaEnabled?: boolean; reloadKey?: number } = {}) {
+  const { data: keys, error, loading, reload } = useApi((signal) => securityApi.listApiKeys(signal), [reloadKey]);
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
@@ -136,7 +151,7 @@ export function ApiKeysCard() {
                           {displayText(k.name) || 'Unnamed key'}
                         </span>
                         {keyExpired(k) ? (
-                          <Badge variant="outline" className="text-poor">
+                          <Badge variant="outline" className="text-poor-text">
                             Expired
                           </Badge>
                         ) : null}
@@ -172,7 +187,7 @@ export function ApiKeysCard() {
         {actionError ? <FormMessage className="px-4 py-2">{actionError}</FormMessage> : null}
       </CardContent>
 
-      {creating ? <CreateKeyDialog onClose={() => setCreating(false)} onCreated={reload} /> : null}
+      {creating ? <CreateKeyDialog mfaEnabled={mfaEnabled} onClose={() => setCreating(false)} onCreated={reload} /> : null}
 
       <AlertDialog open={revoking !== null} onOpenChange={(o) => (o ? undefined : setRevoking(null))}>
         <AlertDialogContent>
@@ -195,16 +210,25 @@ export function ApiKeysCard() {
   );
 }
 
-function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const { config } = useAuth();
+function CreateKeyDialog({ mfaEnabled, onClose, onCreated }: { mfaEnabled: boolean; onClose: () => void; onCreated: () => void }) {
+  const { config, user } = useAuth();
   const [name, setName] = useState('');
+  const [nameError, setNameError] = useState<string | null>(null);
   const [scopes, setScopes] = useState<Set<ApiKeyScope>>(() => new Set<ApiKeyScope>(['metrics']));
   const [expiry, setExpiry] = useState<string>('365');
+  const [password, setPassword] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  // The server may ask for a code even when the status we loaded said 2FA was off.
+  const [needCode, setNeedCode] = useState(mfaEnabled);
+  const [factorMode, setFactorMode] = useState<FactorMode>('totp');
+  const [code, setCode] = useState('');
+  const [codeError, setCodeError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const nameId = useId();
   const origin = config?.publicUrl || window.location.origin;
+  const available = API_KEY_SCOPES.filter((s) => s !== 'metrics:all' || user?.role === 'admin');
 
   const toggle = (s: ApiKeyScope, on: boolean) =>
     setScopes((prev) => {
@@ -216,20 +240,41 @@ function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreate
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return setError('Give the key a name.');
+    const ne = name.trim() ? null : 'Give the key a name.';
+    const pe = password ? null : 'Enter your password.';
+    const ce = needCode ? factorError(factorOf(factorMode, code)) : null;
+    setNameError(ne);
+    setPasswordError(pe);
+    setCodeError(ce);
     if (scopes.size === 0) return setError('Choose at least one scope.');
+    if (ne || pe || ce) return;
     setBusy(true);
     setError(null);
     try {
-      const body: { name: string; scopes: ApiKeyScope[]; expiresInDays?: number } = {
-        name: name.trim(),
-        scopes: API_KEY_SCOPES.filter((s) => scopes.has(s)),
-      };
-      if (expiry !== 'never') body.expiresInDays = Number(expiry);
-      setCreated(await securityApi.createApiKey(body));
+      setCreated(
+        await securityApi.createApiKey({
+          name: name.trim(),
+          scopes: available.filter((s) => scopes.has(s)),
+          ...(expiry !== 'never' ? { expiresInDays: Number(expiry) } : {}),
+          password,
+          ...(needCode ? { factor: factorOf(factorMode, code) } : {}),
+        }),
+      );
+      setPassword('');
+      setCode('');
       onCreated();
     } catch (err) {
-      setError(errorMessage(err));
+      const f = securityError(err);
+      if (f.field === 'password') setPasswordError(f.message);
+      else if (f.field === 'code') {
+        if (!needCode) {
+          setNeedCode(true);
+          setCodeError('Two-factor authentication is on: enter a code from your authenticator app.');
+        } else {
+          setCodeError(f.message);
+          setCode('');
+        }
+      } else setError(f.message || null);
     } finally {
       setBusy(false);
     }
@@ -245,15 +290,15 @@ function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreate
               <DialogDescription>Copy the key now — it is shown only once. Treat it like a password.</DialogDescription>
             </DialogHeader>
             <SecretValue value={created.key} label="API key" wrap />
-            {created.apiKey.scopes.includes('metrics') ? (
+            {hasMetrics(created.apiKey.scopes) ? (
               <div className="flex min-w-0 flex-col gap-2">
                 <p className="text-sm font-medium">Prometheus scrape config</p>
                 <CodeBlock code={prometheusExample(origin, created.key)} />
               </div>
             ) : null}
-            <p className="flex items-start gap-2 text-xs text-muted-foreground">
-              <TriangleAlertIcon className="mt-px size-3.5 shrink-0 text-warn" aria-hidden="true" />
-              Anyone with this key can {created.apiKey.scopes.map((s) => SCOPE_INFO[s].label.toLowerCase()).join(' and ')} on your behalf. Revoke it if it leaks.
+            <p className="flex items-start gap-2 text-xs text-muted-foreground" data-slot="key-warning">
+              <TriangleAlertIcon className="mt-px size-3.5 shrink-0 text-warn-text" aria-hidden="true" />
+              <span>Anyone with this key can {scopeAbilities(created.apiKey.scopes)} on your behalf. Revoke it if it leaks.</span>
             </p>
             <DialogFooter>
               <Button type="button" onClick={onClose}>
@@ -262,18 +307,27 @@ function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreate
             </DialogFooter>
           </>
         ) : (
-          <form onSubmit={onSubmit} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
+          <form onSubmit={onSubmit} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4" noValidate>
             <DialogHeader>
               <DialogTitle>New API key</DialogTitle>
               <DialogDescription>Keys are scoped and can expire. You can revoke them at any time.</DialogDescription>
             </DialogHeader>
             <div className="flex flex-col gap-2">
               <Label htmlFor={nameId}>Name</Label>
-              <Input id={nameId} value={name} maxLength={100} placeholder="e.g. Prometheus" onChange={(e) => setName(e.target.value)} autoFocus />
+              <Input
+                id={nameId}
+                value={name}
+                maxLength={100}
+                placeholder="e.g. Prometheus"
+                aria-invalid={nameError ? true : undefined}
+                onChange={(e) => (setName(e.target.value), setNameError(null))}
+                autoFocus
+              />
+              {nameError ? <FieldError>{nameError}</FieldError> : null}
             </div>
             <fieldset className="flex flex-col gap-2">
               <legend className="mb-2 text-sm font-medium">Scopes</legend>
-              {API_KEY_SCOPES.map((s) => (
+              {available.map((s) => (
                 <label key={s} className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 has-data-checked:border-primary/30 has-data-checked:bg-primary/[0.03]">
                   <Switch checked={scopes.has(s)} onCheckedChange={(on) => toggle(s, on)} className="mt-0.5" />
                   <span className="flex flex-col gap-0.5 text-sm">
@@ -297,6 +351,18 @@ function CreateKeyDialog({ onClose, onCreated }: { onClose: () => void; onCreate
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="flex flex-col gap-4 rounded-lg border bg-muted/30 p-3" data-slot="reauth">
+              <p className="text-xs text-muted-foreground">
+                {needCode ? 'Confirm with your password and a code from your authenticator app.' : 'Confirm with your password.'}
+              </p>
+              <div className="flex flex-col gap-2">
+                <PasswordField label="Password" value={password} onChange={(v) => (setPassword(v), setPasswordError(null))} autoComplete="current-password" />
+                {passwordError ? <FieldError>{passwordError}</FieldError> : null}
+              </div>
+              {needCode ? (
+                <SecondFactorField mode={factorMode} onModeChange={setFactorMode} value={code} onChange={(v) => (setCode(v), setCodeError(null))} error={codeError} />
+              ) : null}
             </div>
             {error ? <FormMessage>{error}</FormMessage> : null}
             <DialogFooter>

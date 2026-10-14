@@ -31,9 +31,9 @@ import {
 import { cn } from '@/lib/utils';
 
 const TONE_CLASS = {
-  good: 'border-good/40 bg-good/10 text-good',
-  warn: 'border-warn/40 bg-warn/10 text-warn',
-  poor: 'border-poor/40 bg-poor/10 text-poor',
+  good: 'border-good/40 bg-good/10 text-good-text',
+  warn: 'border-warn/40 bg-warn/10 text-warn-text',
+  poor: 'border-poor/40 bg-poor/10 text-poor-text',
   neutral: '',
 } as const;
 
@@ -81,7 +81,7 @@ export function BillingPage() {
 
       {checkoutDone ? (
         <Alert className="border-good/40">
-          <CheckCircle2Icon className="text-good" aria-hidden="true" />
+          <CheckCircle2Icon className="text-good-text" aria-hidden="true" />
           <AlertTitle>Thank you!</AlertTitle>
           <AlertDescription>Your payment was received. It can take a few seconds until your plan below is updated.</AlertDescription>
         </Alert>
@@ -320,13 +320,13 @@ function ChangeQuantity({ billing, onUpdated }: { billing: Billing; onUpdated: (
             </div>
           </div>
           {willSuspend ? (
-            <p className="flex items-center gap-2 text-sm text-warn">
+            <p className="flex items-center gap-2 text-sm text-warn-text">
               <AlertTriangleIcon className="size-4 shrink-0" aria-hidden="true" />
               {billing.sitesUsed - billing.freeSites - qty} of your newest sites will be suspended (no data is deleted).
             </p>
           ) : null}
           {message ? (
-            <p className={message.kind === 'ok' ? 'text-sm text-good' : 'text-sm text-destructive'} role="status">
+            <p className={message.kind === 'ok' ? 'text-sm text-good-text' : 'text-sm text-destructive'} role="status">
               {message.text}
             </p>
           ) : null}

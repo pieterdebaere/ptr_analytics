@@ -98,7 +98,7 @@ export function PasswordField({
 
 export function FormMessage({ kind = 'error', children, className }: { kind?: 'error' | 'ok'; children: ReactNode; className?: string }) {
   return (
-    <p className={cn('text-sm', kind === 'error' ? 'text-destructive' : 'text-good', className)} role={kind === 'error' ? 'alert' : 'status'}>
+    <p className={cn('text-sm', kind === 'error' ? 'text-destructive' : 'text-good-text', className)} role={kind === 'error' ? 'alert' : 'status'}>
       {children}
     </p>
   );

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ActivityIcon,
-  ChevronRightIcon,
   CopyIcon,
   ExternalLinkIcon,
   MoreHorizontalIcon,
@@ -17,7 +16,7 @@ import {
 } from 'lucide-react';
 import { api, errorMessage } from '@/api/client';
 import { uptimeApi, type Monitor } from '@/api/uptime';
-import { EmptyState, ErrorState } from '@/components/common';
+import { BackLink, EmptyState, ErrorState } from '@/components/common';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -30,7 +29,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
 import { DeleteMonitorDialog, useMonitorActions } from '@/components/uptime/actions';
-import { DaysBar, HeartbeatBar, type BeatLike } from '@/components/uptime/bars';
+import { DaysBar, HeartbeatBar, UptimeLegend, type BeatLike } from '@/components/uptime/bars';
 import { appendBeat, applyBeat, applyState, useInterval, useUptimeStream } from '@/components/uptime/live';
 import {
   displayStatus,
@@ -43,6 +42,7 @@ import {
   typeLabel,
   uptimeTone,
 } from '@/components/uptime/lib';
+import { everyText } from '@/components/uptime/monitor-form';
 import { BadgesPanel, CertificateCard, ChannelsCard, DomainCard, EventsCard, OutagesCard, PushPanel } from '@/components/uptime/panels';
 import { PeriodPicker, periodLabel, useUptimePeriod } from '@/components/uptime/PeriodPicker';
 import { takePushUrl } from '@/components/uptime/push';
@@ -181,30 +181,24 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
   const showTls = TLS_TYPES.has(m.type) && (m.tls !== null || /^https:|^wss:/i.test(m.target ?? '') || m.type === 'tls');
   const showDomain = m.domainNotify || m.domain !== null || m.type === 'domain';
   const isPush = m.type === 'push';
+  const isManual = m.type === 'manual';
+  const isGroup = m.type === 'group';
+  /** group/manual monitors never measure latency; push monitors only when the job sends `ping` */
+  const showLatency = !isGroup && !isManual && !(isPush && s !== undefined && s !== null && s.avgLatencyMs === null);
   const editHref = `/monitors/${encodeURIComponent(m.uid)}/edit`;
 
   return (
     <div className="flex flex-col gap-6">
-      {/* breadcrumb */}
-      <nav aria-label="Breadcrumb" className="-mb-2 flex min-w-0 items-center gap-1 text-sm text-muted-foreground">
-        <Link to="/uptime" className="shrink-0 hover:text-foreground">
-          Uptime
-        </Link>
-        <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
-        {site.data ? (
-          <Link to={`/sites/${encodeURIComponent(site.data.id)}/uptime`} className="bidi-isolate truncate hover:text-foreground">
-            {displayText(site.data.name)}
-          </Link>
-        ) : (
-          <Skeleton className="h-4 w-24" />
-        )}
-      </nav>
-
       {/* header */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 flex-col gap-2.5">
+          <BackLink to={`/sites/${encodeURIComponent(m.siteId)}/uptime`} label={site.data ? `${displayText(site.data.name)} uptime` : undefined} className="-mb-1">
+            {site.data ? `${displayText(site.data.name)} uptime` : 'Uptime'}
+          </BackLink>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-            <h1 className="bidi-isolate min-w-0 truncate text-2xl font-semibold tracking-tight">{displayText(m.name)}</h1>
+            <h1 className="bidi-isolate min-w-0 truncate text-2xl font-semibold tracking-tight" title={displayText(m.name)}>
+              {displayText(m.name)}
+            </h1>
             <StatusPill status={status} size="lg" />
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
@@ -232,8 +226,16 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
               <>
                 {STATUS_LABELS[status]}
                 {m.state.since ? ` for ${formatDurationMs(now - m.state.since)}` : ''}
-                {m.state.lastCheckAt ? ` · checked ${formatRelative(m.state.lastCheckAt, now)}` : ''}
-                {` · every ${formatDurationMs(m.intervalS * 1000)}`}
+                {isManual ? (
+                  ' · status set manually'
+                ) : isGroup ? (
+                  ' · status from its child monitors'
+                ) : (
+                  <>
+                    {m.state.lastCheckAt ? ` · ${isPush ? 'last push' : 'checked'} ${formatRelative(m.state.lastCheckAt, now)}` : ''}
+                    {` · ${isPush ? 'expected ' : ''}${everyText(m.intervalS)}`}
+                  </>
+                )}
               </>
             )}
             {m.state.msg && status !== 'paused' ? (
@@ -251,7 +253,7 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
               {m.active ? <PauseIcon aria-hidden="true" /> : <PlayIcon aria-hidden="true" />}
               {m.active ? 'Pause' : 'Resume'}
             </Button>
-            {!isPush && m.type !== 'group' ? (
+            {!isPush && !isGroup && !isManual ? (
               <Button type="button" variant="outline" className="bg-background" onClick={a.checkNow} disabled={a.busy !== null || !m.active}>
                 <RefreshCwIcon className={cn(a.busy === 'check' && 'animate-spin')} aria-hidden="true" />
                 Check now
@@ -282,13 +284,15 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
         ) : null}
       </div>
 
+      {isManual && canManage ? <ManualStatusCard monitor={m} onChanged={setMonitor} /> : null}
+
       {/* recent beats */}
       <Card size="sm" className="gap-2 px-4">
         <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>Recent checks</span>
-          <span className="tabular-nums">{m.active && m.state.latencyMs !== null ? `Last ${formatLatency(m.state.latencyMs)}` : ''}</span>
+          <span>{isManual || isGroup ? 'Recent status' : isPush ? 'Recent pushes' : 'Recent checks'}</span>
+          <span className="tabular-nums">{m.active && m.state.latencyMs !== null && !isManual && !isGroup ? `Last response ${formatLatency(m.state.latencyMs)}` : ''}</span>
         </div>
-        <HeartbeatBar beats={beats} slots={60} interval={recent.data?.interval ?? 'raw'} label={`Recent checks of ${displayText(m.name)}`} barClassName="h-8" />
+        <HeartbeatBar beats={beats} slots={60} interval={recent.data?.interval ?? 'raw'} label={`${isManual || isGroup ? 'Recent status' : 'Recent checks'} of ${displayText(m.name)}`} barClassName="h-8" />
       </Card>
 
       {/* period + stats */}
@@ -302,7 +306,7 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
             <ErrorState message={stats.error} onRetry={stats.reload} />
           </Card>
         ) : (
-          <div className={cn('grid grid-cols-2 gap-3 lg:grid-cols-4', stats.loading && s && 'opacity-60 transition-opacity')}>
+          <div className={cn('grid grid-cols-2 gap-3', showLatency ? 'lg:grid-cols-4' : 'lg:grid-cols-3', stats.loading && s && 'opacity-60 transition-opacity')}>
             {!s ? (
               [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[100px] rounded-xl" />)
             ) : (
@@ -316,46 +320,56 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
                     upDelta === null ? (
                       `${s.checks.toLocaleString()} checks`
                     ) : (
-                      <span className={cn(Math.abs(upDelta) < 0.005 ? '' : upDelta > 0 ? 'text-good' : 'text-poor')}>
+                      <span className={cn(Math.abs(upDelta) < 0.005 ? '' : upDelta > 0 ? 'text-good-text' : 'text-poor-text')} title="Change in percentage points vs the previous period of the same length">
                         {Math.abs(upDelta) < 0.005 ? 'Same as previous period' : `${upDelta > 0 ? '+' : '−'}${Math.abs(upDelta).toFixed(2)} pp vs previous`}
                       </span>
                     )
                   }
                 />
-                <StatCard
-                  label="Avg. response"
-                  icon={<ZapIcon />}
-                  value={formatLatency(s.avgLatencyMs)}
-                  sub={s.minLatencyMs !== null && s.maxLatencyMs !== null ? `${formatLatency(s.minLatencyMs)} min · ${formatLatency(s.maxLatencyMs)} max` : 'No data'}
-                />
+                {showLatency ? (
+                  <StatCard
+                    label="Avg. response"
+                    icon={<ZapIcon />}
+                    value={formatLatency(s.avgLatencyMs)}
+                    sub={s.minLatencyMs !== null && s.maxLatencyMs !== null ? `${formatLatency(s.minLatencyMs)} min · ${formatLatency(s.maxLatencyMs)} max` : 'No data'}
+                  />
+                ) : null}
                 <StatCard
                   label="Outages"
                   icon={<TrendingDownIcon />}
                   value={s.outages.toLocaleString()}
-                  tone={s.outages > 0 ? 'text-poor' : undefined}
-                  sub={s.downtimeMs > 0 ? `${formatDurationMs(s.downtimeMs)} down` : 'No downtime'}
+                  tone={s.outages > 0 ? 'text-poor-text' : undefined}
+                  sub={s.downtimeMs > 0 ? `${formatDurationMs(s.downtimeMs)} confirmed downtime` : 'No confirmed downtime'}
                 />
-                <StatCard label="MTTR" icon={<TimerIcon />} value={s.mttrMs !== null ? formatDurationMs(s.mttrMs) : '–'} sub="Mean time to recovery" />
+                <StatCard
+                  label="MTTR"
+                  icon={<TimerIcon />}
+                  value={s.mttrMs !== null ? formatDurationMs(s.mttrMs) : '–'}
+                  sub="Mean time to recovery"
+                  className={showLatency ? undefined : 'col-span-2 lg:col-span-1'}
+                />
               </>
             )}
           </div>
         )}
 
-        <Card className="gap-3">
-          <CardHeader>
-            <CardTitle className="text-sm">Response time</CardTitle>
-            <CardDescription>
-              {series.data?.interval === 'raw' ? 'Every check' : series.data?.interval === 'hour' ? 'Hourly average with min–max range' : 'Daily average with min–max range'}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="px-2 sm:px-4">
-            {series.error ? (
-              <ErrorState message={series.error} onRetry={series.reload} className="min-h-56" />
-            ) : (
-              <ResponseTimeChart key={qKey} points={series.data?.points ?? []} interval={series.data?.interval ?? 'raw'} loading={series.loading || !series.data} />
-            )}
-          </CardContent>
-        </Card>
+        {showLatency ? (
+          <Card className="gap-3">
+            <CardHeader>
+              <CardTitle className="text-sm">Response time</CardTitle>
+              <CardDescription>
+                {series.data?.interval === 'raw' ? 'Every check' : series.data?.interval === 'hour' ? 'Hourly average with min–max range' : 'Daily average with min–max range'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="px-2 sm:px-4">
+              {series.error ? (
+                <ErrorState message={series.error} onRetry={series.reload} className="min-h-56" />
+              ) : (
+                <ResponseTimeChart key={qKey} points={series.data?.points ?? []} interval={series.data?.interval ?? 'raw'} loading={series.loading || !series.data} />
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
 
       <Card className="gap-3">
@@ -372,6 +386,7 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
                   <span>90 days ago</span>
                   <span>Today</span>
                 </div>
+                <UptimeLegend className="mt-3" />
               </>
             ) : (
               <p className="text-sm text-muted-foreground">No data yet.</p>
@@ -382,11 +397,9 @@ function MonitorDetail({ monitor: m, setMonitor, reload }: { monitor: Monitor; s
         </CardContent>
       </Card>
 
-      {m.type === 'manual' && canManage ? <ManualStatusCard monitor={m} onChanged={setMonitor} /> : null}
-
       {isPush ? <PushPanel monitor={m} pushUrl={pushUrl} onPushUrl={setPushUrl} canManage={canManage} /> : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
         <EventsCard uid={m.uid} refreshKey={refreshKey} />
         <OutagesCard uid={m.uid} refreshKey={refreshKey} />
       </div>

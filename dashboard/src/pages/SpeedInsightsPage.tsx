@@ -54,9 +54,9 @@ const RATING_COLOR: Record<Rating, string> = {
 };
 
 const RATING_TEXT: Record<Rating, string> = {
-  good: 'text-good',
-  'needs-improvement': 'text-warn',
-  poor: 'text-poor',
+  good: 'text-good-text',
+  'needs-improvement': 'text-warn-text',
+  poor: 'text-poor-text',
 };
 
 const RATING_BG: Record<Rating, string> = {

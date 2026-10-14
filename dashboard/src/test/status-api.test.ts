@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api/client';
 import { notifyApi, parseChannel, parseProvider } from '../api/notify';
-import { API_KEY_SCOPES, safeOtpauthUrl, securityApi } from '../api/security';
+import { API_KEY_SCOPES, safeOtpauthUrl, securityApi, securityError } from '../api/security';
 import {
   checkLogoFile,
   parsePublicStatus,
@@ -211,26 +211,45 @@ describe('security API client', () => {
   });
 
   it('validates the MFA setup response', async () => {
-    mockFetch(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/PTR:a?secret=JBSWY3DPEHPK3PXP&issuer=PTR' });
-    expect((await securityApi.mfaSetup()).secret).toBe('JBSWY3DPEHPK3PXP');
+    const setup = mockFetch(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/PTR:a?secret=JBSWY3DPEHPK3PXP&issuer=PTR' });
+    expect((await securityApi.mfaSetup('pw')).secret).toBe('JBSWY3DPEHPK3PXP');
+    expect(JSON.parse(String(setup.mock.calls[0]![1]?.body))).toEqual({ password: 'pw' });
     mockFetch(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'javascript:alert(1)' });
-    await expect(securityApi.mfaSetup()).rejects.toBeInstanceOf(ApiError);
+    await expect(securityApi.mfaSetup('pw')).rejects.toBeInstanceOf(ApiError);
     expect(safeOtpauthUrl('otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP')).toBeNull();
     expect(safeOtpauthUrl('otpauth://totp/x?secret=not-base32!')).toBeNull();
   });
 
   it('enables MFA and returns recovery codes, normalising the code', async () => {
-    const fetch = mockFetch(200, { recoveryCodes: ['aaaa-bbbb-cccc-dddd', 42, ''] });
-    expect(await securityApi.mfaEnable('123 456')).toEqual(['aaaa-bbbb-cccc-dddd']);
-    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ code: '123456' });
+    const fetch = mockFetch(200, { recoveryCodes: ['aaaa-bbbb-cccc-dddd', 42, ''], apiKeysRevoked: 2 });
+    expect(await securityApi.mfaEnable('pw', '123 456')).toEqual({ recoveryCodes: ['aaaa-bbbb-cccc-dddd'], apiKeysRevoked: 2 });
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ password: 'pw', code: '123456' });
+  });
+
+  it('disables MFA / regenerates codes with the password and a code or recovery code', async () => {
+    const off = mockFetch(204);
+    await securityApi.mfaDisable('pw', { recoveryCode: ' abcd-efgh-ijkl ' });
+    expect(JSON.parse(String(off.mock.calls[0]![1]?.body))).toEqual({ password: 'pw', recoveryCode: 'abcd-efgh-ijkl' });
+    const regen = mockFetch(200, { recoveryCodes: ['x1x1-x1x1'] });
+    expect(await securityApi.regenerateRecoveryCodes('pw', { code: '123 456' })).toEqual(['x1x1-x1x1']);
+    expect(JSON.parse(String(regen.mock.calls[0]![1]?.body))).toEqual({ password: 'pw', code: '123456' });
+  });
+
+  it('maps security errors to fields and sentences', () => {
+    expect(securityError(new ApiError(400, 'password is incorrect'))).toEqual({ field: 'password', message: 'The password is incorrect.' });
+    expect(securityError(new ApiError(400, 'invalid code', 'invalid_code')).field).toBe('code');
+    expect(securityError(new ApiError(400, 'invalid code', 'invalid_code')).message).toMatch(/^That code didn’t work/);
+    expect(securityError(new ApiError(400, 'code is required', 'mfa_code_required')).field).toBe('code');
+    expect(securityError(new ApiError(429, 'too many wrong codes, try again in 5 min', 'mfa_locked'))).toEqual({ field: 'code', message: 'Too many wrong codes. Try again in 5 minutes.' });
+    expect(securityError(new ApiError(409, 'start the setup first')).message).toBe('Start the setup first.');
   });
 
   it('creates API keys and returns the key once', async () => {
     const fetch = mockFetch(201, { apiKey: { uid: 'k1', name: 'Prom', prefix: 'abcd1234', scopes: ['metrics', 'admin'], createdAt: 1, expiresAt: null, lastUsedAt: null }, key: 'pa_abcd1234_secretsecretsecret' });
-    const r = await securityApi.createApiKey({ name: 'Prom', scopes: ['metrics'], expiresInDays: 30 });
+    const r = await securityApi.createApiKey({ name: 'Prom', scopes: ['metrics'], expiresInDays: 30, password: 'pw', factor: { code: '123 456' } });
     expect(r.key).toBe('pa_abcd1234_secretsecretsecret');
     expect(r.apiKey.scopes).toEqual(['metrics']);
-    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ name: 'Prom', scopes: ['metrics'], expiresInDays: 30 });
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ name: 'Prom', scopes: ['metrics'], expiresInDays: 30, password: 'pw', code: '123456' });
     mockFetch(200, { apiKeys: [{ uid: 'k1', name: 'n', prefix: 'p', scopes: API_KEY_SCOPES }] });
     expect(await securityApi.listApiKeys()).toHaveLength(1);
     const del = mockFetch(204);

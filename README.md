@@ -206,6 +206,7 @@ Hosted mode (all off by default, see [Hosted mode](#hosted-mode)):
 | `STRIPE_AUTOMATIC_TAX` | `false` | Enable Stripe Tax in Checkout. |
 | `FREE_SITES` | `1` | Sites included for free per member (billing enabled). |
 | `PRICE_PER_SITE_CENTS` / `PRICE_CURRENCY` | `100` / `eur` | Display only; the Stripe price is authoritative. |
+| `STATUS_PAGE_ORIGIN` | – | Separate origin for public status pages, e.g. `https://status.example.com` (must not be `PUBLIC_URL`'s host or a subdomain of it). Optional, **recommended in hosted mode** (the server warns at startup without it); see *Status pages* below. |
 
 ## Hosted mode
 
@@ -254,6 +255,24 @@ self-hosted install is unaffected unless you set `SIGNUP_ENABLED=true`.
   load balancer this also blocks unrelated sites on the same anycast IPs. Monitor traffic leaves
   from the server's IP, so never allowlist that IP elsewhere (use a dedicated egress if you can).
 
+* **Status pages.** Status pages show tenant-controlled text and logos. Set
+  `STATUS_PAGE_ORIGIN` (e.g. `https://status.example.com`) and route that host to this server
+  as well: public pages are then served only there (`/status/<slug>` on the dashboard origin
+  redirects to it), and that host — like every verified custom domain — serves *only* the
+  status page surface (`/status/<slug>`, its RSS feed, the page assets, `/api/public/*`,
+  `/script.js` + `/api/event` for the page's own analytics, `/favicon.svg`); login, the
+  dashboard and the authenticated API answer `404` there. Without `STATUS_PAGE_ORIGIN` pages
+  stay on the dashboard origin, and verified custom domains are still restricted to their own
+  page. Custom domains are verified with a DNS TXT record; several accounts may *claim* the
+  same domain, but only the first one to prove DNS control gets it (the other claims are
+  dropped), and unverified claims expire after 7 days.
+* **Account security.** Enabling two-factor authentication needs the account password,
+  creating an API key needs the password (and a current code when 2FA is on), and the owner
+  is e-mailed about 2FA changes, new API keys and repeated wrong 2FA codes (progressive
+  lockout, at most 30 wrong codes per day). Changing or resetting a password and enabling,
+  disabling or resetting 2FA revoke all API keys of the account; a role change signs the
+  user out everywhere.
+
 ### Stripe setup
 
 1. Create a product with a **recurring, per-unit** price (e.g. €1.00 / month) and copy its
@@ -284,8 +303,11 @@ docker compose exec analytics node server/dist/cli.js list-users
 docker compose exec analytics node server/dist/cli.js delete-user alice@example.com
 ```
 
-`create-user` and `reset-password` print a generated password once. Login rate limits are
-kept in memory, so restarting the server also clears a temporary lockout.
+`create-user` and `reset-password` print a generated password once. `reset-password` and
+`mfa-reset <email>` (remove two-factor authentication) sign the user out and revoke the
+account's API keys. Login rate limits are kept in memory, so restarting the server also
+clears a temporary lockout (the per-account two-factor lockout is stored and survives a
+restart; `mfa-reset` clears it).
 
 If the server needs an outbound HTTP proxy to download the GeoIP database, set
 `HTTPS_PROXY` and `NODE_USE_ENV_PROXY=1`.

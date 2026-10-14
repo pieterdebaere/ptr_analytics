@@ -359,7 +359,7 @@ function MonitorEditor({
       ) : null}
       {unavailable ? (
         <Alert className="border-warn/40 bg-warn/8">
-          <AlertCircleIcon className="text-warn" aria-hidden="true" />
+          <AlertCircleIcon className="text-warn-text" aria-hidden="true" />
           <AlertTitle>{unavailable}</AlertTitle>
           <AlertDescription>Pick another monitor type.</AlertDescription>
         </Alert>

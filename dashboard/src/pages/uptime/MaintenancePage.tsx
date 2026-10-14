@@ -1,9 +1,9 @@
 import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarClockIcon, ChevronLeftIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, Trash2Icon, WrenchIcon } from 'lucide-react';
+import { CalendarClockIcon, GlobeIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, SearchIcon, Trash2Icon, WrenchIcon } from 'lucide-react';
 import { api, errorMessage } from '@/api/client';
 import { uptimeApi, type Maintenance, type MaintenanceStrategy, type Monitor } from '@/api/uptime';
-import { EmptyState, ErrorState, PageHeader } from '@/components/common';
+import { BackLink, EmptyState, ErrorState, PageHeader } from '@/components/common';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -21,7 +21,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { ConfirmDialog } from '@/components/uptime/actions';
-import { CheckRow, FormField } from '@/components/uptime/form-parts';
+import { CheckRow, FormField, RadioCards, Time24Input } from '@/components/uptime/form-parts';
 import { formatRelative } from '@/components/uptime/lib';
 import {
   describeSchedule,
@@ -45,7 +45,7 @@ import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 
 const STATUS_META: Record<Maintenance['status'], { label: string; className: string }> = {
-  'under-maintenance': { label: 'Under maintenance', className: 'bg-chart-1/12 text-chart-1' },
+  'under-maintenance': { label: 'Under maintenance', className: 'bg-maint/12 text-maint-text' },
   scheduled: { label: 'Scheduled', className: 'bg-muted text-foreground' },
   inactive: { label: 'Paused', className: 'bg-muted text-muted-foreground' },
   ended: { label: 'Ended', className: 'bg-muted text-muted-foreground' },
@@ -61,15 +61,18 @@ const STRATEGIES: Array<{ value: MaintenanceStrategy; label: string; hint: strin
   { value: 'manual', label: 'Manual', hint: 'Switch on and off' },
 ];
 
+// Maintenance times are always shown in 24-hour format (like the HH:MM inputs and schedule summaries).
+const DATE_PARTS: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric' };
+const TIME_PARTS: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
 const fmtCache = new Map<string, Intl.DateTimeFormat>();
 function fmtIn(tz: string, withDate = true): Intl.DateTimeFormat {
   const key = `${tz}|${withDate}`;
   let f = fmtCache.get(key);
   if (!f) {
     try {
-      f = new Intl.DateTimeFormat(undefined, withDate ? { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' } : { timeZone: tz, hour: 'numeric', minute: '2-digit' });
+      f = new Intl.DateTimeFormat(undefined, { timeZone: tz, ...(withDate ? DATE_PARTS : {}), ...TIME_PARTS });
     } catch {
-      f = new Intl.DateTimeFormat(undefined, withDate ? { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' } : { hour: 'numeric', minute: '2-digit' });
+      f = new Intl.DateTimeFormat(undefined, { ...(withDate ? DATE_PARTS : {}), ...TIME_PARTS });
     }
     fmtCache.set(key, f);
   }
@@ -118,10 +121,7 @@ export function MaintenancePage() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <Link to="/uptime" className="inline-flex items-center gap-1 self-start text-sm text-muted-foreground hover:text-foreground">
-          <ChevronLeftIcon className="size-3.5" aria-hidden="true" />
-          Uptime
-        </Link>
+        <BackLink to="/uptime">Uptime</BackLink>
         <PageHeader
           title="Maintenance"
           description="Planned windows pause alerts and show monitors as under maintenance (excluded from uptime)."
@@ -221,37 +221,33 @@ function MaintenanceRow({
   const meta = STATUS_META[m.status];
   const affected = m.monitorUids.map((u) => monitors.get(u)).filter((x): x is Monitor => x !== undefined);
   const now = Date.now();
-  const w = m.nextWindow;
   return (
-    <li className={cn('flex flex-col gap-3 rounded-xl bg-card p-4 ring-1 ring-foreground/10 sm:flex-row sm:items-start sm:gap-4', m.status === 'under-maintenance' && 'ring-chart-1/40')}>
-      <span className={cn('mt-0.5 hidden size-9 shrink-0 items-center justify-center rounded-lg sm:flex', m.status === 'under-maintenance' ? 'bg-chart-1/12 text-chart-1' : 'bg-muted text-muted-foreground')} aria-hidden="true">
+    <li className={cn('flex flex-col gap-3 rounded-xl bg-card p-4 ring-1 ring-foreground/10 sm:flex-row sm:items-start sm:gap-4', m.status === 'under-maintenance' && 'ring-maint/40')}>
+      <span className={cn('mt-0.5 hidden size-9 shrink-0 items-center justify-center rounded-lg sm:flex', m.status === 'under-maintenance' ? 'bg-maint/12 text-maint-text' : 'bg-muted text-muted-foreground')} aria-hidden="true">
         <WrenchIcon className="size-4" />
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="bidi-isolate truncate font-medium">{displayText(m.title)}</span>
-          <span className={cn('inline-flex h-5 items-center gap-1.5 rounded-full px-2 text-xs font-medium', meta.className)}>
-            {m.status === 'under-maintenance' ? <span className="size-1.5 rounded-full bg-chart-1" aria-hidden="true" /> : null}
+          <span className="bidi-isolate min-w-0 truncate font-medium" title={displayText(m.title)}>
+            {displayText(m.title)}
+          </span>
+          <span className={cn('inline-flex h-5 shrink-0 items-center gap-1.5 rounded-full px-2 text-xs font-medium', meta.className)}>
+            {m.status === 'under-maintenance' ? <span className="size-1.5 rounded-full bg-maint" aria-hidden="true" /> : null}
             {meta.label}
           </span>
         </div>
         <p className="text-sm text-muted-foreground">
-          {describeSchedule(m)} <span className="text-xs">· {displayText(m.tz)}</span>
+          {describeSchedule(m)}
+          {m.strategy !== 'manual' ? (
+            <span className="inline-flex items-center gap-1 text-xs whitespace-nowrap">
+              <span aria-hidden="true">&nbsp;·</span>
+              <GlobeIcon className="size-3" aria-hidden="true" />
+              <span className="bidi-isolate">{displayText(m.tz)}</span>
+              <span className="sr-only">time zone</span>
+            </span>
+          ) : null}
         </p>
-        {w ? (
-          <p className="flex flex-wrap items-center gap-x-1.5 text-sm">
-            <CalendarClockIcon className="size-3.5 text-muted-foreground" aria-hidden="true" />
-            {m.status === 'under-maintenance' && w.start <= now ? (
-              <span>
-                Ends {fmtIn(m.tz).format(w.end)} <span className="text-muted-foreground">({formatRelative(w.end, now)})</span>
-              </span>
-            ) : (
-              <span>
-                Next {formatWindow(w, m.tz)} <span className="text-muted-foreground">({formatRelative(w.start, now)})</span>
-              </span>
-            )}
-          </p>
-        ) : null}
+        <WindowLine m={m} now={now} />
         {m.description ? <p className="bidi-isolate line-clamp-2 text-xs whitespace-pre-line text-muted-foreground">{displayText(m.description)}</p> : null}
         <div className="flex min-w-0 flex-wrap items-center gap-1.5 pt-0.5">
           {m.monitorUids.length === 0 ? (
@@ -262,7 +258,8 @@ function MaintenanceRow({
                 <Link
                   key={mon.uid}
                   to={`/monitors/${encodeURIComponent(mon.uid)}`}
-                  className="inline-flex h-6 max-w-48 items-center gap-1.5 rounded-md border bg-background px-2 text-xs hover:bg-muted"
+                  className="inline-flex h-6 max-w-48 min-w-0 items-center gap-1.5 rounded-md border bg-background px-2 text-xs hover:bg-muted"
+                  title={displayText(mon.name)}
                 >
                   <StatusDot status={mon.active ? (mon.state.status === 3 ? 'maintenance' : mon.state.status === 0 ? 'down' : 'up') : 'paused'} pulse={false} halo={false} className="size-1.5" />
                   <span className="bidi-isolate truncate">{displayText(mon.name)}</span>
@@ -301,20 +298,53 @@ function MaintenanceRow({
   );
 }
 
+/** "Ends …" / "Next …" / "Paused — won't start" / "Ended …" line of a window (times in the window's zone, 24 h). */
+function WindowLine({ m, now }: { m: Maintenance; now: number }) {
+  const w = m.nextWindow;
+  let content: ReactNode = null;
+  if (m.status === 'inactive') {
+    content = <span className="text-muted-foreground">Paused — won’t start until resumed</span>;
+  } else if (m.status === 'ended') {
+    content =
+      m.endsAt !== null ? (
+        <span className="text-muted-foreground">
+          Ended {fmtIn(m.tz).format(m.endsAt)} <span>({formatRelative(m.endsAt, now)})</span>
+        </span>
+      ) : (
+        <span className="text-muted-foreground">Ended</span>
+      );
+  } else if (w && m.status === 'under-maintenance' && w.start <= now) {
+    content = (
+      <span>
+        Ends {fmtIn(m.tz).format(w.end)} <span className="text-muted-foreground">({formatRelative(w.end, now)})</span>
+      </span>
+    );
+  } else if (w) {
+    content = (
+      <span>
+        Next {formatWindow(w, m.tz)} <span className="text-muted-foreground">({formatRelative(w.start, now)})</span>
+      </span>
+    );
+  }
+  if (!content) return null;
+  return (
+    <p className="flex items-start gap-1.5 text-sm tabular-nums">
+      <CalendarClockIcon className="mt-[3px] size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <span className="min-w-0">{content}</span>
+    </p>
+  );
+}
+
 /* ---------------- editor dialog ---------------- */
 
 function TimeInputs({ draft, set, errors }: { draft: MaintenanceDraft; set: (p: Partial<MaintenanceDraft>) => void; errors: DraftErrors }) {
   return (
     <div className="grid grid-cols-2 gap-3">
-      <FormField label="From" error={errors.timeStart}>
-        {({ id, describedBy, invalid }) => (
-          <Input id={id} type="time" value={draft.timeStart} onChange={(e) => set({ timeStart: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-        )}
+      <FormField label="From (24 h)" error={errors.timeStart}>
+        {({ id, describedBy, invalid }) => <Time24Input id={id} value={draft.timeStart} onChange={(v) => set({ timeStart: v })} invalid={invalid} describedBy={describedBy} />}
       </FormField>
-      <FormField label="Until" error={errors.timeEnd} hint={draft.timeEnd && draft.timeStart && draft.timeEnd <= draft.timeStart ? 'Ends the next day' : undefined}>
-        {({ id, describedBy, invalid }) => (
-          <Input id={id} type="time" value={draft.timeEnd} onChange={(e) => set({ timeEnd: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-        )}
+      <FormField label="Until (24 h)" error={errors.timeEnd} hint={draft.timeEnd && draft.timeStart && draft.timeEnd <= draft.timeStart ? 'Ends the next day' : undefined}>
+        {({ id, describedBy, invalid }) => <Time24Input id={id} value={draft.timeEnd} onChange={(v) => set({ timeEnd: v })} invalid={invalid} describedBy={describedBy} />}
       </FormField>
     </div>
   );
@@ -333,6 +363,17 @@ function DateRange({ draft, set, errors, requireStart }: { draft: MaintenanceDra
           <Input id={id} type="date" value={draft.endLocal} min={draft.startLocal || undefined} onChange={(e) => set({ endLocal: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
         )}
       </FormField>
+    </div>
+  );
+}
+
+/** Date + 24-hour time for a "YYYY-MM-DDTHH:mm" draft value. */
+function DateTime24({ id, value, onChange, minDate, invalid, describedBy }: { id: string; value: string; onChange: (v: string) => void; minDate?: string; invalid: boolean; describedBy?: string }) {
+  const [date = '', time = ''] = value.split('T');
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_5.5rem] gap-2">
+      <Input id={id} type="date" value={date} min={minDate} onChange={(e) => onChange(`${e.target.value}T${time}`)} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
+      <Time24Input value={time} onChange={(t) => onChange(`${date}T${t}`)} invalid={invalid} describedBy={describedBy} aria-label="Time (24 h)" />
     </div>
   );
 }
@@ -411,247 +452,238 @@ function MaintenanceDialog({
 
   return (
     <Dialog open onOpenChange={(o) => (o || busy ? undefined : onClose())}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
-        <form onSubmit={onSubmit} className="flex flex-col gap-5" noValidate>
-          <DialogHeader>
-            <DialogTitle>{initial ? 'Edit maintenance window' : 'New maintenance window'}</DialogTitle>
-            <DialogDescription>While a window is active, checks pause, monitors show “maintenance” and no alerts are sent.</DialogDescription>
-          </DialogHeader>
-
-          <FormField label="Title" required error={errors.title}>
-            {({ id, describedBy, invalid }) => (
-              <Input id={id} value={draft.title} maxLength={150} placeholder="Database upgrade" autoFocus onChange={(e) => set({ title: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-            )}
-          </FormField>
-          <FormField label="Description" error={errors.description} hint="Shown on status pages linked to this window.">
-            {({ id, describedBy, invalid }) => (
-              <Textarea id={id} rows={2} maxLength={5000} value={draft.description} onChange={(e) => set({ description: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-            )}
-          </FormField>
-
-          <fieldset className="flex flex-col gap-2">
-            <legend className="mb-2 text-sm font-medium">Schedule</legend>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Schedule type">
-              {STRATEGIES.map((s) => (
-                <button
-                  key={s.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={draft.strategy === s.value}
-                  onClick={() => set({ strategy: s.value, ...(s.value === 'single' && draft.strategy !== 'single' ? { startLocal: emptyDraft(draft.tz).startLocal, endLocal: emptyDraft(draft.tz).endLocal } : {}), ...(s.value !== 'single' && draft.strategy === 'single' ? { startLocal: '', endLocal: '' } : {}) })}
-                  className={cn(
-                    'flex min-w-0 flex-col items-start rounded-lg border px-3 py-2 text-left outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50',
-                    draft.strategy === s.value ? 'border-primary bg-primary/5 ring-1 ring-primary dark:bg-primary/10' : 'hover:bg-muted/60',
-                  )}
-                >
-                  <span className="text-sm font-medium">{s.label}</span>
-                  <span className="truncate text-xs text-muted-foreground">{s.hint}</span>
-                </button>
-              ))}
-            </div>
-          </fieldset>
-
-          {draft.strategy === 'manual' ? (
-            <p className="rounded-lg border border-dashed px-3 py-2.5 text-sm text-muted-foreground">
-              The window is active whenever it is switched on below, until you pause it.
-            </p>
-          ) : null}
-
-          {draft.strategy === 'single' ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <FormField label="Starts" required error={errors.startLocal}>
-                {({ id, describedBy, invalid }) => (
-                  <Input id={id} type="datetime-local" value={draft.startLocal} onChange={(e) => set({ startLocal: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-                )}
-              </FormField>
-              <FormField label="Ends" required error={errors.endLocal}>
-                {({ id, describedBy, invalid }) => (
-                  <Input id={id} type="datetime-local" value={draft.endLocal} min={draft.startLocal || undefined} onChange={(e) => set({ endLocal: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-                )}
-              </FormField>
-            </div>
-          ) : null}
-
-          {draft.strategy === 'weekly' ? (
-            <div className="flex flex-col gap-2">
-              <span className="text-sm font-medium">Weekdays</span>
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Weekdays">
-                {[1, 2, 3, 4, 5, 6, 0].map((d) => (
-                  <ToggleChip key={d} pressed={draft.weekdays.includes(d)} onClick={() => set({ weekdays: draft.weekdays.includes(d) ? draft.weekdays.filter((x) => x !== d) : [...draft.weekdays, d] })} className="w-12">
-                    {WEEKDAY_SHORT[d]}
-                  </ToggleChip>
-                ))}
-              </div>
-              {errors.weekdays ? <p className="text-xs text-destructive" role="alert">{errors.weekdays}</p> : null}
-            </div>
-          ) : null}
-
-          {draft.strategy === 'monthly' ? (
-            <div className="flex flex-col gap-2">
-              <span className="text-sm font-medium">Days of the month</span>
-              <div className="grid grid-cols-7 gap-1.5 sm:grid-cols-[repeat(16,minmax(0,1fr))]" role="group" aria-label="Days of the month">
-                {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
-                  <ToggleChip key={d} pressed={draft.daysOfMonth.includes(d)} onClick={() => set({ daysOfMonth: draft.daysOfMonth.includes(d) ? draft.daysOfMonth.filter((x) => x !== d) : [...draft.daysOfMonth, d] })} className="min-w-0 px-0">
-                    {d}
-                  </ToggleChip>
-                ))}
-                <ToggleChip pressed={draft.daysOfMonth.includes('L')} onClick={() => set({ daysOfMonth: draft.daysOfMonth.includes('L') ? draft.daysOfMonth.filter((x) => x !== 'L') : [...draft.daysOfMonth, 'L'] })} className="col-span-2 sm:col-span-2" label="Last day of the month">
-                  Last
-                </ToggleChip>
-              </div>
-              <p className="text-xs text-muted-foreground">Days that do not exist in a month (e.g. 31) are skipped; “Last” is always the final day.</p>
-              {errors.daysOfMonth ? <p className="text-xs text-destructive" role="alert">{errors.daysOfMonth}</p> : null}
-            </div>
-          ) : null}
-
-          {draft.strategy === 'interval' ? (
-            <FormField label="Repeat every" required error={errors.intervalDays}>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-4 sm:max-w-2xl" data-slot="maintenance-dialog">
+        <DialogHeader className="pr-8">
+          <DialogTitle>{initial ? 'Edit maintenance window' : 'New maintenance window'}</DialogTitle>
+          <DialogDescription>While a window is active, checks pause, monitors show “maintenance” and no alerts are sent.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={onSubmit} className="flex min-h-0 min-w-0 flex-1 flex-col gap-4" noValidate>
+          <div className="-mx-4 flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto px-4 pt-1 pb-1">
+            <FormField label="Title" required error={errors.title}>
               {({ id, describedBy, invalid }) => (
-                <div className="relative w-40">
-                  <Input
-                    id={id}
-                    type="number"
-                    min={1}
-                    max={3650}
-                    value={draft.intervalDays ?? ''}
-                    onChange={(e) => set({ intervalDays: e.target.value === '' ? undefined : Number(e.target.value) })}
-                    aria-invalid={invalid || undefined}
-                    aria-describedby={describedBy}
-                    className="pr-12 tabular-nums"
-                  />
-                  <span className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">days</span>
-                </div>
+                <Input id={id} value={draft.title} maxLength={150} placeholder="Database upgrade" autoFocus onChange={(e) => set({ title: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
               )}
             </FormField>
-          ) : null}
+            <FormField label="Description" error={errors.description} hint="Shown on status pages linked to this window.">
+              {({ id, describedBy, invalid }) => (
+                <Textarea id={id} rows={2} maxLength={5000} value={draft.description} onChange={(e) => set({ description: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
+              )}
+            </FormField>
 
-          {draft.strategy === 'cron' ? (
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
-              <FormField label="Cron expression" required error={errors.cron} hint="minute hour day-of-month month weekday · e.g. 30 2 * * 0 = Sundays 02:30 · L = last day">
+            <fieldset className="flex flex-col gap-2">
+              <legend className="mb-2 text-sm font-medium">Schedule</legend>
+              <RadioCards
+                className="grid grid-cols-2 gap-2 sm:grid-cols-3"
+                label="Schedule type"
+                value={draft.strategy}
+                options={STRATEGIES}
+                onChange={(v) =>
+                  set({
+                    strategy: v,
+                    ...(v === 'single' && draft.strategy !== 'single' ? { startLocal: emptyDraft(draft.tz).startLocal, endLocal: emptyDraft(draft.tz).endLocal } : {}),
+                    ...(v !== 'single' && draft.strategy === 'single' ? { startLocal: '', endLocal: '' } : {}),
+                  })
+                }
+              />
+            </fieldset>
+
+            {draft.strategy === 'manual' ? (
+              <p className="rounded-lg border border-dashed px-3 py-2.5 text-sm text-muted-foreground">
+                The window is active whenever it is switched on below, until you pause it.
+              </p>
+            ) : null}
+
+            {draft.strategy === 'single' ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <FormField label="Starts" required error={errors.startLocal}>
+                  {({ id, describedBy, invalid }) => <DateTime24 id={id} value={draft.startLocal} onChange={(v) => set({ startLocal: v })} invalid={invalid} describedBy={describedBy} />}
+                </FormField>
+                <FormField label="Ends" required error={errors.endLocal}>
+                  {({ id, describedBy, invalid }) => (
+                    <DateTime24 id={id} value={draft.endLocal} minDate={draft.startLocal.split('T')[0] || undefined} onChange={(v) => set({ endLocal: v })} invalid={invalid} describedBy={describedBy} />
+                  )}
+                </FormField>
+              </div>
+            ) : null}
+
+            {draft.strategy === 'weekly' ? (
+              <div className="flex flex-col gap-2">
+                <span className="text-sm font-medium">Weekdays</span>
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Weekdays">
+                  {[1, 2, 3, 4, 5, 6, 0].map((d) => (
+                    <ToggleChip key={d} pressed={draft.weekdays.includes(d)} onClick={() => set({ weekdays: draft.weekdays.includes(d) ? draft.weekdays.filter((x) => x !== d) : [...draft.weekdays, d] })} className="w-12">
+                      {WEEKDAY_SHORT[d]}
+                    </ToggleChip>
+                  ))}
+                </div>
+                {errors.weekdays ? <p className="text-xs text-destructive" role="alert">{errors.weekdays}</p> : null}
+              </div>
+            ) : null}
+
+            {draft.strategy === 'monthly' ? (
+              <div className="flex flex-col gap-2">
+                <span className="text-sm font-medium">Days of the month</span>
+                <div className="grid grid-cols-7 gap-1.5 sm:grid-cols-[repeat(16,minmax(0,1fr))]" role="group" aria-label="Days of the month">
+                  {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                    <ToggleChip key={d} pressed={draft.daysOfMonth.includes(d)} onClick={() => set({ daysOfMonth: draft.daysOfMonth.includes(d) ? draft.daysOfMonth.filter((x) => x !== d) : [...draft.daysOfMonth, d] })} className="min-w-0 px-0">
+                      {d}
+                    </ToggleChip>
+                  ))}
+                  <ToggleChip pressed={draft.daysOfMonth.includes('L')} onClick={() => set({ daysOfMonth: draft.daysOfMonth.includes('L') ? draft.daysOfMonth.filter((x) => x !== 'L') : [...draft.daysOfMonth, 'L'] })} className="col-span-2 sm:col-span-2" label="Last day of the month">
+                    Last
+                  </ToggleChip>
+                </div>
+                <p className="text-xs text-muted-foreground">Days that do not exist in a month (e.g. 31) are skipped; “Last” is always the final day.</p>
+                {errors.daysOfMonth ? <p className="text-xs text-destructive" role="alert">{errors.daysOfMonth}</p> : null}
+              </div>
+            ) : null}
+
+            {draft.strategy === 'interval' ? (
+              <FormField label="Repeat every" required error={errors.intervalDays}>
                 {({ id, describedBy, invalid }) => (
-                  <Input id={id} value={draft.cron} maxLength={120} spellCheck={false} autoComplete="off" className="font-mono" onChange={(e) => set({ cron: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-                )}
-              </FormField>
-              <FormField label="Duration" required error={errors.durationMin}>
-                {({ id, describedBy, invalid }) => (
-                  <div className="relative">
+                  <div className="relative w-40">
                     <Input
                       id={id}
                       type="number"
                       min={1}
-                      max={10080}
-                      value={draft.durationMin ?? ''}
-                      onChange={(e) => set({ durationMin: e.target.value === '' ? undefined : Number(e.target.value) })}
+                      max={3650}
+                      value={draft.intervalDays ?? ''}
+                      onChange={(e) => set({ intervalDays: e.target.value === '' ? undefined : Number(e.target.value) })}
                       aria-invalid={invalid || undefined}
                       aria-describedby={describedBy}
                       className="pr-12 tabular-nums"
                     />
-                    <span className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">min</span>
+                    <span className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">days</span>
                   </div>
                 )}
               </FormField>
-            </div>
-          ) : null}
+            ) : null}
 
-          {recurring ? <TimeInputs draft={draft} set={set} errors={errors} /> : null}
-          {recurring || draft.strategy === 'cron' ? <DateRange draft={draft} set={set} errors={errors} requireStart={draft.strategy === 'interval'} /> : null}
+            {draft.strategy === 'cron' ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                <FormField label="Cron expression" required error={errors.cron} hint="minute hour day-of-month month weekday · e.g. 30 2 * * 0 = Sundays 02:30 · L = last day">
+                  {({ id, describedBy, invalid }) => (
+                    <Input id={id} value={draft.cron} maxLength={120} spellCheck={false} autoComplete="off" className="font-mono" onChange={(e) => set({ cron: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
+                  )}
+                </FormField>
+                <FormField label="Duration" required error={errors.durationMin}>
+                  {({ id, describedBy, invalid }) => (
+                    <div className="relative">
+                      <Input
+                        id={id}
+                        type="number"
+                        min={1}
+                        max={10080}
+                        value={draft.durationMin ?? ''}
+                        onChange={(e) => set({ durationMin: e.target.value === '' ? undefined : Number(e.target.value) })}
+                        aria-invalid={invalid || undefined}
+                        aria-describedby={describedBy}
+                        className="pr-12 tabular-nums"
+                      />
+                      <span className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">min</span>
+                    </div>
+                  )}
+                </FormField>
+              </div>
+            ) : null}
 
-          {draft.strategy !== 'manual' ? (
-            <FormField label="Time zone" required error={errors.tz}>
-              {({ id, describedBy, invalid }) => (
-                <>
-                  <Input id={id} list={zonesId} value={draft.tz} spellCheck={false} autoComplete="off" onChange={(e) => set({ tz: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
-                  <datalist id={zonesId}>
-                    {zones.map((z) => (
-                      <option key={z} value={z} />
+            {recurring ? <TimeInputs draft={draft} set={set} errors={errors} /> : null}
+            {recurring || draft.strategy === 'cron' ? <DateRange draft={draft} set={set} errors={errors} requireStart={draft.strategy === 'interval'} /> : null}
+
+            {draft.strategy !== 'manual' ? (
+              <FormField label="Time zone" required error={errors.tz}>
+                {({ id, describedBy, invalid }) => (
+                  <>
+                    <Input id={id} list={zonesId} value={draft.tz} spellCheck={false} autoComplete="off" onChange={(e) => set({ tz: e.target.value })} aria-invalid={invalid || undefined} aria-describedby={describedBy} />
+                    <datalist id={zonesId}>
+                      {zones.map((z) => (
+                        <option key={z} value={z} />
+                      ))}
+                    </datalist>
+                  </>
+                )}
+              </FormField>
+            ) : null}
+
+            {draft.strategy !== 'manual' ? (
+              <div className="rounded-lg border bg-muted/30 px-3 py-2.5" aria-live="polite">
+                <div className="mb-1.5 text-xs font-medium text-muted-foreground">Next windows (24 h, {displayText(draft.tz)})</div>
+                {preview.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No upcoming window with these settings.</p>
+                ) : (
+                  <ol className="flex flex-col gap-1">
+                    {preview.map((w) => (
+                      <li key={w.start} className="flex flex-wrap items-baseline justify-between gap-x-3 text-sm tabular-nums">
+                        <span>{formatWindow(w, draft.tz)}</span>
+                        <span className="text-xs text-muted-foreground">{formatRelative(w.start)}</span>
+                      </li>
                     ))}
-                  </datalist>
-                </>
-              )}
-            </FormField>
-          ) : null}
+                  </ol>
+                )}
+              </div>
+            ) : null}
 
-          {draft.strategy !== 'manual' ? (
-            <div className="rounded-lg border bg-muted/30 px-3 py-2.5" aria-live="polite">
-              <div className="mb-1.5 text-xs font-medium text-muted-foreground">Next windows ({displayText(draft.tz)})</div>
-              {preview.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No upcoming window with these settings.</p>
-              ) : (
-                <ol className="flex flex-col gap-1">
-                  {preview.map((w) => (
-                    <li key={w.start} className="flex flex-wrap items-baseline justify-between gap-x-3 text-sm tabular-nums">
-                      <span>{formatWindow(w, draft.tz)}</span>
-                      <span className="text-xs text-muted-foreground">{formatRelative(w.start)}</span>
-                    </li>
-                  ))}
-                </ol>
-              )}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium">Affected monitors</span>
+                <span className="text-xs text-muted-foreground tabular-nums">{draft.monitorUids.length} selected</span>
+              </div>
+              <p className="text-xs text-muted-foreground">Monitors in a selected group are included automatically.</p>
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter monitors" aria-label="Filter monitors" className="pl-8" />
+              </div>
+              <div className="max-h-56 overflow-y-auto rounded-lg border p-1">
+                {monitors.length === 0 ? (
+                  <p className="px-2 py-3 text-sm text-muted-foreground">No monitors yet.</p>
+                ) : shownMonitors.length === 0 ? (
+                  <p className="px-2 py-3 text-sm text-muted-foreground">No monitors match.</p>
+                ) : (
+                  [...bySite].map(([siteId, list]) => (
+                    <div key={siteId} className="flex flex-col">
+                      {bySite.size > 1 || siteNames.size > 1 ? (
+                        <div className="bidi-isolate px-2 pt-2 pb-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">{displayText(siteNames.get(siteId) ?? 'Site')}</div>
+                      ) : null}
+                      {list.map((m) => (
+                        <CheckRow
+                          key={m.uid}
+                          checked={draft.monitorUids.includes(m.uid)}
+                          onChange={(on) => set({ monitorUids: on ? [...draft.monitorUids, m.uid] : draft.monitorUids.filter((x) => x !== m.uid) })}
+                          description={m.target ? <span className="bidi-isolate">{displayText(m.target)}</span> : undefined}
+                          title={m.target ? `${displayText(m.name)}\n${displayText(m.target)}` : displayText(m.name)}
+                        >
+                          <span className="bidi-isolate">{displayText(m.name)}</span>
+                          {m.type === 'group' ? <span className="ml-1.5 text-xs text-muted-foreground">group</span> : null}
+                        </CheckRow>
+                      ))}
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
-          ) : null}
 
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-sm font-medium">Affected monitors</span>
-              <span className="text-xs text-muted-foreground tabular-nums">{draft.monitorUids.length} selected</span>
+            <div className="flex items-start justify-between gap-4 rounded-lg border px-3 py-2.5">
+              <div className="flex flex-col gap-0.5">
+                <Label htmlFor="maint-active">Active</Label>
+                <p className="text-xs text-muted-foreground">{draft.strategy === 'manual' ? 'On = under maintenance now.' : 'Paused windows never start.'}</p>
+              </div>
+              <Switch id="maint-active" checked={draft.active} onCheckedChange={(v) => set({ active: v })} />
             </div>
-            <p className="text-xs text-muted-foreground">Monitors in a selected group are included automatically.</p>
-            <div className="relative">
-              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-              <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter monitors" aria-label="Filter monitors" className="pl-8" />
-            </div>
-            <div className="max-h-56 overflow-y-auto rounded-lg border p-1">
-              {monitors.length === 0 ? (
-                <p className="px-2 py-3 text-sm text-muted-foreground">No monitors yet.</p>
-              ) : shownMonitors.length === 0 ? (
-                <p className="px-2 py-3 text-sm text-muted-foreground">No monitors match.</p>
-              ) : (
-                [...bySite].map(([siteId, list]) => (
-                  <div key={siteId} className="flex flex-col">
-                    {bySite.size > 1 || siteNames.size > 1 ? (
-                      <div className="bidi-isolate px-2 pt-2 pb-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">{displayText(siteNames.get(siteId) ?? 'Site')}</div>
-                    ) : null}
-                    {list.map((m) => (
-                      <CheckRow
-                        key={m.uid}
-                        checked={draft.monitorUids.includes(m.uid)}
-                        onChange={(on) => set({ monitorUids: on ? [...draft.monitorUids, m.uid] : draft.monitorUids.filter((x) => x !== m.uid) })}
-                        description={m.target ? <span className="bidi-isolate">{displayText(m.target)}</span> : undefined}
-                      >
-                        <span className="bidi-isolate">{displayText(m.name)}</span>
-                        {m.type === 'group' ? <span className="ml-1.5 text-xs text-muted-foreground">group</span> : null}
-                      </CheckRow>
-                    ))}
-                  </div>
-                ))
-              )}
-            </div>
+
           </div>
 
-          <div className="flex items-start justify-between gap-4 rounded-lg border px-3 py-2.5">
-            <div className="flex flex-col gap-0.5">
-              <Label htmlFor="maint-active">Active</Label>
-              <p className="text-xs text-muted-foreground">{draft.strategy === 'manual' ? 'On = under maintenance now.' : 'Paused windows never start.'}</p>
+          <DialogFooter className="mt-auto sm:items-center sm:justify-between">
+            <p className={cn('min-h-5 text-sm text-destructive', !formError && Object.keys(errors).length === 0 && 'max-sm:hidden')} role="alert">
+              {formError ?? (Object.keys(errors).length > 0 ? 'Please fix the highlighted fields.' : '')}
+            </p>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
+              <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy}>
+                {busy ? 'Saving…' : initial ? 'Save' : 'Create window'}
+              </Button>
             </div>
-            <Switch id="maint-active" checked={draft.active} onCheckedChange={(v) => set({ active: v })} />
-          </div>
-
-          {formError ? (
-            <p className="text-sm text-destructive" role="alert">
-              {formError}
-            </p>
-          ) : Object.keys(errors).length > 0 ? (
-            <p className="text-sm text-destructive" role="alert">
-              Please fix the highlighted fields.
-            </p>
-          ) : null}
-
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={busy}>
-              {busy ? 'Saving…' : initial ? 'Save' : 'Create window'}
-            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

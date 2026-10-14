@@ -65,7 +65,7 @@ function deltaText(cur: number | null, prev: number | null): { text: string; ton
   if (cur === null || prev === null) return null;
   const pp = (cur - prev) * 100;
   if (Math.abs(pp) < 0.005) return { text: 'same as previous period', tone: 'text-muted-foreground' };
-  return { text: `${pp > 0 ? '+' : '−'}${Math.abs(pp).toFixed(2)} pp vs previous`, tone: pp > 0 ? 'text-good' : 'text-poor' };
+  return { text: `${pp > 0 ? '+' : '−'}${Math.abs(pp).toFixed(2)} pp vs previous`, tone: pp > 0 ? 'text-good-text' : 'text-poor-text' };
 }
 
 export function SiteUptimePage() {

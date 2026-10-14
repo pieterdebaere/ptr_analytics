@@ -731,6 +731,12 @@ export class Engine implements EngineControl, EngineHandle {
     // One transaction for all bookkeeping writes of this tick.
     this.ctx.db.transaction(() => {
       for (const { m, start } of due) {
+        if (start !== null && m.notifiedStart !== null && m.strategy === 'cron' && m.durationS && start <= m.notifiedStart + m.durationS * 1000) {
+          // The next cron window starts before the announced one ended: the maintenance simply
+          // continues (no end + start notification pair, e.g. every minute for "* * * * *").
+          this.maintRepo.setNotifiedStart(m.id, start);
+          continue;
+        }
         const monitorIds = this.maintRepo.monitorIds(m.id);
         if (start !== null && m.notifiedStart !== null) {
           // a new window while the previous one was never closed: close it first

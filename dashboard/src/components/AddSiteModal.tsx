@@ -92,7 +92,7 @@ export function AddSiteModal({ onClose, onCreated }: { onClose: () => void; onCr
         ) : created ? (
           <>
             <DialogHeader>
-              <div className="mb-1 flex size-10 items-center justify-center rounded-full bg-good/12 text-good">
+              <div className="mb-1 flex size-10 items-center justify-center rounded-full bg-good/12 text-good-text">
                 <CheckCircle2Icon className="size-5" aria-hidden="true" />
               </div>
               <DialogTitle>Site added</DialogTitle>

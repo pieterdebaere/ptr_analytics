@@ -1,5 +1,5 @@
 // Small form building blocks shared by the monitor and maintenance editors.
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { CheckIcon, PlusIcon, TagIcon, XIcon } from 'lucide-react';
 import { errorMessage } from '@/api/client';
 import { uptimeApi, type Tag } from '@/api/uptime';
@@ -18,6 +18,7 @@ export function CheckRow({
   description,
   disabled,
   className,
+  title,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
@@ -25,6 +26,8 @@ export function CheckRow({
   description?: ReactNode;
   disabled?: boolean;
   className?: string;
+  /** full text for truncated label/description */
+  title?: string;
 }) {
   return (
     <button
@@ -32,6 +35,7 @@ export function CheckRow({
       role="checkbox"
       aria-checked={checked}
       disabled={disabled}
+      title={title}
       onClick={() => onChange(!checked)}
       className={cn(
         'flex w-full min-w-0 items-start gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
@@ -49,9 +53,124 @@ export function CheckRow({
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="min-w-0 truncate">{children}</span>
-        {description ? <span className="text-xs text-muted-foreground">{description}</span> : null}
+        {description ? <span className="min-w-0 truncate text-xs text-muted-foreground">{description}</span> : null}
       </span>
     </button>
+  );
+}
+
+/**
+ * Radio group of cards (WAI-ARIA radio group: one Tab stop, arrow keys move and select,
+ * Home/End jump). `className` lays out the cards (e.g. a grid).
+ */
+export function RadioCards<T extends string>({
+  value,
+  onChange,
+  options,
+  label,
+  className,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: ReadonlyArray<{ value: T; label: ReactNode; hint?: string }>;
+  label: string;
+  className?: string;
+}) {
+  const refs = useRef<Array<HTMLButtonElement | null>>([]);
+  const current = Math.max(0, options.findIndex((o) => o.value === value));
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const keys: Record<string, number> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+    let next: number | null = null;
+    if (e.key in keys) next = (current + keys[e.key]! + options.length) % options.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = options.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    onChange(options[next]!.value);
+    refs.current[next]?.focus();
+  };
+  return (
+    <div className={className} role="radiogroup" aria-label={label} onKeyDown={onKeyDown}>
+      {options.map((o, i) => {
+        const checked = i === current;
+        return (
+          <button
+            key={o.value}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={checked}
+            tabIndex={checked ? 0 : -1}
+            onClick={() => onChange(o.value)}
+            className={cn(
+              'flex min-w-0 flex-col items-start rounded-lg border px-3 py-2 text-left outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50',
+              checked ? 'border-primary bg-primary/5 ring-1 ring-primary dark:bg-primary/10' : 'hover:bg-muted/60',
+            )}
+          >
+            <span className="text-sm font-medium">{o.label}</span>
+            {o.hint ? (
+              <span className="w-full truncate text-xs text-muted-foreground" title={o.hint}>
+                {o.hint}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** "2:30" / "0230" / "230" / "2" -> "02:30" / "02:00" (24-hour), or the input unchanged when it cannot be read. */
+export function normalizeTime24(raw: string): string {
+  const s = raw.trim();
+  const m = /^(\d{1,2})(?::?(\d{2}))?$/.exec(s) ?? /^(\d{1,2}):(\d{1,2})$/.exec(s);
+  if (!m) return raw;
+  const h = Number(m[1]);
+  const min = m[2] === undefined ? 0 : Number(m[2]);
+  if (h > 23 || min > 59) return raw;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+/** 24-hour "HH:mm" text input (native time inputs follow the browser locale and may show AM/PM). */
+export function Time24Input({
+  id,
+  value,
+  onChange,
+  invalid,
+  describedBy,
+  className,
+  'aria-label': ariaLabel,
+}: {
+  id?: string;
+  value: string;
+  onChange: (v: string) => void;
+  invalid?: boolean;
+  describedBy?: string;
+  className?: string;
+  'aria-label'?: string;
+}) {
+  return (
+    <Input
+      id={id}
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      spellCheck={false}
+      placeholder="HH:MM"
+      maxLength={5}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onBlur={(e) => {
+        const n = normalizeTime24(e.target.value);
+        if (n !== e.target.value) onChange(n);
+      }}
+      aria-invalid={invalid || undefined}
+      aria-describedby={describedBy}
+      aria-label={ariaLabel}
+      className={cn('tabular-nums', className)}
+    />
   );
 }
 

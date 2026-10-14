@@ -93,7 +93,7 @@ export function TypePicker({ types, hosted, onPick }: { types: readonly MonitorT
                   <span className="flex min-w-0 flex-col gap-0.5">
                     <span className="text-sm font-medium">{t.label}</span>
                     <span className="line-clamp-2 text-xs text-muted-foreground">{t.description}</span>
-                    {reason ? <span className="mt-1 text-xs font-medium text-warn">{reason}</span> : null}
+                    {reason ? <span className="mt-1 text-xs font-medium text-warn-text">{reason}</span> : null}
                   </span>
                 </button>
               );

@@ -12,7 +12,7 @@ export function DownBanner({ monitors, siteNames, max = 4 }: { monitors: readonl
   const shown = monitors.slice(0, max);
   return (
     <Alert className="min-w-0 border-poor/40 bg-poor/6 text-foreground" data-slot="down-banner">
-      <AlertTriangleIcon className="text-poor" aria-hidden="true" />
+      <AlertTriangleIcon className="text-poor-text" aria-hidden="true" />
       <AlertTitle>
         {monitors.length === 1 ? '1 monitor is down' : `${monitors.length} monitors are down`}
       </AlertTitle>

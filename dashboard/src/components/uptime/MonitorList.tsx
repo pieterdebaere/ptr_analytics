@@ -233,7 +233,7 @@ export function MonitorList({ monitors, beats, sites, typeLabels, canManage, emp
 function CertCell({ m }: { m: Monitor }) {
   const d = m.tls?.daysLeft ?? null;
   if (!m.tls || d === null) return <span className="text-muted-foreground/60">–</span>;
-  const tone = !m.tls.valid || d < 7 ? 'text-poor' : d < 21 ? 'text-warn' : 'text-muted-foreground';
+  const tone = !m.tls.valid || d < 7 ? 'text-poor-text' : d < 21 ? 'text-warn-text' : 'text-muted-foreground';
   return (
     <span className={cn('inline-flex items-center gap-1 tabular-nums', tone)} title={m.tls.valid ? `Certificate valid for ${d} more days` : 'Certificate invalid'}>
       <ShieldCheckIcon className="size-3.5" aria-hidden="true" />

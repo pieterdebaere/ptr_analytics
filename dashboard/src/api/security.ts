@@ -16,8 +16,29 @@ export interface MfaSetup {
   otpauthUrl: string;
 }
 
-export type ApiKeyScope = 'read' | 'metrics';
-export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['read', 'metrics'];
+/** `metrics:all` (admins only): /metrics for every account's monitors. */
+export type ApiKeyScope = 'read' | 'metrics' | 'metrics:all';
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['read', 'metrics', 'metrics:all'];
+const isScope = (s: unknown): s is ApiKeyScope => s === 'read' || s === 'metrics' || s === 'metrics:all';
+
+/** A current second factor: a 6-digit authenticator code or a recovery code. */
+export type SecondFactor = { code: string } | { recoveryCode: string };
+
+export interface MfaEnabled {
+  recoveryCodes: string[];
+  /** API keys revoked because 2FA was turned on (keys must be re-created). */
+  apiKeysRevoked: number;
+}
+
+export interface CreateApiKeyInput {
+  name: string;
+  scopes: ApiKeyScope[];
+  expiresInDays?: number;
+  /** The account password (required). */
+  password: string;
+  /** A current second factor, required when 2FA is on (else 400 `mfa_code_required`). */
+  factor?: SecondFactor;
+}
 
 export interface ApiKey {
   uid: string;
@@ -80,7 +101,7 @@ export function parseApiKey(raw: unknown): ApiKey | null {
     uid: raw.uid,
     name: typeof raw.name === 'string' ? raw.name : '',
     prefix: typeof raw.prefix === 'string' ? raw.prefix : '',
-    scopes: arr(raw.scopes).filter((s): s is ApiKeyScope => s === 'read' || s === 'metrics'),
+    scopes: arr(raw.scopes).filter(isScope),
     createdAt: numOrNull(raw.createdAt),
     lastUsedAt: numOrNull(raw.lastUsedAt),
     expiresAt: numOrNull(raw.expiresAt),
@@ -94,6 +115,42 @@ function parseCodes(raw: unknown): string[] {
 }
 
 const keyPath = (uid: string) => `/api-keys/${encodeURIComponent(uid)}`;
+
+/** Normalised request body part for a second factor. */
+function factorBody(f: SecondFactor): { code: string } | { recoveryCode: string } {
+  return 'code' in f ? { code: normalizeTotp(f.code) } : { recoveryCode: normalizeRecoveryCode(f.recoveryCode) };
+}
+
+/** Client-side check of a second factor; returns a message or null. */
+export function factorError(f: SecondFactor): string | null {
+  if ('code' in f) return isTotpCode(f.code) ? null : 'Enter the 6-digit code from your authenticator app.';
+  return isRecoveryCode(f.recoveryCode) ? null : 'Enter one of your recovery codes.';
+}
+
+export type SecurityErrorField = 'password' | 'code' | null;
+
+/**
+ * User-facing message for errors of the re-authenticated security endpoints (MFA setup /
+ * enable / disable, recovery codes, API keys), with the form field it belongs to.
+ */
+export function securityError(err: unknown): { field: SecurityErrorField; message: string } {
+  if (!(err instanceof ApiError)) return { field: null, message: err instanceof Error && err.name === 'AbortError' ? '' : 'Something went wrong.' };
+  const msg = err.message.toLowerCase();
+  if (err.code === 'mfa_locked') {
+    const m = /try again in (\d+) ?min/.exec(msg);
+    return { field: 'code', message: m ? `Too many wrong codes. Try again in ${m[1]} ${m[1] === '1' ? 'minute' : 'minutes'}.` : 'Too many wrong codes. Try again later.' };
+  }
+  if (err.status === 429) return { field: null, message: 'Too many attempts. Please wait a few minutes and try again.' };
+  if (err.code === 'invalid_code' || msg === 'invalid code') {
+    return { field: 'code', message: 'That code didn’t work. Check the time on your device and try again, or use an unused recovery code.' };
+  }
+  if (err.code === 'mfa_code_required' || msg === 'code is required') return { field: 'code', message: 'Enter a code from your authenticator app.' };
+  if (msg === 'password is incorrect') return { field: 'password', message: 'The password is incorrect.' };
+  if (msg === 'password is required') return { field: 'password', message: 'Enter your password.' };
+  if (err.code === 'limit_reached') return { field: null, message: 'You have reached the maximum number of API keys. Revoke one first.' };
+  const sentence = err.message.charAt(0).toUpperCase() + err.message.slice(1);
+  return { field: null, message: /[.!?]$/.test(sentence) ? sentence : `${sentence}.` };
+}
 
 export const securityApi = {
   /**
@@ -127,18 +184,26 @@ export const securityApi = {
         required: isObj(r) && r.required === true,
       }),
     ),
-  mfaSetup: () =>
-    request<unknown>('POST', '/auth/mfa/setup').then((r): MfaSetup => {
+  /** Starts enrolment; re-authenticates with the account password. */
+  mfaSetup: (password: string) =>
+    request<unknown>('POST', '/auth/mfa/setup', { body: { password } }).then((r): MfaSetup => {
       const secret = isObj(r) && typeof r.secret === 'string' ? r.secret.replace(/\s+/g, '').toUpperCase() : '';
       const otpauthUrl = isObj(r) ? safeOtpauthUrl(r.otpauthUrl) : null;
       if (!TOTP_SECRET_RE.test(secret) || !otpauthUrl) throw new ApiError(500, 'Invalid response from server.');
       return { secret, otpauthUrl };
     }),
-  mfaEnable: (code: string) => request<unknown>('POST', '/auth/mfa/enable', { body: { code: normalizeTotp(code) } }).then(parseCodes),
-  mfaDisable: (password: string, code: string) =>
-    request<void>('POST', '/auth/mfa/disable', { body: { password, code: normalizeTotp(code) } }),
-  regenerateRecoveryCodes: (password: string, code: string) =>
-    request<unknown>('POST', '/auth/mfa/recovery-codes', { body: { password, code: normalizeTotp(code) } }).then(parseCodes),
+  /** Confirms enrolment with the password and the first code from the app. */
+  mfaEnable: (password: string, code: string) =>
+    request<unknown>('POST', '/auth/mfa/enable', { body: { password, code: normalizeTotp(code) } }).then(
+      (r): MfaEnabled => ({
+        recoveryCodes: parseCodes(r),
+        apiKeysRevoked: isObj(r) && typeof r.apiKeysRevoked === 'number' && r.apiKeysRevoked > 0 ? Math.floor(r.apiKeysRevoked) : 0,
+      }),
+    ),
+  mfaDisable: (password: string, factor: SecondFactor) =>
+    request<void>('POST', '/auth/mfa/disable', { body: { password, ...factorBody(factor) } }),
+  regenerateRecoveryCodes: (password: string, factor: SecondFactor) =>
+    request<unknown>('POST', '/auth/mfa/recovery-codes', { body: { password, ...factorBody(factor) } }).then(parseCodes),
 
   listApiKeys: (signal?: AbortSignal) =>
     request<unknown>('GET', '/api-keys', { signal }).then((r) =>
@@ -146,8 +211,8 @@ export const securityApi = {
         .map(parseApiKey)
         .filter((k): k is ApiKey => k !== null),
     ),
-  createApiKey: (body: { name: string; scopes: ApiKeyScope[]; expiresInDays?: number }) =>
-    request<unknown>('POST', '/api-keys', { body }).then((r): CreatedApiKey => {
+  createApiKey: ({ factor, ...input }: CreateApiKeyInput) =>
+    request<unknown>('POST', '/api-keys', { body: { ...input, ...(factor ? factorBody(factor) : {}) } }).then((r): CreatedApiKey => {
       const o = isObj(r) ? r : {};
       const meta = parseApiKey(o.apiKey ?? o.keyInfo ?? o.meta ?? o);
       // the secret may come as `key` (string) or `token`/`secret`

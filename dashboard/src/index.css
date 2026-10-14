@@ -72,6 +72,13 @@
     --color-warn: var(--warn);
     --color-poor: var(--poor);
     --color-live: var(--live);
+    --color-maint: var(--maint);
+    /* Status colours for TEXT (WCAG AA on card/background and on the soft /12 pills).
+       Use text-good-text etc. for words/numbers; keep bg-good etc. for dots and bars. */
+    --color-good-text: var(--good-text);
+    --color-warn-text: var(--warn-text);
+    --color-poor-text: var(--poor-text);
+    --color-maint-text: var(--maint-text);
 }
 
 :root {
@@ -143,6 +150,11 @@
     --warn: oklch(0.7 0.16 65);
     --poor: oklch(0.6 0.21 25);
     --live: oklch(0.65 0.17 152);
+    --maint: var(--chart-1);
+    --good-text: oklch(0.5 0.13 152);
+    --warn-text: oklch(0.53 0.14 58);
+    --poor-text: oklch(0.52 0.2 25);
+    --maint-text: oklch(0.5 0.2 261);
 }
 
 .dark {
@@ -201,6 +213,12 @@
     --warn: oklch(0.8 0.15 75);
     --poor: oklch(0.7 0.19 25);
     --live: oklch(0.76 0.17 152);
+    --maint: var(--chart-1);
+    /* dark mode: the base colours already pass AA as text */
+    --good-text: var(--good);
+    --warn-text: var(--warn);
+    --poor-text: var(--poor);
+    --maint-text: oklch(0.74 0.14 255);
 }
 
 @layer base {

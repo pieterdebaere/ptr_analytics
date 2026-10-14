@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { DownBanner } from '@/components/uptime/banner';
-import { displayStatus, formatUptime, siteHealthStatus } from '@/components/uptime/lib';
+import { displayStatus, formatUptime, siteHealthStatus, uptimeTone } from '@/components/uptime/lib';
 import { StatusDot } from '@/components/uptime/status';
 import { useCanManageSites } from '@/hooks/auth';
 import { useApi } from '@/hooks/useApi';
@@ -71,7 +71,7 @@ export function OverviewPage() {
           <ErrorState message={error} onRetry={reload} />
         </Card>
       ) : loading && !data ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[0, 1, 2].map((i) => (
             <Skeleton key={i} className="h-44 rounded-xl" />
           ))}
@@ -96,7 +96,7 @@ export function OverviewPage() {
           </EmptyState>
         </Card>
       ) : (
-        <div className={cn('grid gap-4 transition-opacity sm:grid-cols-2 lg:grid-cols-3', loading && 'opacity-60')}>
+        <div className={cn('grid grid-cols-1 gap-4 transition-opacity sm:grid-cols-2 lg:grid-cols-3', loading && 'opacity-60')}>
           {sorted.map((s) => (
             <SiteCard key={s.id} site={s} suspended={suspended.has(s.id)} href={siteHref(s.id)} health={health.get(s.id)} />
           ))}
@@ -122,17 +122,19 @@ function SiteCard({ site, href, suspended, health }: { site: OverviewSite; href:
     <Link
       to={href}
       data-slot="site-card"
-      className="group/site flex flex-col gap-4 rounded-xl bg-card p-4 text-card-foreground ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50"
+      className="group/site flex min-w-0 flex-col gap-4 rounded-xl bg-card p-4 text-card-foreground ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div data-slot="site-card-name" className="bidi-isolate truncate font-medium">
+          <div data-slot="site-card-name" className="bidi-isolate truncate font-medium" title={displayText(site.name)}>
             {displayText(site.name)}
           </div>
-          <div className="bidi-isolate truncate text-xs text-muted-foreground">{displayText(site.domains.join(', '))}</div>
+          <div className="bidi-isolate truncate text-xs text-muted-foreground" title={displayText(site.domains.join(', '))}>
+            {displayText(site.domains.join(', '))}
+          </div>
         </div>
         {suspended ? (
-          <Badge variant="outline" className="shrink-0 border-warn/50 text-warn">
+          <Badge variant="outline" className="shrink-0 border-warn/50 text-warn-text">
             Suspended
           </Badge>
         ) : null}
@@ -160,19 +162,28 @@ function SiteCard({ site, href, suspended, health }: { site: OverviewSite; href:
   );
 }
 
-/** Worst monitor status, "n/m up" and 30-day uptime of a site (from GET /api/uptime/overview). */
+/** Worst monitor status, "n/m up" (+ down / maintenance / pending counts) and 30-day uptime of a site (from GET /api/uptime/overview). */
 function SiteHealthLine({ health }: { health: SiteHealth }) {
   const status = siteHealthStatus(health);
   const active = health.total - health.paused;
+  const parts: Array<{ key: string; text: string; className?: string }> = [];
+  if (health.down > 0) parts.push({ key: 'down', text: `${health.down} down`, className: 'font-medium text-poor-text' });
+  parts.push({ key: 'up', text: `${health.up}/${active} up`, className: health.down > 0 ? undefined : 'font-medium text-foreground' });
+  if (health.maintenance > 0) parts.push({ key: 'maint', text: `${health.maintenance} in maintenance` });
+  if (health.pending > 0) parts.push({ key: 'pending', text: `${health.pending} pending` });
   return (
     <div data-slot="site-health" className="-mx-4 -mb-4 flex items-center gap-2 rounded-b-xl border-t bg-muted/30 px-4 py-2.5 text-xs text-muted-foreground">
       <StatusDot status={status} halo={false} className="size-2" />
-      <span className={cn('font-medium', status === 'down' ? 'text-poor' : 'text-foreground')}>
-        {health.down > 0 ? `${health.down} down` : `${health.up}/${active} up`}
+      <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 tabular-nums">
+        {parts.map((p, i) => (
+          <span key={p.key} className="inline-flex items-center gap-x-1.5 whitespace-nowrap">
+            {i > 0 ? <span aria-hidden="true">·</span> : null}
+            <span className={p.className}>{p.text}</span>
+          </span>
+        ))}
       </span>
-      {health.down > 0 ? <span className="tabular-nums">· {health.up}/{active} up</span> : null}
-      <span className="ml-auto tabular-nums" title="Uptime, last 30 days">
-        {formatUptime(health.uptime30d)} <span className="text-muted-foreground/80">30 d</span>
+      <span className="ml-auto shrink-0 tabular-nums" title="Uptime, last 30 days">
+        <span className={cn('font-medium', uptimeTone(health.uptime30d))}>{formatUptime(health.uptime30d)}</span> <span>30 d</span>
       </span>
     </div>
   );

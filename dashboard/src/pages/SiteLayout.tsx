@@ -136,7 +136,7 @@ export function SuspendedBanner() {
   const { user } = useAuth();
   return (
     <Alert className="border-warn/40 bg-warn/8 text-foreground" data-slot="suspended-banner">
-      <PauseCircleIcon className="text-warn" aria-hidden="true" />
+      <PauseCircleIcon className="text-warn-text" aria-hidden="true" />
       <AlertTitle>This site is suspended</AlertTitle>
       <AlertDescription>
         <p>
@@ -162,7 +162,7 @@ function SiteSwitcher({ current, sites, hrefFor }: { current: Site; sites: Site[
       >
         <span className="bidi-isolate truncate">{displayText(current.name)}</span>
         {current.suspended ? (
-          <Badge variant="outline" className="border-warn/50 text-warn">
+          <Badge variant="outline" className="border-warn/50 text-warn-text">
             Suspended
           </Badge>
         ) : null}

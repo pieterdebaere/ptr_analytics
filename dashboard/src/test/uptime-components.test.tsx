@@ -147,7 +147,7 @@ describe('HeartbeatBar', () => {
     expect(segs[0]!.className).toContain('bg-muted-foreground/12');
     expect(segs[7]!.className).toContain('bg-good');
     expect(segs[8]!.className).toContain('bg-poor');
-    expect(segs[9]!.className).toContain('bg-chart-1');
+    expect(segs[9]!.className).toContain('bg-maint');
     expect(bar.textContent).toContain('3 checks shown, 1 down');
     // keyboard: End selects the newest, ArrowLeft the down beat
     act(() => bar.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })));
@@ -172,7 +172,7 @@ describe('HeartbeatBar', () => {
   it('DaysBar colours days by uptime', () => {
     act(() => root.render(<DaysBar bars={[{ t: 0, upRatio: 1, maintenance: false }, { t: 1, upRatio: 0.9, maintenance: false }, { t: 2, upRatio: null, maintenance: true }, { t: 3, upRatio: null, maintenance: false }]} />));
     const segs = container.querySelectorAll('[aria-hidden="true"] > span');
-    expect([...segs].map((s) => s.className.match(/bg-[a-z0-9-]+(\/\d+)?/)![0])).toEqual(['bg-good', 'bg-poor', 'bg-chart-1', 'bg-muted-foreground/20']);
+    expect([...segs].map((s) => s.className.match(/bg-[a-z0-9-]+(\/\d+)?/)![0])).toEqual(['bg-good', 'bg-poor', 'bg-maint', 'bg-muted-foreground/20']);
   });
 });
 

@@ -11,6 +11,7 @@
 //
 // Decisions are made on the matched route pattern where there is one (the router decodes
 // and normalises paths), on the raw path only for unrouted requests; default deny.
+import type { Statement } from 'better-sqlite3';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Config } from '../../config.js';
 import type { AppContext } from '../../context.js';
@@ -32,20 +33,25 @@ export function statusOriginWarnings(config: Config): string[] {
   ];
 }
 
+const lookups = new WeakMap<AppContext, Statement>();
+
 /** Classify the request's host (Host, or X-Forwarded-Host under TRUST_PROXY). */
 export function classifyHost(ctx: AppContext, rawHost: string | undefined): HostKind {
   const h = normalizeHost(rawHost);
   if (h === null) return { kind: 'dashboard' };
   if (h === hostOf(ctx.config.statusPageOrigin)) return { kind: 'status-origin' };
   if (h === hostOf(ctx.config.publicUrl) || !ctx.config.uptime.enabled) return { kind: 'dashboard' };
-  const r = ctx.db
-    .prepare(
+  let stmt = lookups.get(ctx);
+  if (!stmt) {
+    stmt = ctx.db.prepare(
       `SELECT p.slug, p.published, p.deleted_at, s.deleted_at AS site_deleted FROM status_page_domains d
        JOIN status_pages p ON p.id = d.status_page_id
        JOIN sites s ON s.id = p.site_id
        WHERE d.domain = ? AND d.verified_at IS NOT NULL`,
-    )
-    .get(h) as { slug: string; published: number; deleted_at: number | null; site_deleted: number | null } | undefined;
+    );
+    lookups.set(ctx, stmt);
+  }
+  const r = stmt.get(h) as { slug: string; published: number; deleted_at: number | null; site_deleted: number | null } | undefined;
   if (!r) return { kind: 'dashboard' };
   const live = r.published === 1 && r.deleted_at === null && r.site_deleted === null;
   return { kind: 'custom', slug: live ? r.slug : null };
@@ -86,6 +92,9 @@ function statusSlug(request: FastifyRequest): string | null {
  * Returns the reply when it answered the request itself.
  */
 export async function enforceHostSplit(ctx: AppContext, request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> {
+  const route = request.routeOptions.url;
+  // Served on every host (and hot: ingest): no host lookup at all.
+  if (route !== undefined && (route.startsWith('/api/public/') || STATUS_HOST_ROUTES.has(route))) return undefined;
   const host = classifyHost(ctx, request.host);
   const read = request.method === 'GET' || request.method === 'HEAD';
 
@@ -98,10 +107,7 @@ export async function enforceHostSplit(ctx: AppContext, request: FastifyRequest,
     return undefined;
   }
 
-  const route = request.routeOptions.url;
   const path = pathOf(request.url);
-  if (route !== undefined && route.startsWith('/api/public/')) return undefined;
-  if (route !== undefined && STATUS_HOST_ROUTES.has(route)) return undefined;
   if (route === '/') {
     if (!read) return notFound(request, reply);
     // A verified custom domain shows its status page at the root. The answer depends on the
