@@ -57,7 +57,7 @@ export interface UptimeConfig {
   memberStatusPagesPerSite: number;
   memberNotifyPerHour: number;
   memberChannels: number;
-  /** REQUIRE_MFA_FOR_ADMINS: admins must enrol TOTP before using the dashboard. */
+  /** REQUIRE_MFA_FOR_ADMINS: admins and viewers must enrol TOTP before using the dashboard / API (auth/guard.ts). */
   requireMfaForAdmins: boolean;
   /** User-Agent for outgoing checks. */
   userAgent: string;

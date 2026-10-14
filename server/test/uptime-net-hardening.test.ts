@@ -251,7 +251,7 @@ describe('L5: header validation before connecting', () => {
   it('rejects invalid header names and values without opening a connection', async () => {
     const net = testNet();
     const before = connections;
-    for (const headers of [{ 'x-a': 'a\u0001b' }, { 'x-a': 'a\u007fb' }, { 'x-a': '€' }, { 'bad name': 'x' }, { 'x(y)': 'x' }]) {
+    for (const headers of <Record<string, string>[]>[{ 'x-a': 'a\u0001b' }, { 'x-a': 'a\u007fb' }, { 'x-a': '€' }, { 'bad name': 'x' }, { 'x(y)': 'x' }]) {
       await expect(net.request({ url: `${base}/echo`, headers, maxBodyBytes: 1024, signal: signal() }), JSON.stringify(headers)).rejects.toMatchObject({ code: 'EINVALIDHEADER' });
     }
     expect(connections).toBe(before);

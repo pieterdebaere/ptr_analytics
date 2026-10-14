@@ -743,7 +743,10 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
 
   app.get<UidRoute & { Querystring: Record<string, unknown> }>('/api/monitors/:uid/outages', async (request) => {
     const m = monitorFor(ctx, requireUser(request), request.params.uid, 'read');
-    return { outages: listOutages(ctx.db, m.id, limitParam(request.query, 50, 200)) };
+    // `confirmed=1`: only confirmed outages (the ones the stats count), as the dashboard lists them.
+    const confirmed = request.query['confirmed'];
+    if (confirmed !== undefined && confirmed !== '0' && confirmed !== '1') throw badRequest('confirmed must be 0 or 1');
+    return { outages: listOutages(ctx.db, m.id, limitParam(request.query, 50, 200), { confirmedOnly: confirmed === '1' }) };
   });
 
   await app.register(tagRoutes, { ctx });

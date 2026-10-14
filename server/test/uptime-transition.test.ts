@@ -207,5 +207,24 @@ describe('transition()', () => {
       const st = nextState(fresh(), transition(fresh(), fail, settings(), false));
       expect(transition(st, ok, settings(), true).outage.close).toBe(true);
     });
+
+    it('a "no data" custom status (manual monitor without a status, empty group) never opens an outage', () => {
+      const noData: TransitionInput = { kind: 'custom', status: 2, msg: 'No status set', noOutage: true };
+      const first = transition(fresh(), noData, settings({ maxRetries: 3 }), false);
+      expect(first).toMatchObject({ status: P, important: true, notify: null });
+      expect(first.outage).toEqual({ open: false, confirm: false, close: false });
+      let st = nextState(fresh(), first);
+      expect(st).toMatchObject({ outageOpen: false, outageConfirmed: false });
+      st = nextState(st, transition(st, noData, settings(), false));
+      expect(st.outageOpen).toBe(false);
+      // A real status set afterwards behaves as before.
+      const down = transition(st, { kind: 'custom', status: 0, msg: 'Provider outage' }, settings(), false);
+      expect(down.outage).toEqual({ open: true, confirm: true, close: false });
+      expect(down.notify).toBe('down');
+      // Back to "no data" (e.g. a group whose last child was removed): the outage ends.
+      expect(transition(nextState(st, down), noData, settings(), false).outage).toEqual({ open: false, confirm: false, close: true });
+      // Without the flag a custom PENDING still opens an (unconfirmed) outage.
+      expect(transition(fresh(), { kind: 'custom', status: 2, msg: 'Child inaccessible' }, settings(), false).outage).toEqual({ open: true, confirm: false, close: false });
+    });
   });
 });

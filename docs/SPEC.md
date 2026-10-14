@@ -601,7 +601,9 @@ expire as "no data"), a per-destination request budget shared by all hosted memb
 resolved address, so aliases and IP spellings share it), `AbortSignal` deadlines + watchdog. Results are written in batches (heartbeat, state,
 hourly/daily time-weighted aggregates, events, outages, outbox rows in one transaction). Status
 transitions are a pure, unit-tested function (`(state, result, settings, inMaintenance) → …`)
-reproducing Uptime Kuma's important/notify rules. Group monitors derive their status from their
+reproducing Uptime Kuma's important/notify rules. An outage opens with the first failed check
+(DOWN or PENDING) and is confirmed on DOWN; a "no data" status (manual monitor without a status, empty
+group: PENDING, custom input with `noOutage`) never opens one. Group monitors derive their status from their
 children. Push monitors are DOWN when no push arrived within `interval` (grace period after
 start). Maintenance windows (strategies `manual`, `single`, `weekly`, `monthly`, `interval`,
 `cron`; IANA time zones) put monitors (and group descendants) in status 3 and suppress
@@ -639,7 +641,9 @@ Uptime = `up_ms / (up_ms + down_ms + pending_ms)` (time-weighted; maintenance an
 * `GET /api/monitors/:uid/heartbeats?period=24h|7d|30d|90d|custom&from&to&tz` →
   `{interval: 'raw'|'hour'|'day', points: [{t, status, latencyMs, latencyMin, latencyMax, upRatio}]}` (≤ 500 points, down-sampled)
 * `GET /api/monitors/:uid/stats?period&tz` → `{uptime, previousUptime, avgLatencyMs, minLatencyMs, maxLatencyMs, checks, outages: number, downtimeMs, mttrMs, bars: [{t, upRatio|null, maintenance: boolean}] /* 90 local days */}`
-* `GET /api/monitors/:uid/events?before=<id>&limit` → `{events: [{id, ts, from, to, msg}]}` ; `GET /api/monitors/:uid/outages?limit` → `{outages: [{id, startedAt, confirmedAt, endedAt, cause}]}`
+* `GET /api/monitors/:uid/events?before=<id>&limit` → `{events: [{id, ts, from, to, msg}]}` ; `GET /api/monitors/:uid/outages?limit&confirmed=0|1` → `{outages: [{id, startedAt, confirmedAt, endedAt, cause}]}`
+  (`confirmed=1`: only confirmed outages — the ones `stats.outages` counts; the dashboard lists these, an
+  unconfirmed outage is a failure that recovered during the retries)
 * `GET /api/uptime/stream` → `text/event-stream`; events `beat` `{uid, ts, status, latencyMs, msg}` and `state` `{uid, status, since}` for accessible monitors (heartbeat every 25 s).
   Access is checked per event with the account's current role and the site's current owner (≤ 1 s
   stale); the stream ends when the session ends or the account's role changes.

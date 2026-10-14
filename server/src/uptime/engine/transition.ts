@@ -20,8 +20,12 @@ export interface TransitionState {
 export type TransitionInput =
   /** A check ran: `ok` is the raw checker outcome (before upside-down inversion). */
   | { kind: 'check'; ok: boolean; msg: string; latencyMs?: number | null }
-  /** Engine-defined status (group, manual): no retries and no upside-down inversion. */
-  | { kind: 'custom'; status: 0 | 1 | 2; msg: string };
+  /**
+   * Engine-defined status (group, manual): no retries and no upside-down inversion.
+   * `noOutage`: the status only means "no data yet" (manual monitor without a status, empty
+   * group), not a failure: it never opens or confirms an outage, and closes an open one.
+   */
+  | { kind: 'custom'; status: 0 | 1 | 2; msg: string; noOutage?: boolean };
 
 export interface TransitionSettings {
   maxRetries: number;
@@ -133,7 +137,8 @@ export function transition(
     }
   }
 
-  const failing = status === DOWN || status === PENDING;
+  const noData = !inMaintenance && input.kind === 'custom' && input.noOutage === true;
+  const failing = !noData && (status === DOWN || status === PENDING);
   const outage = { open: false, confirm: false, close: false };
   if (failing) {
     if (!prev.outageOpen) outage.open = true;

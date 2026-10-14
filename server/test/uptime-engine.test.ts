@@ -394,6 +394,7 @@ describe('engine: groups and manual monitors', () => {
     await clock.advance(2 * SEC);
     flush();
     expect(beats(g.id).at(-1)).toMatchObject({ status: 2, msg: 'Group empty' });
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM outages WHERE monitor_id = ?').get(g.id)).toEqual({ n: 0 });
   });
 
   it('manual monitors take their status from the API', async () => {
@@ -402,6 +403,9 @@ describe('engine: groups and manual monitors', () => {
     await clock.advance(1);
     flush();
     expect(beats(m.id).at(-1)).toMatchObject({ status: 2, msg: 'No status set' });
+    // "No status set" is not a failure: no (unconfirmed) outage is recorded for it.
+    expect(state(m.id).open_outage_id).toBeNull();
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM outages WHERE monitor_id = ?').get(m.id)).toEqual({ n: 0 });
     const res = await api(t.app, admin, 'POST', `/api/monitors/${m.uid}/status`, { status: 'down', msg: 'Provider outage' });
     expect(res.statusCode).toBe(200);
     await clock.advance(1);

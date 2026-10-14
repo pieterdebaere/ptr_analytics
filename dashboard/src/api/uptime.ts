@@ -799,8 +799,9 @@ export const uptimeApi = {
     if (opts.limit !== undefined) query.set('limit', String(opts.limit));
     return request<unknown>('GET', `${monitorPath(uid)}/events`, { query, signal }).then(parseEvents);
   },
+  /** Confirmed outages only (the ones the stats count); retries that recovered are left out. */
   outages: (uid: string, limit = 50, signal?: AbortSignal) =>
-    request<unknown>('GET', `${monitorPath(uid)}/outages`, { query: new URLSearchParams({ limit: String(limit) }), signal }).then(
+    request<unknown>('GET', `${monitorPath(uid)}/outages`, { query: new URLSearchParams({ limit: String(limit), confirmed: '1' }), signal }).then(
       parseOutages,
     ),
 

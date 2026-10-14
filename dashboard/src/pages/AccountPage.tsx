@@ -70,7 +70,7 @@ function ChangePassword() {
       setCurrent('');
       setNext('');
       setConfirm('');
-      setMessage({ kind: 'ok', text: 'Password changed. Other sessions were logged out.' });
+      setMessage({ kind: 'ok', text: 'Password changed. Other sessions were logged out and all API keys were revoked.' });
     } catch (e2) {
       setMessage({ kind: 'error', text: errorMessage(e2) });
     } finally {
@@ -83,7 +83,7 @@ function ChangePassword() {
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
         <CardHeader>
           <CardTitle>Change password</CardTitle>
-          <CardDescription>Changing your password signs out your other sessions.</CardDescription>
+          <CardDescription>Changing your password signs out your other sessions and revokes all your API keys.</CardDescription>
         </CardHeader>
         <CardContent className="flex max-w-sm flex-col gap-4">
           <PasswordField label="Current password" value={current} onChange={setCurrent} autoComplete="current-password" />
@@ -178,7 +178,7 @@ function UsersSection({ me }: { me: User }) {
         <CardDescription>
           Admins manage all sites and users.{' '}
           {publicConfig.signupEnabled ? '' : 'Viewers can see all sites and statistics. '}Members are self-service accounts that
-          only see and manage their own sites.
+          only see and manage their own sites. Changing a user&apos;s role signs that user out.
         </CardDescription>
       </CardHeader>
       <CardContent className="px-0">

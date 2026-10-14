@@ -413,6 +413,14 @@ describe('actions and history', () => {
     const out = (await api(t.app, a.cookie, 'GET', `/api/monitors/${m.uid}/outages`)).json() as { outages: Array<{ startedAt: number; endedAt: number }> };
     expect(out.outages).toHaveLength(1);
     expect(out.outages[0]!.endedAt - out.outages[0]!.startedAt).toBe(30 * MIN);
+    // An unconfirmed outage (recovered during retries) is listed, except with confirmed=1 (as the stats count).
+    t.ctx.db.prepare('INSERT INTO outages (monitor_id, started_at, confirmed_at, ended_at, cause) VALUES (?, ?, NULL, ?, ?)').run(rec.id, t.clock.t - 20 * MIN, t.clock.t - 19 * MIN, 'blip');
+    const all = (await api(t.app, a.cookie, 'GET', `/api/monitors/${m.uid}/outages`)).json() as { outages: Array<{ confirmedAt: number | null }> };
+    expect(all.outages.map((o) => o.confirmedAt === null)).toEqual([true, false]);
+    const confirmed = (await api(t.app, a.cookie, 'GET', `/api/monitors/${m.uid}/outages?confirmed=1`)).json() as { outages: Array<{ confirmedAt: number | null }> };
+    expect(confirmed.outages).toHaveLength(1);
+    expect(confirmed.outages[0]!.confirmedAt).not.toBeNull();
+    expect((await api(t.app, a.cookie, 'GET', `/api/monitors/${m.uid}/outages?confirmed=yes`)).statusCode).toBe(400);
     const list = (await api(t.app, a.cookie, 'GET', `/api/sites/${siteA}/monitors`)).json() as { monitors: Array<{ uptime24h: number; state: { status: number } }> };
     expect(list.monitors[0]!.uptime24h).toBeCloseTo(149 / 179, 5);
     expect(list.monitors[0]!.state.status).toBe(1);

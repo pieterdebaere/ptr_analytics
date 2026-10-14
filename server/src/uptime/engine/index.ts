@@ -436,7 +436,7 @@ export class Engine implements EngineControl, EngineHandle {
         const input: TransitionInput =
           st === 0 || st === 1 || st === 2
             ? { kind: 'custom', status: st, msg: m.manualMsg ?? (st === 1 ? 'Up' : st === 0 ? 'Down' : 'Pending') }
-            : { kind: 'custom', status: 2, msg: 'No status set' };
+            : { kind: 'custom', status: 2, msg: 'No status set', noOutage: true };
         return this.finish(e, input, inMaint, {});
       }
       const def = this.checkers.get(m.type);
@@ -459,7 +459,7 @@ export class Engine implements EngineControl, EngineHandle {
 
   private groupInput(e: Entry): TransitionInput {
     const children = [...this.entries.values()].filter((c) => c.m.parentId === e.m.id);
-    if (children.length === 0) return { kind: 'custom', status: 2, msg: 'Group empty' };
+    if (children.length === 0) return { kind: 'custom', status: 2, msg: 'Group empty', noOutage: true };
     let status: 0 | 1 | 2 = 1;
     for (const c of children) {
       const st = this.processor.runtime(c.m).status;
