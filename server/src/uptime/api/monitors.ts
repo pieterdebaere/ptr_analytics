@@ -586,12 +586,12 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
     const m = monitorFor(ctx, user, request.params.uid, 'manage');
     if (!m.active) throw conflict('monitor is paused');
     if (m.type === 'push') throw badRequest('push monitors cannot be checked on demand');
+    const e = engine();
+    if (!e) throw new HttpError(503, 'monitoring engine is not running');
     if (!checkLimitUser.hit(`u${user.id}`) || !checkLimitMonitor.hit(m.uid)) {
       reply.header('Retry-After', '10');
       throw tooMany();
     }
-    const e = engine();
-    if (!e) throw new HttpError(503, 'monitoring engine is not running');
     if (!e.checkNow(m.id)) throw conflict('monitor is not scheduled (paused or site suspended)');
     return reply.code(202).send({ ok: true });
   });

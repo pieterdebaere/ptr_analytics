@@ -1,5 +1,6 @@
 // Target policy of the SSRF guard (docs/uptime/ANALYSIS.md §8.7.1). Pure and synchronous so that
 // it can also be used at save time (validate) for IP literals.
+import { domainToASCII } from 'node:url';
 import type { UptimeConfig } from '../config.js';
 import { TargetDeniedError } from '../types.js';
 import { classifyIp, embeddedIPv4, inCidr, parseCidr, parseIp, type Cidr, type IpCategory, type ParsedIp } from './ip.js';
@@ -32,6 +33,11 @@ const HOST_LABEL = /^(?!-)[a-z0-9_-]{1,63}(?<!-)$/;
  */
 export function normalizeHostname(input: string): string | null {
   let h = input.trim().toLowerCase();
+  // eslint-disable-next-line no-control-regex
+  if (/[^\x00-\x7f]/.test(h)) {
+    h = domainToASCII(h); // IDN → punycode ("" when invalid)
+    if (!h) return null;
+  }
   if (h.endsWith('.')) h = h.slice(0, -1);
   if (h.length === 0 || h.length > 253) return null;
   const labels = h.split('.');

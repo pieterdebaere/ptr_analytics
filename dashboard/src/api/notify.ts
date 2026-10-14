@@ -26,6 +26,17 @@ export interface NotificationProvider {
   hostedAllowed: boolean;
   /** `{{variable}}` names usable in custom templates (webhook). */
   templateVars: string[];
+  /** Ready-made configs (webhook): prefill the form only. */
+  presets: WebhookPreset[];
+}
+
+export interface WebhookPreset {
+  id: string;
+  label: string;
+  help: string;
+  /** Header names to add as empty (secret) rows. */
+  headerNames: string[];
+  config: Record<string, unknown>;
 }
 
 export interface EmailRecipient {
@@ -53,6 +64,8 @@ export interface NotificationChannel {
 }
 
 export interface ChannelInput {
+  /** E-mail: send the confirmation link again to unconfirmed recipients. */
+  resendVerification?: boolean;
   type?: string;
   name?: string;
   config?: Record<string, unknown>;
@@ -103,6 +116,17 @@ export function parseProvider(raw: unknown): NotificationProvider | null {
     templateVars: arr(raw.templateVars)
       .filter((v): v is string => typeof v === 'string' && /^[a-z_.]{1,40}$/.test(v))
       .slice(0, 50),
+    presets: arr(raw.presets)
+      .filter(isObj)
+      .filter((p) => typeof p.id === 'string' && typeof p.label === 'string' && isObj(p.config))
+      .slice(0, 50)
+      .map((p) => ({
+        id: str(p.id),
+        label: str(p.label),
+        help: str(p.help),
+        headerNames: arr(p.headerNames).filter((h): h is string => typeof h === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(h)),
+        config: p.config as Record<string, unknown>,
+      })),
   };
 }
 
@@ -173,6 +197,7 @@ export const notifyApi = {
         .filter(notNull),
     ),
   getChannel: (uid: string, signal?: AbortSignal) => request<unknown>('GET', chPath(uid), { signal }).then(channelFrom),
+  /** Validation errors carry `ApiError.field` (config key) — show them next to the input. */
   createChannel: (body: ChannelInput) => request<unknown>('POST', '/notification-channels', { body }).then(channelFrom),
   updateChannel: (uid: string, body: ChannelInput) => request<unknown>('PATCH', chPath(uid), { body }).then(channelFrom),
   deleteChannel: (uid: string) => request<void>('DELETE', chPath(uid)),

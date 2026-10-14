@@ -106,7 +106,6 @@ export const smtpChecker: CheckerDefinition<SmtpConfig, Record<string, never>> =
         return up(`SMTP ready${mode}${tlsSummary(tls)}`, { latencyMs, tls, meta });
       } finally {
         setTimeout(() => sock.destroy(), 200).unref();
-        conn.socket.on('error', () => {});
       }
     });
   },

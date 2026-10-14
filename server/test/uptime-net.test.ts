@@ -97,6 +97,7 @@ describe('hostname validation', () => {
       expect(normalizeHostname(s), s).toBeNull();
     }
     expect(normalizeHostname('Example.COM.')).toBe('example.com');
+    expect(normalizeHostname('Bücher.example')).toBe('xn--bcher-kva.example');
     expect(normalizeHostname('_sip._tcp.example.com')).toBe('_sip._tcp.example.com');
     expect(normalizeHost('[2001:db8::1]')).toEqual({ host: '2001:db8::1', ip: expect.anything() });
     expect(normalizeHost('0177.0.0.1')).toBeNull();
