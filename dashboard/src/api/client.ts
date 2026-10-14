@@ -127,6 +127,10 @@ export async function request<T>(method: Method, path: string, opts: RequestOpti
     } catch {
       /* non-JSON error body */
     }
+    // REQUIRE_MFA_FOR_ADMINS: an admin without 2FA must enrol first (spec §8.3).
+    if (res.status === 403 && code === 'mfa_required' && typeof window !== 'undefined' && window.location.pathname !== '/settings/security') {
+      window.location.assign('/settings/security');
+    }
     throw new ApiError(res.status, message, code, field);
   }
 

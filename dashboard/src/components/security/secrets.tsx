@@ -50,7 +50,7 @@ export function RecoveryCodes({ codes, account, onSavedChange }: { codes: readon
   const text = recoveryCodesText(codes, account, window.location.origin);
   return (
     <div className="flex flex-col gap-3">
-      <ol className="grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-lg border bg-muted/40 p-3 font-mono text-sm tabular-nums" aria-label="Recovery codes" data-slot="recovery-codes">
+      <ol className="grid grid-cols-1 gap-x-4 gap-y-1.5 rounded-lg border bg-muted/40 p-3 font-mono text-sm whitespace-nowrap tabular-nums sm:grid-cols-2" aria-label="Recovery codes" data-slot="recovery-codes">
         {codes.map((c, i) => (
           <li key={i} className="flex items-baseline gap-2">
             <span className="w-4 text-right text-[11px] text-muted-foreground select-none">{i + 1}</span>

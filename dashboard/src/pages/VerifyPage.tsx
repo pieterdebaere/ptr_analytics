@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { MailCheckIcon, MailXIcon } from 'lucide-react';
-import { ApiError, api } from '@/api/client';
+import { ApiError } from '@/api/client';
+import { securityApi } from '@/api/security';
+import { MfaStep } from './LoginPage';
 import { AuthCard, FormMessage, PasswordField, useUrlToken } from '@/components/AuthCard';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/auth';
@@ -20,6 +22,7 @@ export function VerifyPage() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
 
   if (!token) {
     return (
@@ -48,8 +51,14 @@ export function VerifyPage() {
     setBusy(true);
     setError(null);
     try {
-      const u = await api.verifyEmail(token, password);
-      setUser(u);
+      const r = await securityApi.verifyEmail(token, password);
+      if (r.kind === 'mfa') {
+        // Accounts with two-factor authentication confirm with their code as well.
+        setMfaToken(r.mfaToken);
+        setBusy(false);
+        return;
+      }
+      setUser(r.user);
       navigate('/', { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) {
@@ -62,6 +71,22 @@ export function VerifyPage() {
       setBusy(false);
     }
   };
+
+  if (mfaToken) {
+    return (
+      <MfaStep
+        mfaToken={mfaToken}
+        onDone={(u) => {
+          setUser(u);
+          navigate('/', { replace: true });
+        }}
+        onCancel={(message) => {
+          setMfaToken(null);
+          setError(message);
+        }}
+      />
+    );
+  }
 
   return (
     <AuthCard

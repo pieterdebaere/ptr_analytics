@@ -106,6 +106,13 @@ export const securityApi = {
       if (isObj(r) && isObj(r.user)) return { kind: 'user', user: r.user as unknown as User };
       throw new ApiError(500, 'Invalid response from server.');
     }),
+  /** E-mail verification can also require the second factor (accounts with 2FA). */
+  verifyEmail: (token: string, password: string): Promise<LoginResult> =>
+    request<unknown>('POST', '/auth/verify', { body: { token, password }, redirectOn401: false }).then((r) => {
+      if (isObj(r) && r.mfaRequired === true && typeof r.mfaToken === 'string' && r.mfaToken) return { kind: 'mfa', mfaToken: r.mfaToken };
+      if (isObj(r) && isObj(r.user)) return { kind: 'user', user: r.user as unknown as User };
+      throw new ApiError(500, 'Invalid response from server.');
+    }),
   loginMfa: (mfaToken: string, second: { code: string } | { recoveryCode: string }) =>
     request<{ user: User }>('POST', '/auth/login/mfa', { body: { mfaToken, ...second }, redirectOn401: false }).then((r) => {
       if (!r || !isObj(r.user)) throw new ApiError(500, 'Invalid response from server.');
