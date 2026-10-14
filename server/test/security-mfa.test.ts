@@ -96,14 +96,14 @@ function mfaLogin(app: FastifyInstance, payload: Record<string, unknown>, ip = '
 }
 
 /** Enrol MFA for the session; returns the secret key and recovery codes. */
-async function enrol(t: TestApp, cookie: string): Promise<{ key: Buffer; recoveryCodes: string[] }> {
-  const setup = await api(t.app, cookie, 'POST', '/api/auth/mfa/setup');
+async function enrol(t: TestApp, cookie: string, password = ADMIN_PASSWORD): Promise<{ key: Buffer; recoveryCodes: string[] }> {
+  const setup = await api(t.app, cookie, 'POST', '/api/auth/mfa/setup', { password });
   expect(setup.statusCode).toBe(200);
   const { secret, otpauthUrl: url } = setup.json() as { secret: string; otpauthUrl: string };
   expect(url).toContain(`secret=${secret}`);
   const key = base32Decode(secret) as Buffer;
   expect(key.length).toBe(20);
-  const enable = await api(t.app, cookie, 'POST', '/api/auth/mfa/enable', { code: totp(key, t.clock.t) });
+  const enable = await api(t.app, cookie, 'POST', '/api/auth/mfa/enable', { password, code: totp(key, t.clock.t) });
   expect(enable.statusCode).toBe(200);
   const { recoveryCodes } = enable.json() as { recoveryCodes: string[] };
   return { key, recoveryCodes };
@@ -125,16 +125,16 @@ describe('MFA enrolment', () => {
     t = await createTestApp();
     const cookie = await adminCookie();
     expect((await api(t.app, cookie, 'GET', '/api/auth/mfa')).json()).toEqual({ enabled: false, pending: false, recoveryCodesLeft: 0, required: false });
-    const setup = await api(t.app, cookie, 'POST', '/api/auth/mfa/setup');
+    const setup = await api(t.app, cookie, 'POST', '/api/auth/mfa/setup', { password: ADMIN_PASSWORD });
     const { secret } = setup.json() as { secret: string };
     const row = t.ctx.db.prepare('SELECT totp_secret FROM user_mfa').get() as { totp_secret: Buffer };
     expect(row.totp_secret.includes(Buffer.from(secret))).toBe(false);
     expect((await api(t.app, cookie, 'GET', '/api/auth/mfa')).json()).toMatchObject({ enabled: false, pending: true });
-    const bad = await api(t.app, cookie, 'POST', '/api/auth/mfa/enable', { code: '000000' });
+    const bad = await api(t.app, cookie, 'POST', '/api/auth/mfa/enable', { password: ADMIN_PASSWORD, code: '000000' });
     expect(bad.statusCode).toBe(400);
     expect(bad.json()).toMatchObject({ code: 'invalid_code' });
     const key = base32Decode(secret) as Buffer;
-    const ok = await api(t.app, cookie, 'POST', '/api/auth/mfa/enable', { code: totp(key, t.clock.t) });
+    const ok = await api(t.app, cookie, 'POST', '/api/auth/mfa/enable', { password: ADMIN_PASSWORD, code: totp(key, t.clock.t) });
     expect(ok.statusCode).toBe(200);
     const codes = (ok.json() as { recoveryCodes: string[] }).recoveryCodes;
     expect(codes).toHaveLength(10);
@@ -146,7 +146,7 @@ describe('MFA enrolment', () => {
     for (const s of stored) expect(codes.map((c) => c.replace(/-/g, ''))).not.toContain(s.code_hash);
     expect((await api(t.app, cookie, 'GET', '/api/auth/mfa')).json()).toMatchObject({ enabled: true, pending: false, recoveryCodesLeft: 10 });
     // no second setup while enabled
-    expect((await api(t.app, cookie, 'POST', '/api/auth/mfa/setup')).statusCode).toBe(409);
+    expect((await api(t.app, cookie, 'POST', '/api/auth/mfa/setup', { password: ADMIN_PASSWORD })).statusCode).toBe(409);
   });
 
   it('revokes other sessions when MFA is enabled', async () => {
@@ -195,7 +195,7 @@ describe('MFA login flow', () => {
     expect(other.statusCode).toBe(201);
     const otherLogin = await loginRaw(t.app, 'other@example.com', 'other password 123');
     const otherCookie = cookieFrom(otherLogin);
-    const otherMfa = await enrol(t, otherCookie);
+    const otherMfa = await enrol(t, otherCookie, 'other password 123');
     t.clock.t += 60_000;
 
     // 1. login/mfa without the password step: no token at all / forged token
@@ -237,26 +237,57 @@ describe('MFA login flow', () => {
     expect(wrongPw.json()).not.toHaveProperty('mfaToken');
   });
 
-  it('burns the token after 5 wrong codes and limits attempts per account', async () => {
+  it('burns the token after 5 wrong codes and locks the second factor progressively', async () => {
     t = await createTestApp();
     const { key } = await enrol(t, await adminCookie());
     t.clock.t += 60_000;
-    const { mfaToken } = (await loginRaw(t.app)).json() as { mfaToken: string };
-    for (let i = 0; i < 5; i++) expect((await mfaLogin(t.app, { mfaToken, code: '000000' })).statusCode).toBe(401);
+    let n = 0;
+    const token = async (): Promise<string> =>
+      ((await loginRaw(t.app, ADMIN_EMAIL, ADMIN_PASSWORD, `203.0.113.${++n}`)).json() as { mfaToken: string }).mfaToken;
+    const mfaToken = await token();
+    for (let i = 0; i < 5; i++) expect((await mfaLogin(t.app, { mfaToken, code: '000000' }, `198.51.100.${i + 1}`)).statusCode).toBe(401);
     const after = await mfaLogin(t.app, { mfaToken, code: totp(key, t.clock.t) });
     expect(after.statusCode).toBe(401);
     expect(after.json()).toMatchObject({ code: 'mfa_expired' });
-    // per-account limit (10 / 15 min) across tokens and IPs
-    const { mfaToken: t2 } = (await loginRaw(t.app)).json() as { mfaToken: string };
-    const statuses: number[] = [];
-    for (let i = 0; i < 5; i++) statuses.push((await mfaLogin(t.app, { mfaToken: t2, code: '000000' }, `198.51.100.${i + 1}`)).statusCode);
-    const { mfaToken: t3 } = (await loginRaw(t.app)).json() as { mfaToken: string };
-    const blocked = await mfaLogin(t.app, { mfaToken: t3, code: totp(key, t.clock.t) }, '198.51.100.99');
-    expect(statuses.every((s) => s === 401)).toBe(true);
-    expect(blocked.statusCode).toBe(429);
-    t.clock.t += 15 * 60_000 + 1;
-    const { mfaToken: t4 } = (await loginRaw(t.app)).json() as { mfaToken: string };
-    expect((await mfaLogin(t.app, { mfaToken: t4, code: totp(key, t.clock.t) })).statusCode).toBe(200);
+    // 5 consecutive failures lock the account's second factor (all tokens, all IPs) for 30 s …
+    const t2 = await token();
+    const locked = await mfaLogin(t.app, { mfaToken: t2, code: totp(key, t.clock.t) }, '198.51.100.99');
+    expect(locked.statusCode).toBe(429);
+    expect(locked.json()).toMatchObject({ code: 'mfa_locked' });
+    t.clock.t += 30_000;
+    // … and every further failure doubles the lock (60 s now)
+    expect((await mfaLogin(t.app, { mfaToken: t2, code: '000000' }, '198.51.100.98')).statusCode).toBe(401);
+    t.clock.t += 30_000;
+    expect((await mfaLogin(t.app, { mfaToken: t2, code: totp(key, t.clock.t) }, '198.51.100.97')).statusCode).toBe(429);
+    t.clock.t += 30_001;
+    expect((await mfaLogin(t.app, { mfaToken: t2, code: totp(key, t.clock.t) }, '198.51.100.96')).statusCode).toBe(200);
+    // the success ended the streak
+    const t3 = await token();
+    expect((await mfaLogin(t.app, { mfaToken: t3, code: '000000' }, '198.51.100.95')).statusCode).toBe(401);
+  });
+
+  it('caps wrong codes per day; successful logins never reset that budget', async () => {
+    t = await createTestApp();
+    const { key } = await enrol(t, await adminCookie());
+    let n = 0;
+    const ip = (): string => `192.0.2.${++n}`;
+    const token = async (): Promise<string> => ((await loginRaw(t.app, ADMIN_EMAIL, ADMIN_PASSWORD, ip())).json() as { mfaToken: string }).mfaToken;
+    let failures = 0;
+    // 4 wrong codes, then the owner signs in correctly (never 5 in a row, so no backoff lock)
+    while (failures < 28) {
+      t.clock.t += 30_000;
+      const tok = await token();
+      for (let i = 0; i < 4; i++, failures++) expect((await mfaLogin(t.app, { mfaToken: tok, code: '000000' }, ip())).statusCode).toBe(401);
+      expect((await mfaLogin(t.app, { mfaToken: tok, code: totp(key, t.clock.t) }, ip())).statusCode).toBe(200);
+    }
+    t.clock.t += 30_000;
+    const tok = await token();
+    for (let i = 0; i < 2; i++) expect((await mfaLogin(t.app, { mfaToken: tok, code: '000000' }, ip())).statusCode).toBe(401);
+    // 30 failures within 24 h: even the right code is refused until the window ends
+    const capped = await mfaLogin(t.app, { mfaToken: await token(), code: totp(key, t.clock.t) }, ip());
+    expect(capped.statusCode).toBe(429);
+    t.clock.t += 24 * 3_600_000;
+    expect((await mfaLogin(t.app, { mfaToken: await token(), code: totp(key, t.clock.t) }, ip())).statusCode).toBe(200);
   });
 
   it('limits MFA submissions per IP', async () => {
@@ -347,7 +378,7 @@ describe('hosted mode: e-mail flows never bypass MFA', () => {
     t = c;
     const email = 'member@example.org';
     const { cookie } = await signupMember(c, email);
-    const { key } = await enrol(c, cookie);
+    const { key } = await enrol(c, cookie, 'member password 123');
     const forgot = await post(c.app, '/api/auth/forgot', { email });
     expect(forgot.statusCode).toBe(202);
     await c.ctx.mailer?.idle();

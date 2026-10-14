@@ -263,8 +263,21 @@ describe('authorization and user management', () => {
     expect((await api(t.app, admin, 'PATCH', `/api/users/${viewerId}`, { role: 'admin' })).json()).toMatchObject({ user: { role: 'admin' } });
     expect((await api(t.app, admin, 'PATCH', '/api/users/1', { role: 'viewer' })).statusCode).toBe(200);
     expect(t.ctx.users.list().map((u) => u.role)).toEqual(['viewer', 'admin']);
-    // the demoted user lost admin rights immediately
-    expect((await api(t.app, admin, 'GET', '/api/users')).statusCode).toBe(403);
+    // the demoted user lost admin rights immediately: a role change revokes the user's sessions
+    expect((await api(t.app, admin, 'GET', '/api/users')).statusCode).toBe(401);
+    const again = await login(t.app);
+    expect((await api(t.app, again, 'GET', '/api/users')).statusCode).toBe(403);
+  });
+
+  it('a role change signs the user out everywhere', async () => {
+    const { admin, viewer, viewerId } = await setupViewer();
+    expect((await api(t.app, viewer, 'GET', '/api/auth/me')).statusCode).toBe(200);
+    expect((await api(t.app, admin, 'PATCH', `/api/users/${viewerId}`, { role: 'admin' })).statusCode).toBe(200);
+    expect((await api(t.app, viewer, 'GET', '/api/auth/me')).statusCode).toBe(401);
+    // an unchanged role keeps the sessions
+    const fresh = await login(t.app, 'viewer@example.com', 'viewer password 1');
+    expect((await api(t.app, admin, 'PATCH', `/api/users/${viewerId}`, { role: 'admin' })).statusCode).toBe(200);
+    expect((await api(t.app, fresh, 'GET', '/api/auth/me')).statusCode).toBe(200);
   });
 
   it('admin password reset revokes the target sessions and deletion cascades', async () => {

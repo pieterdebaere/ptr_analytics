@@ -453,12 +453,15 @@ export async function notifyRoutes(app: FastifyInstance, opts: { ctx: AppContext
         );
       if (apply) applyToExisting(ctx, row, row.owner_id !== null && user.role === 'member');
     })();
+    // `verificationSent` (resendVerification only): opt-in mails actually sent — never to addresses
+    // that unsubscribed / declined, at most once per 10 minutes per address, 20 per day.
+    let verificationSent: number | undefined;
     if (row.type === 'email') {
       const fresh = { ...row, name };
       if (newConfig) syncRecipients(ctx, fresh, newConfig['to'] as string[], { requireOptIn: isHostedMemberUser(ctx, user), inviter: user });
-      if (resend) resendVerification(ctx, fresh, user);
+      if (resend) verificationSent = resendVerification(ctx, fresh, user);
     }
-    return { channel: oneJson(ctx, row.uid) };
+    return { channel: oneJson(ctx, row.uid), ...(verificationSent !== undefined ? { verificationSent } : {}) };
   });
 
   app.delete<{ Params: { uid: string } }>('/api/notification-channels/:uid', { preHandler: auth }, async (request, reply) => {

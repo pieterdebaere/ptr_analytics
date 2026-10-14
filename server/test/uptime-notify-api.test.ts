@@ -545,7 +545,7 @@ describe('security regressions', () => {
     const count = sent.length;
 
     // The inviter cannot re-arm the opt-in: resend, remove + re-add, a new channel.
-    await api(c.app, m.cookie, 'PATCH', `/api/notification-channels/${uid}`, { resendVerification: true });
+    expect((await api(c.app, m.cookie, 'PATCH', `/api/notification-channels/${uid}`, { resendVerification: true })).json()).toMatchObject({ verificationSent: 0 });
     c.clock.t += 3_600_000;
     await api(c.app, m.cookie, 'PATCH', `/api/notification-channels/${uid}`, { config: { to: ['other@example.com'] } });
     const readd = await api(c.app, m.cookie, 'PATCH', `/api/notification-channels/${uid}`, { config: { to: ['friend@example.com'] }, resendVerification: true });

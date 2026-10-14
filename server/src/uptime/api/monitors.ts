@@ -406,8 +406,8 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
   app.setErrorHandler(fieldErrorHandler);
   app.addHook('onRequest', rejectCrossSiteFetch);
   app.addHook('preHandler', requireAuth(ctx));
-  // Public status pages and badges must not outlive a deleted site / account in the caches.
-  const unsubs = [ctx.sites.onChange((c) => c.kind === 'deleted' && invalidatePublic(ctx)), ctx.users.onChange(() => invalidatePublic(ctx))];
+  // Public status pages and badges must not outlive a deleted / suspended site or a deleted account in the caches.
+  const unsubs = [ctx.sites.onChange(() => invalidatePublic(ctx)), ctx.users.onChange(() => invalidatePublic(ctx))];
   // Results recorded without a running engine (push / manual API paths) are written out on close.
   app.addHook('onClose', async () => {
     for (const u of unsubs) u();

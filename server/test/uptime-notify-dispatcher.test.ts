@@ -5,7 +5,7 @@ import { Notifier, RETRY_DELAYS_MS, startNotifier } from '../src/uptime/notify/d
 import { setNotifyOverrides } from '../src/uptime/notify/state.js';
 import type { NotifyPayload } from '../src/uptime/types.js';
 import { CLOUD_URL, api, createCloudApp, createTestApp, login, signupMember } from './helpers.js';
-import { FakeNet, TEST_SECRETS_KEY, downPayload, enqueueOwned, ownedMonitor, upPayload } from './uptime-notify-fakes.js';
+import { FakeNet, TEST_SECRETS_KEY, downPayload, enqueueOwned, upPayload } from './uptime-notify-fakes.js';
 
 const apps: FastifyInstance[] = [];
 const notifiers: Notifier[] = [];

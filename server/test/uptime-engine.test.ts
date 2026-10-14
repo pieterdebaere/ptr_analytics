@@ -459,9 +459,10 @@ describe('engine: restart and shutdown', () => {
     // "restart": a new engine, the process-local state is gone
     processorFor(ctx).forget(m.id);
     start();
-    await clock.advance(30 * SEC);
+    // the retry is due 20 s after the last beat (not a fresh start); stop right after it (the next
+    // phase-aligned interval slot may be only a few seconds later)
+    await clock.advance(20 * SEC);
     flush();
-    console.log('DBG', JSON.stringify(beats(m.id)), clock.t);
     expect(state(m.id)).toMatchObject({ status: 0, retries: 3 });
     const hb = beats(m.id).map((b) => b.status);
     expect(hb).toEqual([2, 2, 0]);

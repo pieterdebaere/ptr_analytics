@@ -85,7 +85,6 @@ const NO_PUSH_MSG = 'No heartbeat in the time window';
 
 export class Engine implements EngineControl, EngineHandle {
   private readonly clock: EngineClock;
-  private readonly checkers: CheckerMap;
   private readonly repo: MonitorRepo;
   private readonly maintRepo: MaintenanceRepo;
   private readonly maint: MaintenanceIndex;
@@ -111,7 +110,6 @@ export class Engine implements EngineControl, EngineHandle {
     private readonly opts: EngineOptions = {},
   ) {
     this.clock = opts.clock ?? realClock(ctx.now);
-    this.checkers = opts.checkers ?? uptimeRuntime(ctx).checkers;
     this.repo = new MonitorRepo(ctx.db);
     this.maintRepo = new MaintenanceRepo(ctx.db);
     this.maint = new MaintenanceIndex(this.maintRepo);
@@ -141,6 +139,11 @@ export class Engine implements EngineControl, EngineHandle {
   /** Hosted mode: checks of member monitors must never reach this server (see getSelfAddresses). */
   private selfList(): readonly string[] {
     return this.opts.selfAddresses ?? getSelfAddresses(this.ctx);
+  }
+
+  /** Checker definitions: injected, or the runtime's (read on use, so setCheckers() applies to a running engine). */
+  private get checkers(): CheckerMap {
+    return this.opts.checkers ?? uptimeRuntime(this.ctx).checkers;
   }
 
   /** Engine time: monotonic, aligned with the wall clock at start. */

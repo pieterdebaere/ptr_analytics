@@ -628,7 +628,11 @@ Uptime = `up_ms / (up_ms + down_ms + pending_ms)` (time-weighted; maintenance an
   (`{uid, type, name, config, secretsSet, isDefault, active, verified: boolean, consecutiveFailures, monitorCount}`; `applyToExisting: true` on create/update links it to all of the owner's monitors);
   `POST /api/notification-channels/:uid/test` (rate limited) → `{ok, error?}`; `POST /api/notification-channels/test` with an unsaved channel body;
   `GET /api/notification-channels/:uid/log?limit` → `{entries: [{ts, event, ok, httpStatus, error, monitorUid}]}`;
-  e-mail double opt-in (hosted mode): `GET /api/notification-channels/verify?token=` (public; confirms the recipient) and one-click unsubscribe links.
+  e-mail double opt-in (hosted mode): `GET /api/notification-channels/verify?token=` (public) only shows a
+  confirmation page; the recipient answers with `POST /api/notification-channels/verify` (form body `token`,
+  `answer=confirm|decline`) — link scanners cannot subscribe anyone. One-click unsubscribe links; an address that
+  unsubscribed or declined can only re-subscribe itself (`POST /api/notification-channels/resubscribe`), the
+  channel owner can never send it another opt-in mail. `PATCH … {resendVerification: true}` → `verificationSent: n`.
 * Status pages (per site): `GET /api/status-pages`, `POST /api/sites/:siteId/status-pages`, `GET|PATCH|DELETE /api/status-pages/:uid`
   (`{uid, siteId, slug, title, description, footer, theme, accent, published, noindex, showTags, showCertExpiry, showPoweredBy, refreshS, analyticsSiteId, logoUrl, sections: [{name, monitors: [{uid, displayName, showUrl}]}], domains: [{domain, verified, verifyToken}]}`);
   `POST /api/status-pages/:uid/logo` (raw PNG/JPEG/WebP ≤ 512 KB, content sniffed) ; `DELETE …/logo`;
