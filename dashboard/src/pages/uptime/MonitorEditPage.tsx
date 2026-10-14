@@ -36,7 +36,7 @@ import { toast, Toaster } from '@/components/uptime/toast';
 import { TypeIcon, TypePicker, unavailableReason } from '@/components/uptime/TypePicker';
 import { useAuth, useCanManageSites } from '@/hooks/auth';
 import { useApi } from '@/hooks/useApi';
-import { displayText, isSafeHostname } from '@/lib/safety';
+import { displayText } from '@/lib/safety';
 import { cn } from '@/lib/utils';
 
 const UID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -274,7 +274,7 @@ function MonitorEditor({
   const secretsSet = monitor?.secretsSet ?? [];
 
   const submit = async (checkAfter: boolean) => {
-    const f = { ...form, name: form.name.trim() || (derivedName && isSafeHostname(derivedName) ? derivedName : form.name) };
+    const f = { ...form, name: form.name.trim() || derivedName || form.name };
     const ce = validateMonitorForm(f, type.type, limits);
     const fe = validateFieldValues(type.fields, values, { hosted, secretsSet });
     setCommonErrors(ce);

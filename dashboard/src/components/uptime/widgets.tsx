@@ -71,6 +71,7 @@ export function StatusCountCards({
             onClick={() => onSelect(selected ? '' : s)}
             className={cn(
               'flex min-w-0 flex-col gap-1.5 rounded-xl bg-card p-4 text-left ring-1 ring-foreground/10 outline-none transition-shadow hover:ring-foreground/25 focus-visible:ring-3 focus-visible:ring-ring/50',
+              s === 'down' && n > 0 && 'bg-poor/5 ring-poor/30 hover:ring-poor/50',
               selected && 'ring-2 ring-foreground/60 hover:ring-foreground/60',
               i === order.length - 1 && 'col-span-2 sm:col-span-1',
             )}

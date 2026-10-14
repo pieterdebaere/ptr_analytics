@@ -101,6 +101,7 @@ function LatencyBand() {
 LatencyBand.displayName = 'ReferenceArea';
 
 function spanFormatter(spanMs: number): Intl.DateTimeFormat {
+  if (spanMs <= 10 * 60_000) return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
   if (spanMs <= 36 * 3_600_000) return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 }
