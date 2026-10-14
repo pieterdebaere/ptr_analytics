@@ -83,7 +83,7 @@ export const HEADER_FIELDS: FieldDef[] = [
 export const AUTH_FIELDS: FieldDef[] = [
   {
     key: 'authMethod',
-    label: 'Authentication',
+    label: 'Method',
     kind: 'select',
     default: 'none',
     group: 'Authentication',
