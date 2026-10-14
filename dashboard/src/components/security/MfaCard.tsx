@@ -2,7 +2,7 @@
 import { useEffect, useId, useState, type FormEvent } from 'react';
 import { KeyRoundIcon, RefreshCwIcon, ShieldCheckIcon, ShieldOffIcon, SmartphoneIcon } from 'lucide-react';
 import { errorMessage } from '@/api/client';
-import { isTotpCode, securityApi, type MfaSetup } from '@/api/security';
+import { isTotpCode, securityApi, type MfaSetup, type MfaStatus } from '@/api/security';
 import { FormMessage, PasswordField } from '@/components/AuthCard';
 import { ErrorState, SkeletonRows } from '@/components/common';
 import { Badge } from '@/components/ui/badge';
@@ -37,9 +37,13 @@ export function CodeInput({ value, onChange, id, autoFocus, invalid }: { value: 
   );
 }
 
-export function MfaCard() {
+export function MfaCard({ onStatus }: { onStatus?: (s: MfaStatus) => void } = {}) {
   const { user } = useAuth();
   const { data, error, loading, reload } = useApi((signal) => securityApi.mfaStatus(signal), []);
+  useEffect(() => {
+    if (data) onStatus?.(data);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
   const [dialog, setDialog] = useState<'enable' | 'disable' | 'regenerate' | null>(null);
   const account = user?.email ?? '';
 
@@ -73,7 +77,21 @@ export function MfaCard() {
           </CardAction>
         ) : null}
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        {data?.required && !data.enabled ? (
+          <div className="flex items-start gap-3 rounded-lg border border-warn/40 bg-warn/[0.08] p-3 text-sm" role="alert" data-slot="mfa-required">
+            <ShieldCheckIcon className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden="true" />
+            <div className="flex flex-col gap-2">
+              <p>
+                <strong className="font-medium">Two-factor authentication is required for admins on this server.</strong> Set it up to continue using the
+                dashboard.
+              </p>
+              <Button type="button" className="w-fit" onClick={() => setDialog('enable')}>
+                Set up now
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {error ? (
           <ErrorState message={error} onRetry={reload} />
         ) : loading && !data ? (
@@ -100,8 +118,10 @@ export function MfaCard() {
               </Button>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm text-muted-foreground">Turning it off makes your account accessible with your password alone.</p>
-              <Button type="button" variant="destructive" onClick={() => setDialog('disable')}>
+              <p className="text-sm text-muted-foreground">
+                {data.required ? 'Required for admins on this server — it cannot be turned off.' : 'Turning it off makes your account accessible with your password alone.'}
+              </p>
+              <Button type="button" variant="destructive" onClick={() => setDialog('disable')} disabled={data.required}>
                 <ShieldOffIcon aria-hidden="true" />
                 Turn off
               </Button>

@@ -7,6 +7,8 @@ import type { User } from './types';
 export interface MfaStatus {
   enabled: boolean;
   recoveryCodesLeft: number;
+  /** The server requires 2FA for this account (REQUIRE_MFA_FOR_ADMINS). */
+  required: boolean;
 }
 
 export interface MfaSetup {
@@ -115,6 +117,7 @@ export const securityApi = {
       (r): MfaStatus => ({
         enabled: isObj(r) && r.enabled === true,
         recoveryCodesLeft: isObj(r) && typeof r.recoveryCodesLeft === 'number' ? Math.max(0, Math.floor(r.recoveryCodesLeft)) : 0,
+        required: isObj(r) && r.required === true,
       }),
     ),
   mfaSetup: () =>

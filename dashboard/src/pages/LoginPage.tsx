@@ -131,8 +131,8 @@ export function LoginPage() {
   );
 }
 
-/** Second login step for accounts with two-factor authentication. */
-function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDone: (u: User) => void; onCancel: (message: string | null) => void }) {
+/** Second login step for accounts with two-factor authentication (also usable after e-mail verification). */
+export function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDone: (u: User) => void; onCancel: (message: string | null) => void }) {
   const [mode, setMode] = useState<'totp' | 'recovery'>('totp');
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -159,7 +159,7 @@ function MfaStep({ mfaToken, onDone, onCancel }: { mfaToken: string; onDone: (u:
       setBusy(false);
       setCode('');
       if (err instanceof ApiError && err.status === 429) setError('Too many attempts. Please wait a few minutes and try again.');
-      else if (err instanceof ApiError && (err.code === 'mfa_expired' || err.status === 410 || err.status === 403))
+      else if (err instanceof ApiError && (err.code === 'mfa_expired' || err.status === 410))
         onCancel('Your login attempt expired. Please log in again.');
       else if (err instanceof ApiError && (err.status === 401 || err.status === 400))
         setError(mode === 'totp' ? 'Invalid code. Check your authenticator app and try again.' : 'Invalid or already used recovery code.');
