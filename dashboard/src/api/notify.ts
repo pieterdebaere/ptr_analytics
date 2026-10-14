@@ -200,6 +200,15 @@ export const notifyApi = {
   /** Validation errors carry `ApiError.field` (config key) — show them next to the input. */
   createChannel: (body: ChannelInput) => request<unknown>('POST', '/notification-channels', { body }).then(channelFrom),
   updateChannel: (uid: string, body: ChannelInput) => request<unknown>('PATCH', chPath(uid), { body }).then(channelFrom),
+  /**
+   * E-mail: sends the opt-in link again to unconfirmed recipients. `verificationSent` = mails
+   * actually sent (never to addresses that unsubscribed / declined; rate limited per address).
+   */
+  resendVerification: (uid: string) =>
+    request<unknown>('PATCH', chPath(uid), { body: { resendVerification: true } }).then((r) => ({
+      channel: channelFrom(r),
+      verificationSent: isObj(r) && typeof r.verificationSent === 'number' && r.verificationSent >= 0 ? Math.floor(r.verificationSent) : null,
+    })),
   deleteChannel: (uid: string) => request<void>('DELETE', chPath(uid)),
   /** Sends a test message through a saved channel (rate limited). */
   testChannel: (uid: string) => request<unknown>('POST', `${chPath(uid)}/test`).then(parseTest),

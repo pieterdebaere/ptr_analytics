@@ -11,7 +11,7 @@ import type { CheckerDefinition } from './types.js';
 export interface BeatEvent {
   uid: string;
   siteId: string;
-  /** Owner of the monitor's site (null = operator site); used for SSE access filtering. */
+  /** Owner of the monitor's site when the beat was recorded (null = operator site). Informational: the SSE stream re-checks access with the site's current owner. */
   ownerId: number | null;
   ts: number;
   status: number;
