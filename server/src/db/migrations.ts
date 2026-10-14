@@ -1,3 +1,7 @@
+import { CORE_SCHEMA } from '../uptime/schema/core.js';
+import { NOTIFY_SCHEMA } from '../uptime/schema/notify.js';
+import { STATUS_SCHEMA } from '../uptime/schema/status.js';
+
 /**
  * A migration that rebuilds a table (SQLite cannot alter CHECK constraints). It runs with
  * `foreign_keys = OFF` (otherwise DROP TABLE would cascade-delete child rows); afterwards
@@ -172,4 +176,7 @@ export const MIGRATIONS: readonly Migration[] = [
   ALTER TABLE sites ADD COLUMN deleted_at INTEGER;
   CREATE INDEX sites_deleted ON sites(deleted_at) WHERE deleted_at IS NOT NULL;
   `,
+  // v6 — uptime monitoring (spec §8): monitors, heartbeats, stats, maintenance, tags,
+  // notifications, status pages, incidents, MFA and API keys.
+  CORE_SCHEMA + NOTIFY_SCHEMA + STATUS_SCHEMA,
 ];

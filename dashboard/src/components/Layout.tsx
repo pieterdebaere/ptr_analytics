@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
-import { CreditCardIcon, LogOutIcon, UserRoundIcon } from 'lucide-react';
+import { BellIcon, CreditCardIcon, LogOutIcon, ShieldCheckIcon, UserRoundIcon, WrenchIcon } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -60,6 +60,18 @@ function UserMenu() {
           <DropdownMenuItem render={<Link to="/settings" />}>
             <UserRoundIcon aria-hidden="true" />
             {user.role === 'admin' ? 'Account & users' : 'Account'}
+          </DropdownMenuItem>
+          <DropdownMenuItem render={<Link to="/notifications" />}>
+            <BellIcon aria-hidden="true" />
+            Notifications
+          </DropdownMenuItem>
+          <DropdownMenuItem render={<Link to="/maintenance" />}>
+            <WrenchIcon aria-hidden="true" />
+            Maintenance
+          </DropdownMenuItem>
+          <DropdownMenuItem render={<Link to="/settings/security" />}>
+            <ShieldCheckIcon aria-hidden="true" />
+            Security
           </DropdownMenuItem>
           {showBilling ? (
             <DropdownMenuItem render={<Link to="/billing" />}>
@@ -122,6 +134,8 @@ export function AppLayout() {
             <NavItem to="/" end>
               All sites
             </NavItem>
+            <NavItem to="/uptime">Uptime</NavItem>
+            <NavItem to="/status-pages">Status pages</NavItem>
             {showBilling ? <NavItem to="/billing">Billing</NavItem> : null}
           </nav>
           <div className="ml-auto flex items-center gap-1">

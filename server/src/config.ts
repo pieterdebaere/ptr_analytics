@@ -2,6 +2,8 @@ import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import addressparser from 'nodemailer/lib/addressparser';
+import { readFileSync } from 'node:fs';
+import { UptimeConfigError, loadUptimeConfig, type UptimeConfig } from './uptime/config.js';
 
 export type LogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
 export type TrustProxy = boolean | number | string[];
@@ -30,6 +32,8 @@ export interface Config {
   dashboardDir: string;
   /** Hosted ("cloud") mode, spec section 6. Everything is off by default. */
   cloud: CloudConfig;
+  /** Uptime monitoring, spec section 8. */
+  uptime: UptimeConfig;
 }
 
 export interface CloudConfig {
@@ -205,6 +209,13 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
   const logLevel = logLevelRaw as LogLevel;
 
   const cloud = loadCloudConfig(env, publicUrl);
+  let uptime: UptimeConfig;
+  try {
+    uptime = loadUptimeConfig(env, { hosted: cloud.signupEnabled, version: packageVersion(), publicUrl });
+  } catch (err) {
+    if (err instanceof UptimeConfigError) throw new ConfigError(err.message);
+    throw err;
+  }
 
   const trackerFile = path.resolve(cwd, str(env, 'TRACKER_FILE') ?? path.join(PACKAGE_DIR, '..', 'tracker', 'dist', 'script.js'));
   const dashboardDir = path.resolve(cwd, str(env, 'DASHBOARD_DIR') ?? path.join(PACKAGE_DIR, '..', 'dashboard', 'dist'));
@@ -228,7 +239,17 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
     trackerFile,
     dashboardDir,
     cloud,
+    uptime,
   };
+}
+
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(PACKAGE_DIR, 'package.json'), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }
 
 function optBool(env: Env, key: string, def: boolean): boolean {

@@ -101,6 +101,7 @@ export function SiteLayout() {
             Live
           </SiteTab>
           <SiteTab to={`${base}/speed${search}`}>Speed Insights</SiteTab>
+          <SiteTab to={`${base}/uptime`}>Uptime</SiteTab>
           <SiteTab to={`${base}/settings`}>Settings</SiteTab>
         </nav>
       </div>

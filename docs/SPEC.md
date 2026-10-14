@@ -517,3 +517,126 @@ The Stripe API is called with `fetch` (no SDK).
 Static marketing site (Vite + React + Tailwind + shadcn/Bklit, sharing components with the
 dashboard), deployed on its own domain. Build-time config: `VITE_APP_URL` (the hosted
 analytics server, e.g. `https://analytics.pieterdebaere.be`) and `VITE_REPO_URL`.
+
+## 8. Uptime monitoring
+
+Re-implementation of the functionality of [Uptime Kuma](https://github.com/louislam/uptime-kuma),
+integrated with the analytics. The full requirements analysis (feature inventory, protocols,
+notification request formats, threat model) is in [`docs/uptime/ANALYSIS.md`](uptime/ANALYSIS.md);
+this section is the binding contract. Shared server types: `server/src/uptime/types.ts`.
+Schema: migration v6 (`server/src/uptime/schema/*.ts`).
+
+### 8.1 Scope and decisions
+
+* Monitor types: `http`, `keyword`, `json`, `tcp`, `tls`, `dns`, `push`, `group`, `manual`, `ping`,
+  `websocket`, `smtp`, `ntp`, `redis`, `ssh`, `grpc_health`, `postgres`, `mysql`, `mongodb`,
+  `mqtt`, `docker` (self-hosted opt-in) and `domain` (RDAP domain expiry). No real-browser, full
+  database drivers, Kafka, GameDig or command-running types (see ANALYSIS §8.1 WON'T).
+* Statuses: `-1` unknown, `0` down, `1` up, `2` pending, `3` maintenance; retries, retry interval,
+  resend every N failed checks, upside-down mode, accepted status codes, certificate expiry
+  notices (21/14/7/3/1 days), domain expiry notices.
+* Monitors belong to a **site** (`site_id`); access, limits, suspension and soft delete follow the
+  site (spec §6.2). Tags, notification channels and maintenance windows belong to a user
+  (`owner_id`, `NULL` = operator object visible to admins/viewers). Links between objects are only
+  accepted within the same owner.
+* Hosted mode (members): `MEMBER_MONITORS_PER_SITE` (10), min interval `MEMBER_MIN_INTERVAL_S` (60),
+  timeout ≤ 30 s, retries ≤ 5, `MEMBER_STATUS_PAGES_PER_SITE` (1), `MEMBER_NOTIFY_CHANNELS` (10),
+  `MEMBER_NOTIFY_PER_HOUR` (120); private targets always denied; webhook URLs https only; e-mail
+  channels need double opt-in; types with `hosted: 'disabled'` refused. Suspended sites: monitors
+  are paused, status pages show "monitoring paused".
+* Public status pages are served on the same origin under `/status/:slug` (SPA route, no login).
+  No custom CSS and no third-party scripts; Markdown subset only (rendered as React elements).
+* Secrets (monitor credentials, notification tokens, TOTP secrets) are encrypted at rest with
+  AES-256-GCM (`SECRETS_KEY` or a generated `<DATA_DIR>/secrets.key`, mode 0600) and **write-only**
+  in the API: responses contain `secretsSet: string[]` instead of values; sending `""`/omitting a
+  secret field keeps the stored value, `null` clears it.
+* All outgoing connections go through the SSRF-safe `SafeNet` (resolve → check every address →
+  connect to that exact address; redirects re-checked; `dns.Resolver` with timeouts, never
+  `dns.lookup`). Policy: `UPTIME_PRIVATE_TARGETS` (`allow` self-hosted default, forced `deny` in
+  hosted mode), link-local/metadata always denied unless `UPTIME_ALLOW_METADATA`, allow/deny lists,
+  the server's own addresses always denied.
+* Realtime: Server-Sent Events (`GET /api/uptime/stream`), the dashboard falls back to polling.
+* Two-factor authentication (TOTP + recovery codes) for all accounts; API keys (bearer, scoped)
+  for `/metrics` (Prometheus) and read-only API automation.
+
+Configuration (all optional): `UPTIME_ENABLED` (true), `UPTIME_MIN_INTERVAL_S` (20),
+`UPTIME_CHECK_CONCURRENCY` (64), `UPTIME_PRIVATE_TARGETS`, `UPTIME_ALLOW_METADATA` (false),
+`UPTIME_TARGET_ALLOWLIST` / `UPTIME_TARGET_DENYLIST` (CIDRs/hostnames), `UPTIME_MAX_BODY_BYTES`
+(1 MiB), `UPTIME_RAW_RETENTION_HOURS` (48), `UPTIME_RETENTION_DAYS` (400), `UPTIME_PING_BINARY`
+(`/bin/ping`, empty disables), `UPTIME_DOCKER_ENABLED` (false) + `UPTIME_DOCKER_HOST`,
+`SECRETS_KEY` / `SECRETS_KEY_FILE`, `MEMBER_*` limits above, `REQUIRE_MFA_FOR_ADMINS` (false).
+Parsed in `server/src/uptime/config.ts`.
+
+### 8.2 Engine
+
+Scheduler with a min-heap on the monotonic clock, stable per-monitor phase jitter, anchored
+intervals (missed slots skipped, never bursts), global/per-owner/per-destination concurrency
+limits, `AbortSignal` deadlines + watchdog. Results are written in batches (heartbeat, state,
+hourly/daily time-weighted aggregates, events, outages, outbox rows in one transaction). Status
+transitions are a pure, unit-tested function (`(state, result, settings, inMaintenance) → …`)
+reproducing Uptime Kuma's important/notify rules. Group monitors derive their status from their
+children. Push monitors are DOWN when no push arrived within `interval` (grace period after
+start). Maintenance windows (strategies `manual`, `single`, `weekly`, `monthly`, `interval`,
+`cron`; IANA time zones) put monitors (and group descendants) in status 3 and suppress
+notifications. Retention: raw heartbeats `UPTIME_RAW_RETENTION_HOURS`, hourly stats 90 days,
+daily stats/events/outages `UPTIME_RETENTION_DAYS`; purge in small chunks.
+Uptime = `up_ms / (up_ms + down_ms + pending_ms)` (time-weighted; maintenance and gaps excluded).
+
+### 8.3 API (authenticated, same conventions as §4.7: cookie session or API key, `X-PA-Request: 1` on mutations)
+
+`Monitor` JSON:
+```jsonc
+{ "uid": "k3j9x0abcd12", "siteId": "…", "parentUid": null, "type": "http", "name": "Homepage",
+  "description": null, "active": true, "intervalS": 60, "retryIntervalS": 60, "maxRetries": 1,
+  "resendEvery": 0, "timeoutMs": 10000, "upsideDown": false, "certNotify": true, "domainNotify": false,
+  "config": { /* type specific, see GET /api/uptime/types */ }, "secretsSet": ["password"],
+  "target": "https://example.com/", "tags": [{"uid","name","color","value"}], "channelUids": ["…"],
+  "publicId": null /* badges enabled when set */, "pushUrl": null /* push monitors only, shown once on create/regenerate */,
+  "state": { "status": 1, "since": 1791000000000, "lastCheckAt": …, "latencyMs": 123, "msg": "200 OK" },
+  "uptime24h": 0.9998, "uptime30d": 0.9991, "tls": { "notAfter": …, "daysLeft": 61, "issuer": "…", "valid": true } | null,
+  "createdAt": …, "updatedAt": … }
+```
+* `GET /api/uptime/types` → `{types: [{type, label, description, category, fields: FieldDef[], defaults, available: boolean, hostedAllowed: boolean}]}`
+  plus `{limits: {minIntervalS, maxTimeoutMs, maxRetries, monitorsPerSite|null}}` for the current user.
+* `GET /api/uptime/overview` → `{sites: [{siteId, total, up, down, pending, maintenance, paused, uptime30d}], monitors: Monitor[]}` (accessible sites only)
+* `GET /api/sites/:siteId/monitors` → `{monitors: Monitor[]}` ; `POST` (same fields as Monitor, writable ones) → `201 {monitor}` (402/409-style limits as `{error, code: "limit_reached"}`)
+* `GET|PATCH|DELETE /api/monitors/:uid` ; `POST /api/monitors/:uid/pause|resume|clone|check` (check = run now, rate limited) ;
+  `POST /api/monitors/:uid/push-token` → `{pushUrl}` (regenerates) ; `POST /api/monitors/:uid/badges` `{enabled}` → `{publicId}`
+* `GET /api/monitors/:uid/heartbeats?period=24h|7d|30d|90d|custom&from&to&tz` →
+  `{interval: 'raw'|'hour'|'day', points: [{t, status, latencyMs, latencyMin, latencyMax, upRatio}]}` (≤ 500 points, down-sampled)
+* `GET /api/monitors/:uid/stats?period&tz` → `{uptime, previousUptime, avgLatencyMs, minLatencyMs, maxLatencyMs, checks, outages: number, downtimeMs, mttrMs, bars: [{t, upRatio|null, maintenance: boolean}] /* 90 local days */}`
+* `GET /api/monitors/:uid/events?before=<id>&limit` → `{events: [{id, ts, from, to, msg}]}` ; `GET /api/monitors/:uid/outages?limit` → `{outages: [{id, startedAt, confirmedAt, endedAt, cause}]}`
+* `GET /api/uptime/stream` → `text/event-stream`; events `beat` `{uid, ts, status, latencyMs, msg}` and `state` `{uid, status, since}` for accessible monitors (heartbeat every 25 s).
+* Tags: `GET|POST /api/tags`, `PATCH|DELETE /api/tags/:uid` (`{uid, name, color}`).
+* Maintenance: `GET|POST /api/maintenances`, `GET|PATCH|DELETE /api/maintenances/:uid`, `POST /api/maintenances/:uid/pause|resume`;
+  `{uid, title, description, active, strategy, tz, startsAt, endsAt, timeStart, timeEnd, weekdays: number[] /* 0=Sun */, daysOfMonth: (number|"L")[], intervalDays, cron, durationS, monitorUids, statusPageUids, status: "scheduled"|"under-maintenance"|"inactive"|"ended", nextWindow: {start, end}|null}`.
+* Notification channels: `GET /api/notification-providers` → `{providers: [{id, label, category, fields: FieldDef[], hostedAllowed}]}`;
+  `GET|POST /api/notification-channels`, `GET|PATCH|DELETE /api/notification-channels/:uid`
+  (`{uid, type, name, config, secretsSet, isDefault, active, verified: boolean, consecutiveFailures, monitorCount}`; `applyToExisting: true` on create/update links it to all of the owner's monitors);
+  `POST /api/notification-channels/:uid/test` (rate limited) → `{ok, error?}`; `POST /api/notification-channels/test` with an unsaved channel body;
+  `GET /api/notification-channels/:uid/log?limit` → `{entries: [{ts, event, ok, httpStatus, error, monitorUid}]}`;
+  e-mail double opt-in (hosted mode): `GET /api/notification-channels/verify?token=` (public; confirms the recipient) and one-click unsubscribe links.
+* Status pages (per site): `GET /api/status-pages`, `POST /api/sites/:siteId/status-pages`, `GET|PATCH|DELETE /api/status-pages/:uid`
+  (`{uid, siteId, slug, title, description, footer, theme, accent, published, noindex, showTags, showCertExpiry, showPoweredBy, refreshS, analyticsSiteId, logoUrl, sections: [{name, monitors: [{uid, displayName, showUrl}]}], domains: [{domain, verified, verifyToken}]}`);
+  `POST /api/status-pages/:uid/logo` (raw PNG/JPEG/WebP ≤ 512 KB, content sniffed) ; `DELETE …/logo`;
+  incidents: `GET|POST /api/status-pages/:uid/incidents`, `PATCH|DELETE /api/incidents/:uid` (`{uid, title, body, style, pinned, createdAt, updatedAt, resolvedAt}`).
+* Security: `GET /api/auth/mfa` → `{enabled, recoveryCodesLeft}`; `POST /api/auth/mfa/setup` → `{secret, otpauthUrl}` (pending until confirmed);
+  `POST /api/auth/mfa/enable {code}` → `{recoveryCodes: string[]}` (shown once); `POST /api/auth/mfa/disable {password, code}`;
+  `POST /api/auth/mfa/recovery-codes {password, code}` → new codes. Login with MFA: `POST /api/auth/login` answers
+  `200 {mfaRequired: true, mfaToken}` (no session yet); `POST /api/auth/login/mfa {mfaToken, code | recoveryCode}` → `{user}` + session.
+  API keys: `GET|POST /api/api-keys` (`{name, scopes: ["read", "metrics"], expiresInDays?}` → key shown once `pa_<prefix>_<secret>`), `DELETE /api/api-keys/:uid`.
+
+### 8.4 Public endpoints (no auth)
+
+* `GET|POST|HEAD /api/push/:token?status=up|down&msg=&ping=` → `{ok: true}` (CORS `*`, rate limited per token/IP; unknown token → 404 after constant work).
+* `GET /api/public/status/:slug` → status page JSON for published pages only (no internal ids, no targets unless `showUrl`):
+  `{title, description, footer, theme, accent, logoUrl, showPoweredBy, refreshS, analytics: {siteId, scriptUrl}|null, overall: "up"|"degraded"|"down"|"maintenance"|"unknown",
+   sections: [{name, monitors: [{id /* opaque per page */, name, status, uptime90d, bars: [{t, upRatio|null, maintenance}], url?, certDaysLeft?, tags?}]}],
+   incidents: [...pinned/unresolved + last 10 resolved], maintenance: [{title, description, start, end, status}], updatedAt}`;
+  `GET /status/:slug/feed.xml` (RSS of incidents and outages).
+* Badges (SVG, `Cache-Control: max-age=60`): `GET /api/public/badge/:publicId/status.svg`, `uptime.svg?period=24h|7d|30d|90d`,
+  `response.svg`, `cert.svg`; `GET /api/public/status/:slug/badge.svg`. Query parameters `label`, `style=flat|flat-square|for-the-badge`
+  (strictly validated, text escaped).
+* `GET /metrics` — Prometheus text format, requires `Authorization: Bearer <api key with "metrics" scope>`;
+  only the key owner's monitors.
+* `GET /uptime-bot` — plain page explaining the checks (linked from the User-Agent).

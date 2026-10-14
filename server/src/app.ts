@@ -1,3 +1,5 @@
+import { securityRoutes } from './routes/security.js';
+import { registerUptime } from './uptime/index.js';
 import fs from 'node:fs';
 import type { Socket } from 'node:net';
 import path from 'node:path';
@@ -305,6 +307,8 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   await app.register(siteRoutes, { ctx });
   await app.register(statsRoutes, { ctx });
   await app.register(exportRoutes, { ctx });
+  await app.register(securityRoutes, { ctx });
+  await registerUptime(app, ctx, { backgroundJobs: options.backgroundJobs ?? false });
   app.get('/api/config', { preHandler: requireAuth(ctx) }, async () => ({
     publicUrl: config.publicUrl,
     version: ctx.version,
