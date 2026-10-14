@@ -4,6 +4,7 @@ import { TargetDeniedError, ValidationError, type CheckContext, type CheckResult
 import { NetError, TlsCertificateError } from '../net/errors.js';
 import { TargetPolicy, normalizeHost, normalizeHostname } from '../net/policy.js';
 import { parseIp } from '../net/ip.js';
+import { INVALID_HEADER_VALUE_RE } from '../net/http.js';
 
 export type Input = Record<string, unknown>;
 
@@ -189,6 +190,9 @@ export function headerList(input: Input, key: string, opts: { forbid?: readonly 
     if (value.length > 4096) throw new ValidationError(`${key}: header values must be at most 4096 characters`, key);
     // eslint-disable-next-line no-control-regex
     if (/[\r\n\u0000]/.test(value)) throw new ValidationError(`${key}: header values must not contain line breaks`, key);
+    // node:http's rule (ERR_INVALID_CHAR): tab, printable ASCII and Latin-1 only. Checked at save so a
+    // bad value never reaches the request setup (where the socket would already be open).
+    if (INVALID_HEADER_VALUE_RE.test(value)) throw new ValidationError(`${key}: header ${name} contains characters that are not allowed in HTTP headers`, key);
     out.push({ key: name, value: value.trim() });
   }
   return out;
@@ -268,6 +272,11 @@ export function up(msg: string, extra: Partial<CheckResult> = {}): CheckResult {
 
 export function down(msg: string, extra: Partial<CheckResult> = {}): CheckResult {
   return { ...extra, status: 'down', msg: clip(msg) };
+}
+
+/** Whether a string can be sent as an HTTP header value (node:http rule). */
+export function validHeaderValue(v: string): boolean {
+  return !INVALID_HEADER_VALUE_RE.test(v);
 }
 
 /** Short message for an error thrown during a check (no secrets: our errors never include them). */

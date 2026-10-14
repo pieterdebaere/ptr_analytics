@@ -83,7 +83,7 @@ describe('loadSecretBox', () => {
     if (process.platform !== 'win32') {
       fs.chmodSync(file, 0o666);
       expect(() => loadSecretBox(uptimeConfig({ SECRETS_KEY_FILE: file }), dir)).toThrow(/insecure permissions/);
-      fs.chmodSync(file, 0o444);
+      fs.chmodSync(file, 0o600);
       expect(() => loadSecretBox(uptimeConfig({ SECRETS_KEY_FILE: file }), dir)).not.toThrow();
     }
     const bad = path.join(dir, 'bad');
@@ -96,5 +96,38 @@ describe('loadSecretBox', () => {
     }
     expect(msg).toMatch(/32 bytes/);
     expect(msg).not.toContain('too short');
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a group/other-readable SECRETS_KEY_FILE unless it is a root-owned 0400/0440 secret (L6)', () => {
+    const dir = tmp();
+    const file = path.join(dir, 'key');
+    fs.writeFileSync(file, randomBytes(32).toString('base64'), { mode: 0o600 });
+    const load = (): unknown => loadSecretBox(uptimeConfig({ SECRETS_KEY_FILE: file }), dir);
+    for (const mode of [0o644, 0o640, 0o604, 0o444]) {
+      fs.chmodSync(file, mode);
+      expect(load, mode.toString(8)).toThrow(/readable by group\/others/);
+    }
+    for (const mode of [0o600, 0o400]) {
+      fs.chmodSync(file, mode);
+      expect(load, mode.toString(8)).not.toThrow();
+    }
+    fs.chmodSync(file, 0o440);
+    const owner = fs.statSync(file).uid;
+    if (owner === 0) {
+      // Root-owned 0440 (Docker secret readable by the service's group) is accepted …
+      expect(load).not.toThrow();
+      // … but not when owned by another user.
+      fs.chownSync(file, 1000, 1000);
+      expect(load).toThrow(/readable by group\/others/);
+    } else {
+      expect(load).toThrow(/readable by group\/others/);
+    }
+    // The generated key file stays strict (0600).
+    const gen = tmp();
+    loadSecretBox(uptimeConfig(), gen);
+    fs.chmodSync(path.join(gen, 'secrets.key'), 0o400);
+    expect(() => loadSecretBox(uptimeConfig(), gen)).not.toThrow();
+    fs.chmodSync(path.join(gen, 'secrets.key'), 0o440);
+    expect(() => loadSecretBox(uptimeConfig(), gen)).toThrow(/insecure permissions/);
   });
 });

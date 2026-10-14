@@ -146,8 +146,18 @@ const V4: Array<[IpCategory, Cidr[]]> = [
   ['broadcast', cidrs(['255.255.255.255/32'])],
   ['multicast', cidrs(['224.0.0.0/4'])],
   ['reserved', cidrs(['240.0.0.0/4'])],
-  // AWS/GCP/Azure/OpenStack 169.254.169.254, ECS 169.254.170.2, Alibaba 100.100.100.200, Oracle 192.0.0.192
-  ['metadata', cidrs(['169.254.0.0/16', '100.100.100.200/32', '192.0.0.192/32'])],
+  // Provider-internal services reachable from inside a VM:
+  //  * 169.254.0.0/16: link-local, incl. the metadata endpoint 169.254.169.254 of AWS, GCP,
+  //    Azure IMDS, OpenStack, Oracle Cloud, DigitalOcean, Hetzner, Linode, Vultr, Scaleway (via
+  //    169.254.42.42), AWS ECS task metadata 169.254.170.2, AWS Time Sync / DNS
+  //    169.254.169.123 / .253 and Tencent Cloud metadata 169.254.0.23
+  //  * 100.100.100.200: Alibaba Cloud metadata (inside 100.64.0.0/10, listed here so it counts as
+  //    metadata, not merely private)
+  //  * 168.63.129.16: Azure WireServer / HostGAPlugin (goal state, extension settings, also the
+  //    Azure DNS / health-probe source) — a public-looking address that is VM-internal
+  //  * 192.0.0.192: Oracle Cloud Classic metadata
+  // Further provider addresses can be denied by the operator with UPTIME_TARGET_DENYLIST.
+  ['metadata', cidrs(['169.254.0.0/16', '100.100.100.200/32', '168.63.129.16/32', '192.0.0.192/32'])],
   ['private', cidrs(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '100.64.0.0/10'])],
   ['special', cidrs(['192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24'])],
 ];

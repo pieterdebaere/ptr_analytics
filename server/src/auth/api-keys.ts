@@ -2,7 +2,9 @@
 // secret = 32 random bytes base64url. Only sha256(key) is stored. Scopes:
 //   read    — GET/HEAD of the user's own data (sites, stats, uptime, status pages); never
 //             mutations, never auth / users / billing / account / api-key / notification endpoints;
-//   metrics — GET /metrics (Prometheus) only.
+//   metrics — GET /metrics (Prometheus) only: monitors of the key owner's own sites (admins and
+//             viewers: also the operator's sites, owner_id NULL);
+//   metrics:all — admins only: GET /metrics over every tenant's monitors (explicit opt-in).
 // Keys never create sessions and never set cookies; bearer requests are not cookie
 // authenticated, so the CSRF defence is unaffected.
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
@@ -15,7 +17,7 @@ import { RateLimiter } from '../lib/rate-limit.js';
 import { clientIp, rateLimitKey } from '../lib/client-ip.js';
 import { sha256Hex } from '../lib/ids.js';
 
-export const API_KEY_SCOPES = ['read', 'metrics'] as const;
+export const API_KEY_SCOPES = ['read', 'metrics', 'metrics:all'] as const;
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];
 export const API_KEYS_PER_USER = 20;
 export const API_KEY_RE = /^pa_([a-z0-9]{8})_([A-Za-z0-9_-]{43})$/;
@@ -103,6 +105,14 @@ export class ApiKeyRepo {
     throw new Error('could not allocate a unique api key');
   }
 
+  /**
+   * Revoke every key of a user (password change / reset, MFA enabled / disabled / reset): a
+   * key minted with a stolen session must not survive the owner's recovery steps.
+   */
+  deleteForUser(userId: number): number {
+    return this.db.prepare('DELETE FROM api_keys WHERE user_id = ?').run(userId).changes;
+  }
+
   /** Revoke (delete) one of the user's keys. */
   delete(userId: number, uid: string): boolean {
     return this.db.prepare('DELETE FROM api_keys WHERE user_id = ? AND uid = ?').run(userId, uid).changes > 0;
@@ -140,8 +150,14 @@ export class ApiKeyRepo {
 
 interface KeyState {
   repo: ApiKeyRepo;
-  /** Failed bearer attempts per client IP. */
+  /**
+   * Failed bearer attempts per (client IP, key prefix). Only failures are counted and a
+   * valid key is always evaluated first, so garbage tokens from one client never lock out
+   * valid keys used from the same IP / NAT.
+   */
   failures: RateLimiter;
+  /** Failed attempts per client IP over all prefixes (coarse cap on random-prefix floods). */
+  ipFailures: RateLimiter;
   /** keyId → last time last_used_at was written (coalescing). */
   touched: Map<number, number>;
 }
@@ -151,7 +167,12 @@ const stateByCtx = new WeakMap<AppContext, KeyState>();
 export function apiKeyState(ctx: AppContext): KeyState {
   let s = stateByCtx.get(ctx);
   if (!s) {
-    s = { repo: new ApiKeyRepo(ctx.db), failures: new RateLimiter(30, 15 * 60_000, ctx.now, 20_000), touched: new Map() };
+    s = {
+      repo: new ApiKeyRepo(ctx.db),
+      failures: new RateLimiter(30, 15 * 60_000, ctx.now, 20_000),
+      ipFailures: new RateLimiter(300, 15 * 60_000, ctx.now, 20_000),
+      touched: new Map(),
+    };
     stateByCtx.set(ctx, s);
   }
   return s;
@@ -197,22 +218,27 @@ export function requestApiKey(request: FastifyRequest): { keyId: number; scopes:
 }
 
 /**
- * Authenticate a bearer API key with the given scope. Returns null when the request carries
- * no bearer token; throws 401/403/429 for bad keys, wrong scope or too many failures.
+ * Authenticate a bearer API key with (one of) the given scope(s). Returns null when the request
+ * carries no bearer token; throws 401/403/429 for bad keys, wrong scope or too many failures.
+ * A syntactically valid key is always looked up first: the failure limiter only decides
+ * between 401 and 429 for keys that did not resolve.
  */
-export function authenticateApiKey(ctx: AppContext, request: FastifyRequest, scope: ApiKeyScope): User | null {
+export function authenticateApiKey(ctx: AppContext, request: FastifyRequest, scope: ApiKeyScope | readonly ApiKeyScope[]): User | null {
   const token = bearerToken(request);
   if (token === null) return null;
   const st = apiKeyState(ctx);
-  const ipKey = rateLimitKey(clientIp(request));
-  if (st.failures.isLimited(ipKey)) throw new HttpError(429, 'too many failed attempts, try again later');
   const now = ctx.now();
   const resolved = st.repo.resolve(token, now);
   if (!resolved) {
-    st.failures.hit(ipKey);
+    const ipKey = rateLimitKey(clientIp(request));
+    const prefix = API_KEY_RE.exec(token)?.[1] ?? '-';
+    const pairOk = st.failures.hit(`${ipKey}\n${prefix}`);
+    const ipOk = st.ipFailures.hit(ipKey);
+    if (!pairOk || !ipOk) throw new HttpError(429, 'too many failed attempts, try again later');
     throw new HttpError(401, 'unauthorized');
   }
-  if (!resolved.scopes.includes(scope)) throw new HttpError(403, 'api key lacks the required scope', 'insufficient_scope');
+  const wanted: readonly ApiKeyScope[] = typeof scope === 'string' ? [scope] : scope;
+  if (!wanted.some((w) => resolved.scopes.includes(w))) throw new HttpError(403, 'api key lacks the required scope', 'insufficient_scope');
   const last = st.touched.get(resolved.keyId) ?? resolved.lastUsedAt ?? 0;
   if (now - last >= LAST_USED_RESOLUTION_MS) {
     if (st.touched.size > 10_000) st.touched.clear();

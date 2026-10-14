@@ -9,6 +9,10 @@
 // * Redirects are followed manually (each hop re-resolved and re-checked); on cross-origin hops
 //   only harmless headers are kept (Authorization, Cookie and custom/secret headers are dropped)
 //   and the client certificate is not presented.
+// * Redirect policy: https → http downgrades are refused unless `allowDowngrade` (never for
+//   hosted members); a redirect that would re-send the request body (307/308, or 301/302 of a
+//   non-POST method) to another origin is refused instead of followed — the body may carry
+//   credentials or tokens meant for the first origin.
 // * Body capped at maxBodyBytes (compressed and decompressed separately; gzip/deflate/br only),
 //   ≤ 16 KiB of headers, ≤ 100 header lines.
 import http, { type IncomingMessage } from 'node:http';
@@ -40,15 +44,34 @@ export function parseHttpUrl(input: string): URL {
   return u;
 }
 
+/** RFC 9110 token (header names), as enforced by node:http. */
+export const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Characters node:http rejects in header values (ERR_INVALID_CHAR). */
+// eslint-disable-next-line no-control-regex
+export const INVALID_HEADER_VALUE_RE = /[^\t\x20-\x7e\x80-\xff]/;
+
+/** Validated before any connection is opened (node:http would throw only after the socket is up). */
 function lowerHeaders(h: Record<string, string> | undefined): Map<string, string> {
   const m = new Map<string, string>();
   if (!h) return m;
   for (const [k, v] of Object.entries(h)) {
     if (typeof v !== 'string') continue;
-    if (/[\r\n\0]/.test(k) || /[\r\n\0]/.test(v)) throw new NetError('EINVALIDHEADER', 'invalid header');
+    if (!HEADER_NAME_RE.test(k) || INVALID_HEADER_VALUE_RE.test(v)) throw new NetError('EINVALIDHEADER', 'invalid header');
     m.set(k.toLowerCase(), v);
   }
   return m;
+}
+
+/**
+ * Whether a redirect from `from` to `to` may be followed. `hasBody`: the next hop would re-send
+ * the request body. Returns an error message when refused.
+ */
+export function redirectAllowed(from: URL, to: URL, opts: { allowDowngrade?: boolean; hostedMember?: boolean; hasBody: boolean }): string | null {
+  if (from.protocol === 'https:' && to.protocol === 'http:' && !(opts.allowDowngrade === true && opts.hostedMember !== true)) {
+    return 'redirect from https to http refused';
+  }
+  if (opts.hasBody && to.origin !== from.origin) return 'redirect to another origin would re-send the request body; not followed';
+  return null;
 }
 
 interface Hop {
@@ -134,16 +157,25 @@ async function oneHop(
   const reqStart = performance.now();
   return new Promise<Hop>((resolve, reject) => {
     let settled = false;
-    const req = http.request({
-      method,
-      path: `${url.pathname}${url.search}`,
-      headers: outHeaders,
-      setHost: false,
-      createConnection: () => sock as Socket,
-      maxHeaderSize: 16 * 1024,
-      insecureHTTPParser: false,
-      joinDuplicateHeaders: false,
-    });
+    let req: http.ClientRequest;
+    try {
+      req = http.request({
+        method,
+        path: `${url.pathname}${url.search}`,
+        headers: outHeaders,
+        setHost: false,
+        createConnection: () => sock as Socket,
+        maxHeaderSize: 16 * 1024,
+        insecureHTTPParser: false,
+        joinDuplicateHeaders: false,
+      });
+    } catch (err) {
+      // Invalid header/path (ERR_INVALID_CHAR …) after the socket is already connected: release it now.
+      sock.destroy();
+      const code = (err as { code?: string } | null)?.code ?? '';
+      reject(new NetError(code === 'ERR_INVALID_CHAR' || code === 'ERR_INVALID_HTTP_TOKEN' ? 'EINVALIDHEADER' : 'EINVAL', code === 'ERR_UNESCAPED_CHARACTERS' ? 'invalid request path' : 'invalid request header'));
+      return;
+    }
     req.maxHeadersCount = 100;
     const fail = (err: unknown): void => {
       if (settled) return;
@@ -305,6 +337,8 @@ export async function httpRequest(
         body = null;
         headers.delete('content-type');
       }
+      const refused = redirectAllowed(url, next, { allowDowngrade: opts.allowDowngrade, hostedMember: policy.hostedMember, hasBody: body !== null && body.length > 0 });
+      if (refused) throw new NetError('EREDIRECT', refused);
       if (next.origin !== origin0) crossOrigin = true;
       if (next.origin !== url.origin) {
         const kept = new Map<string, string>();

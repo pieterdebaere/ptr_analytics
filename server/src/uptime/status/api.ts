@@ -2,7 +2,7 @@
 // Tenancy follows the page's site (auth/access.ts): admin all, viewer read-only, member own
 // sites; anything else is a 404 indistinguishable from "does not exist".
 import { createHash } from 'node:crypto';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../../context.js';
 import { accessibleSites, assertSiteAccess, canAccessSite } from '../../auth/access.js';
 import { currentUser, requireAuth } from '../../auth/guard.js';
@@ -12,17 +12,19 @@ import { HttpError, badRequest, conflict, forbidden, notFound, tooMany } from '.
 import { RateLimiter } from '../../lib/rate-limit.js';
 import { invalidatePublic } from './cache.js';
 import { monitorIdsByUid } from './data.js';
-import { verifyDomainTxt } from './domains.js';
+import { domainTxtValues } from './domains.js';
 import { MAX_LOGO_BYTES, sniffImage } from './image.js';
 import { buildPublicStatus } from './render.js';
 import {
+  DOMAIN_CLAIM_TTL_MS,
   UID_RE,
-  assetUrl,
   countIncidents,
   countPagesForSite,
-  domainRow,
+  domainClaim,
   domainsOf,
+  expireDomainClaims,
   gcAsset,
+  getAsset,
   incidentByUid,
   incidentJson,
   incidentsOf,
@@ -36,6 +38,7 @@ import {
   replaceSections,
   sectionsOf,
   slugTaken,
+  verifiedClaim,
   type PageRow,
   type SectionInput,
 } from './store.js';
@@ -76,13 +79,29 @@ export interface StatusPageJson {
   refreshS: number;
   tz: string;
   analyticsSiteId: string | null;
+  /**
+   * Logo for the dashboard (authenticated, works for unpublished pages); the public page
+   * uses the public asset URL, served only while a published page uses the logo.
+   */
   logoUrl: string | null;
   /** Path of the public page (`/status/<slug>`). */
   url: string;
+  /** Absolute URL of the public page (STATUS_PAGE_ORIGIN, else PUBLIC_URL; the path when neither is set). */
+  publicUrl: string;
   sections: Array<{ name: string; monitors: Array<{ uid: string; displayName: string | null; showUrl: boolean }> }>;
-  domains: Array<{ domain: string; verified: boolean; verifyToken: string; txtName: string }>;
+  /** `expiresAt`: unverified claims are dropped then (7 days after they were added). */
+  domains: Array<{ domain: string; verified: boolean; verifyToken: string; txtName: string; expiresAt: number | null }>;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Authenticated logo URL for the dashboard (versioned by content hash). */
+export const dashboardLogoUrl = (p: Pick<PageRow, 'uid' | 'logo_asset'>): string | null =>
+  p.logo_asset ? `/api/status-pages/${p.uid}/logo?v=${p.logo_asset.slice(0, 16)}` : null;
+
+/** Absolute URL of a public status page. */
+export function publicPageUrl(ctx: AppContext, slug: string): string {
+  return `${ctx.config.statusPageOrigin ?? ctx.config.publicUrl ?? ''}/status/${slug}`;
 }
 
 export function statusPageJson(ctx: AppContext, p: PageRow): StatusPageJson {
@@ -103,8 +122,9 @@ export function statusPageJson(ctx: AppContext, p: PageRow): StatusPageJson {
     refreshS: p.refresh_s,
     tz: p.tz,
     analyticsSiteId: p.analytics_site_id,
-    logoUrl: assetUrl(p.logo_asset),
+    logoUrl: dashboardLogoUrl(p),
     url: `/status/${p.slug}`,
+    publicUrl: publicPageUrl(ctx, p.slug),
     sections: sectionsOf(ctx.db, p.id).map((s) => ({
       name: s.name,
       monitors: s.monitors.map((m) => ({ uid: m.uid, displayName: m.displayName, showUrl: m.showUrl })),
@@ -114,6 +134,7 @@ export function statusPageJson(ctx: AppContext, p: PageRow): StatusPageJson {
       verified: d.verified_at !== null,
       verifyToken: d.verify_token,
       txtName: `_ptr-status.${d.domain}`,
+      expiresAt: d.verified_at === null ? d.created_at + DOMAIN_CLAIM_TTL_MS : null,
     })),
     createdAt: p.created_at,
     updatedAt: p.updated_at,
@@ -187,7 +208,7 @@ function parseSections(ctx: AppContext, siteId: string, v: unknown): SectionInpu
 function parseDomains(ctx: AppContext, user: User, v: unknown): string[] {
   const max = user.role === 'member' ? MAX_DOMAINS_MEMBER : MAX_DOMAINS;
   if (!Array.isArray(v) || v.length > max) throw badRequest(`domains must be a list of at most ${max} domain names`);
-  const list = v.map((d) => normalizeStatusDomain(d, ctx.config.publicUrl));
+  const list = v.map((d) => normalizeStatusDomain(d, ctx.config.publicUrl, ctx.config.statusPageOrigin));
   if (new Set(list).size !== list.length) throw badRequest('duplicate domain');
   return list;
 }
@@ -229,13 +250,6 @@ function parsePageInput(ctx: AppContext, user: User, siteId: string, body: JsonO
   return out;
 }
 
-function assertDomainsFree(ctx: AppContext, domains: string[] | undefined, pageId: number | null): void {
-  for (const d of domains ?? []) {
-    const row = domainRow(ctx.db, d);
-    if (row && row.status_page_id !== pageId) throw conflict(`the domain ${d} is already used by another status page`);
-  }
-}
-
 const isUniqueViolation = (err: unknown): boolean =>
   typeof err === 'object' && err !== null && 'code' in err && String((err as { code: unknown }).code).startsWith('SQLITE_CONSTRAINT');
 
@@ -262,15 +276,21 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
   );
 
   const changed = (): void => invalidatePublic(ctx);
+  /** Unverified domain claims expire (cheap; run before domain lists are read or changed). */
+  const expireClaims = (): void => {
+    expireDomainClaims(db, ctx.now());
+  };
 
   app.get('/api/status-pages', { preHandler: auth }, async (request) => {
     const user = currentUser(request);
     const sites = accessibleSites(ctx, user).map((s) => s.id);
+    expireClaims();
     return { statusPages: pagesForSites(db, sites).map((p) => statusPageJson(ctx, p)) };
   });
 
   app.get<{ Params: { siteId: string } }>('/api/sites/:siteId/status-pages', { preHandler: auth }, async (request) => {
     const site = assertSiteAccess(ctx, request.user, request.params.siteId, 'read');
+    expireClaims();
     return { statusPages: pagesForSites(db, [site.id]).map((p) => statusPageJson(ctx, p)) };
   });
 
@@ -282,7 +302,6 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
       throw new HttpError(402, 'status page limit reached for this site', 'limit_reached');
     }
     if (slugTaken(db, input.slug as string)) throw conflict('this slug is already taken');
-    assertDomainsFree(ctx, input.domains, null);
     const now = ctx.now();
     let id: number;
     try {
@@ -315,11 +334,11 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
           );
         const pageId = Number(res.lastInsertRowid);
         if (input.sections) replaceSections(db, pageId, input.sections);
-        if (input.domains) replaceDomains(db, pageId, input.domains);
+        if (input.domains) replaceDomains(db, pageId, input.domains, now);
         return pageId;
       })();
     } catch (err) {
-      if (isUniqueViolation(err)) throw conflict('this slug or domain is already taken');
+      if (isUniqueViolation(err)) throw conflict('this slug is already taken');
       throw err;
     }
     changed();
@@ -328,13 +347,15 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
 
   app.get<{ Params: { uid: string } }>('/api/status-pages/:uid', { preHandler: auth }, async (request) => {
     const page = pageForUser(ctx, currentUser(request), request.params.uid, 'read');
+    expireClaims();
     return { statusPage: statusPageJson(ctx, page) };
   });
 
   /** The public JSON of the page whether or not it is published (dashboard preview). */
   app.get<{ Params: { uid: string } }>('/api/status-pages/:uid/preview', { preHandler: auth }, async (request) => {
     const page = pageForUser(ctx, currentUser(request), request.params.uid, 'read');
-    return buildPublicStatus(ctx, page);
+    // The public logo URL only works while a published page uses the asset.
+    return { ...buildPublicStatus(ctx, page), logoUrl: dashboardLogoUrl(page) };
   });
 
   app.patch<{ Params: { uid: string } }>('/api/status-pages/:uid', { preHandler: auth }, async (request) => {
@@ -342,7 +363,7 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
     const page = pageForUser(ctx, user, request.params.uid, 'manage');
     const input = parsePageInput(ctx, user, page.site_id, objectBody(request.body), false);
     if (input.slug !== undefined && input.slug !== page.slug && slugTaken(db, input.slug, page.id)) throw conflict('this slug is already taken');
-    assertDomainsFree(ctx, input.domains, page.id);
+    expireClaims();
     try {
       db.transaction(() => {
         db.prepare(
@@ -368,10 +389,10 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
           page.id,
         );
         if (input.sections) replaceSections(db, page.id, input.sections);
-        if (input.domains) replaceDomains(db, page.id, input.domains);
+        if (input.domains) replaceDomains(db, page.id, input.domains, ctx.now());
       })();
     } catch (err) {
-      if (isUniqueViolation(err)) throw conflict('this slug or domain is already taken');
+      if (isUniqueViolation(err)) throw conflict('this slug is already taken');
       throw err;
     }
     changed();
@@ -390,6 +411,25 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
   });
 
   /* --------------------------------------------------------------- logo */
+
+  /** The page's logo for the dashboard (editor, preview), published or not. */
+  const logoHeaders = async (_request: FastifyRequest, reply: FastifyReply, payload: unknown): Promise<unknown> => {
+    // Route-level onSend runs after the global security headers: the image gets its own CSP.
+    if (reply.statusCode === 200) reply.header('Content-Security-Policy', "default-src 'none'; sandbox");
+    return payload;
+  };
+
+  app.get<{ Params: { uid: string } }>('/api/status-pages/:uid/logo', { preHandler: auth, onSend: logoHeaders }, async (request, reply) => {
+    const page = pageForUser(ctx, currentUser(request), request.params.uid, 'read');
+    const asset = page.logo_asset ? getAsset(db, page.logo_asset) : null;
+    if (!asset) throw notFound();
+    return reply
+      .code(200)
+      .header('Content-Disposition', 'inline')
+      .header('Cache-Control', 'private, max-age=300')
+      .type(asset.mime)
+      .send(asset.bytes);
+  });
 
   app.post<{ Params: { uid: string } }>(
     '/api/status-pages/:uid/logo',
@@ -428,21 +468,33 @@ export async function statusPageRoutes(app: FastifyInstance, opts: { ctx: AppCon
   app.post<{ Params: { uid: string } }>('/api/status-pages/:uid/domains/verify', { preHandler: auth }, async (request) => {
     const user = currentUser(request);
     const page = pageForUser(ctx, user, request.params.uid, 'manage');
-    const domain = normalizeStatusDomain(field(objectBody(request.body), 'domain'), ctx.config.publicUrl);
-    const row = domainRow(db, domain);
-    if (!row || row.status_page_id !== page.id) throw notFound('domain not found on this status page');
+    const domain = normalizeStatusDomain(field(objectBody(request.body), 'domain'), ctx.config.publicUrl, ctx.config.statusPageOrigin);
+    expireClaims();
+    const claim = domainClaim(db, domain, page.id);
+    if (!claim) throw notFound('domain not found on this status page');
     if (!verifyLimiter.hit(String(user.id))) throw tooMany('too many verification attempts, try again in a minute');
-    const ok = await verifyDomainTxt(domain, row.verify_token);
-    // The page or domain may have changed while DNS was queried.
-    const current = domainRow(db, domain);
-    if (!current || current.status_page_id !== page.id || current.verify_token !== row.verify_token) {
-      throw notFound('domain not found on this status page');
+    const values = await domainTxtValues(domain);
+    // The page or domain may have changed while DNS was queried; everything below is synchronous.
+    const current = domainClaim(db, domain, page.id);
+    if (!current || current.verify_token !== claim.verify_token) throw notFound('domain not found on this status page');
+    if (current.verified_at === null && values.includes(current.verify_token)) {
+      // First to verify wins: a page that verified earlier keeps the domain while its token is
+      // still published (the DNS owner decides by removing it). Same answer either way.
+      const holder = verifiedClaim(db, domain);
+      if (!holder || holder.status_page_id === page.id || !values.includes(holder.verify_token)) {
+        markDomainVerified(db, domain, page.id, ctx.now());
+      }
     }
-    if (ok && current.verified_at === null) markDomainVerified(db, domain, page.id, ctx.now());
     changed();
-    const after = domainRow(db, domain);
+    const after = domainClaim(db, domain, page.id);
     return {
-      domain: { domain, verified: after?.verified_at != null, verifyToken: row.verify_token, txtName: `_ptr-status.${domain}` },
+      domain: {
+        domain,
+        verified: after?.verified_at != null,
+        verifyToken: current.verify_token,
+        txtName: `_ptr-status.${domain}`,
+        expiresAt: after && after.verified_at === null ? after.created_at + DOMAIN_CLAIM_TTL_MS : null,
+      },
     };
   });
 

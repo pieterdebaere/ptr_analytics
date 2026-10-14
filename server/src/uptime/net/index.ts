@@ -14,8 +14,8 @@
 //  * Every socket is destroyed when the AbortSignal fires.
 import type { Socket } from 'node:net';
 import type { TLSSocket } from 'node:tls';
-import type { SafeNet } from '../types.js';
-import type { UptimeConfig } from '../config.js';
+import type { HttpRequestOptions, SafeNet } from '../types.js';
+import { MEMBER_MAX_REQUEST_BODY_BYTES, type UptimeConfig } from '../config.js';
 import { TargetPolicy } from './policy.js';
 import { caresResolver, resolveTarget, type HostResolver } from './resolve.js';
 import { connectResolved } from './socket.js';
@@ -26,11 +26,20 @@ import { parseIp } from './ip.js';
 
 export interface TargetPolicyOptions {
   config: UptimeConfig;
-  /** Addresses of this server / PUBLIC_URL host: always denied (no self-targeting loops). IPs, CIDRs or hostnames. */
+  /**
+   * Addresses of this server / PUBLIC_URL host: always denied (no self-targeting loops). IPs, CIDRs
+   * or hostnames. Note: when PUBLIC_URL sits behind a shared CDN / load balancer (anycast), its IPs
+   * are shared with unrelated sites, which members then cannot monitor ("target not allowed") —
+   * documented operator trade-off (README, Hosted mode).
+   */
   selfAddresses?: readonly string[];
   /** Stricter rules for members in hosted mode (private ranges always denied, https-only URLs …). */
   hostedMember?: boolean;
-  /** DNS servers for name resolution ("ip" or "ip:port"); default: the system resolv.conf servers. */
+  /**
+   * DNS servers for name resolution ("ip" or "ip:port"). Default: dnsServersFor(config,
+   * hostedMember) — UPTIME_DNS_SERVERS, for hosted members public resolvers, else the system
+   * resolv.conf servers.
+   */
   dnsServers?: readonly string[];
   /** Replaces the c-ares resolver (tests). Must return IP literals of the requested family. */
   resolver?: HostResolver;
@@ -40,9 +49,34 @@ export interface TargetPolicyOptions {
 
 export type NetSocket = Socket | TLSSocket;
 
+/**
+ * Resolvers used for a SafeNet (L2): hosted members use `memberDnsServers` (public recursive
+ * resolvers by default) so that they cannot map names of the server's internal DNS (VPC DNS,
+ * CoreDNS); everyone else uses UPTIME_DNS_SERVERS or the system resolvers ([] = system).
+ */
+export function dnsServersFor(config: Pick<UptimeConfig, 'dnsServers' | 'memberDnsServers'>, hostedMember: boolean): string[] {
+  return [...((hostedMember ? config.memberDnsServers : config.dnsServers) ?? [])];
+}
+
+/**
+ * Applies the hosted-member limits to a request (L3/L4): response body capped at
+ * MEMBER_MAX_BODY_BYTES, request bodies ≤ MEMBER_MAX_REQUEST_BODY_BYTES, https → http redirects
+ * never followed. Returns the options unchanged for everyone else.
+ */
+export function limitRequest(opts: HttpRequestOptions, config: Pick<UptimeConfig, 'maxBodyBytes' | 'memberMaxBodyBytes'>, hostedMember: boolean): HttpRequestOptions {
+  if (!hostedMember) return opts;
+  const cap = Math.min(config.memberMaxBodyBytes ?? 262_144, config.maxBodyBytes);
+  if (opts.body !== undefined) {
+    const size = Buffer.isBuffer(opts.body) ? opts.body.length : Buffer.byteLength(opts.body, 'utf8');
+    if (size > MEMBER_MAX_REQUEST_BODY_BYTES) throw new NetError('EBODYTOOLARGE', `request body too large (max ${MEMBER_MAX_REQUEST_BODY_BYTES / 1024} KiB)`);
+  }
+  return { ...opts, maxBodyBytes: Math.min(opts.maxBodyBytes, cap), allowDowngrade: false };
+}
+
 export function createSafeNet(opts: TargetPolicyOptions): SafeNet {
-  const policy = new TargetPolicy({ config: opts.config, selfAddresses: opts.selfAddresses, hostedMember: opts.hostedMember });
-  const resolver = opts.resolver ?? caresResolver(opts.dnsServers);
+  const hostedMember = opts.hostedMember === true;
+  const policy = new TargetPolicy({ config: opts.config, selfAddresses: opts.selfAddresses, hostedMember });
+  const resolver = opts.resolver ?? caresResolver(opts.dnsServers ?? dnsServersFor(opts.config, hostedMember));
   const userAgent = opts.userAgent ?? opts.config.userAgent;
 
   const net: SafeNet = {
@@ -67,8 +101,8 @@ export function createSafeNet(opts: TargetPolicyOptions): SafeNet {
       });
     },
 
-    request(o) {
-      return httpRequest(policy, resolver, { ...o, userAgent });
+    async request(o) {
+      return httpRequest(policy, resolver, { ...limitRequest(o, opts.config, hostedMember), userAgent });
     },
 
     async dnsQuery(o) {
@@ -95,7 +129,7 @@ export function createSafeNet(opts: TargetPolicyOptions): SafeNet {
 export { TargetPolicy, normalizeHost, normalizeHostname } from './policy.js';
 export { NetError, TlsCertificateError } from './errors.js';
 export { SocketReader, upgradeTls, tlsInfoOf, writeAll, buildTlsInfo } from './socket.js';
-export { parseHttpUrl } from './http.js';
-export { parseIp, normalizeIp, classifyIp, embeddedIPv4 } from './ip.js';
+export { parseHttpUrl, redirectAllowed } from './http.js';
+export { parseIp, normalizeIp, classifyIp, embeddedIPv4, formatIp } from './ip.js';
 export { QUERY_TYPES, parseMessage, encodeQuery, DnsParseError } from './dns-wire.js';
 export type { HostResolver } from './resolve.js';

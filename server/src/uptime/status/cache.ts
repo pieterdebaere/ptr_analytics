@@ -32,16 +32,36 @@ export class TtlCache<V> {
     this.map.set(key, { expires: this.now() + this.ttlMs, value });
   }
 
+  delete(key: string): void {
+    this.map.delete(key);
+  }
+
   clear(): void {
     this.map.clear();
   }
 }
 
+/**
+ * Cached entries older than this are re-validated against the database (cheap indexed
+ * lookups) before being served, so a deleted site, an unpublished page or a disabled /
+ * regenerated badge id stops being served within seconds even when no code path called
+ * invalidatePublic().
+ */
+export const REVALIDATE_MS = 5_000;
+
+/** A cached public value plus what it was rendered for (see REVALIDATE_MS). */
+export interface Checked<V> {
+  value: V;
+  /** Validity fingerprint at render time (e.g. the monitor id behind a badge id, or null). */
+  fingerprint: string;
+  checkedAt: number;
+}
+
 export interface PublicState {
-  /** Public status JSON by slug (30 s). */
-  pages: TtlCache<unknown>;
-  /** Rendered badge SVGs by normalised parameters (60 s). */
-  badges: TtlCache<string>;
+  /** Public status JSON by slug (30 s, re-validated after 5 s). */
+  pages: TtlCache<Checked<unknown>>;
+  /** Rendered badge SVGs by normalised parameters (60 s, re-validated after 5 s). */
+  badges: TtlCache<Checked<string>>;
   limits: {
     status: RateLimiter;
     badge: RateLimiter;
@@ -76,7 +96,11 @@ export function publicState(ctx: AppContext): PublicState {
   return s;
 }
 
-/** Drop cached public output after a change (page, incident, logo, domains). */
+/**
+ * Drop cached public output after a change: status page, incident, logo, domains — and
+ * (for other modules) badge enable / disable / regenerate, monitor rename / delete, site
+ * deletion or suspension. Cheap; call it after any change that public pages or badges show.
+ */
 export function invalidatePublic(ctx: AppContext): void {
   const s = states.get(ctx);
   s?.pages.clear();

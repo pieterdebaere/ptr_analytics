@@ -21,7 +21,8 @@ import { schedulePurgeMonitors } from '../data/purge.js';
 import { processorFor } from '../engine/processor.js';
 import { isUnderMaintenance } from '../maintenance/index.js';
 import { checkersOf, uptimeRuntime } from '../runtime.js';
-import { heartbeatSeries, listEvents, listOutages, periodStats, recentUptimes, totalsFor } from '../stats.js';
+import { RECENT_BEATS, heartbeatSeries, listEvents, listOutages, periodStats, recentBeats, recentUptimes, totalsFor, type RecentBeat } from '../stats.js';
+import { invalidatePublic } from '../status/cache.js';
 import type { CheckerDefinition } from '../types.js';
 import { maintenanceRoutes } from './maintenances.js';
 import {
@@ -54,7 +55,7 @@ export interface Limits {
   maxChannelsPerMonitor: number;
 }
 
-export function limitsFor(ctx: AppContext, user: User): Limits {
+export function limitsFor(ctx: AppContext, user: Pick<User, 'role'>): Limits {
   const cfg = ctx.config.uptime;
   const member = user.role === 'member';
   return {
@@ -64,6 +65,21 @@ export function limitsFor(ctx: AppContext, user: User): Limits {
     monitorsPerSite: member ? cfg.memberMonitorsPerSite : null,
     maxChannelsPerMonitor: member ? 5 : 50,
   };
+}
+
+/**
+ * The role whose limits and type rules apply to monitors of a site: the site owner's (audit LOW 5),
+ * never the acting user's — an admin editing a member's monitor must not lift the member's limits.
+ * Operator sites (no owner) use the admin rules.
+ */
+export function siteRole(ctx: AppContext, site: Pick<Site, 'ownerId'>): 'admin' | 'member' {
+  if (site.ownerId === null) return 'admin';
+  return ctx.users.byId(site.ownerId)?.role === 'admin' ? 'admin' : 'member';
+}
+
+/** Limits for monitors of this site (derived from the site owner's role). */
+export function limitsForSite(ctx: AppContext, site: Pick<Site, 'ownerId'>): Limits {
+  return limitsFor(ctx, { role: siteRole(ctx, site) });
 }
 
 const limitReached = (what: string): HttpError => new HttpError(402, `${what} limit reached`, 'limit_reached');
@@ -98,6 +114,8 @@ export interface MonitorJson {
   uptime24h: number | null;
   uptime30d: number | null;
   tls: { notAfter: number | null; daysLeft: number | null; issuer: string | null; valid: boolean } | null;
+  /** The last RECENT_BEATS heartbeats, oldest first (dashboard sparkline without one request per monitor). */
+  recentBeats: RecentBeat[];
   createdAt: number;
   updatedAt: number;
 }
@@ -120,6 +138,7 @@ export function monitorsJson(ctx: AppContext, list: readonly MonitorRecord[]): M
   const tls = repo.tls(ids);
   const now = ctx.now();
   const uptimes = recentUptimes(ctx.db, ids, now);
+  const beats = recentBeats(ctx.db, ids, RECENT_BEATS);
   const parentIds = [...new Set(list.map((m) => m.parentId).filter((x): x is number => x !== null))];
   const parentUids = new Map<number, string>();
   for (const p of parentIds.length > 0 ? repo.byIds(parentIds) : []) parentUids.set(p.id, p.uid);
@@ -169,6 +188,7 @@ export function monitorsJson(ctx: AppContext, list: readonly MonitorRecord[]): M
             valid: t.valid,
           }
         : null,
+      recentBeats: beats.get(m.id) ?? [],
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
     };
@@ -202,8 +222,25 @@ function sealSecrets(ctx: AppContext, uid: string, secrets: Record<string, strin
   return { blob: ctx.secretBox().seal(clean, `monitor:${uid}`), keys };
 }
 
-function parseMonitorInput(ctx: AppContext, user: User, body: Record<string, unknown>, site: Site, existing: MonitorRecord | null): ParsedMonitor {
-  const limits = limitsFor(ctx, user);
+interface ParseOptions {
+  /** Clone: the source monitor's secrets (a secret field omitted from the body keeps its value). */
+  existingSecrets?: Record<string, string>;
+}
+
+/**
+ * Validate a monitor body for create, PATCH and clone. Limits and type rules come from the site
+ * owner's role (siteRole), so whoever acts — the member or an admin — the same rules apply.
+ */
+function parseMonitorInput(
+  ctx: AppContext,
+  _user: User,
+  body: Record<string, unknown>,
+  site: Site,
+  existing: MonitorRecord | null,
+  opts: ParseOptions = {},
+): ParsedMonitor {
+  const role = siteRole(ctx, site);
+  const limits = limitsFor(ctx, { role });
   const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(body, k) && body[k] !== undefined;
 
   // type
@@ -218,7 +255,7 @@ function parseMonitorInput(ctx: AppContext, user: User, body: Record<string, unk
   const typeChanged = existing !== null && existing.type !== type;
   if (existing === null || typeChanged) {
     if (def.available && !def.available(ctx.config.uptime)) throw new FieldError('this monitor type is not available on this server', 'type');
-    if (user.role === 'member' && def.hosted === 'disabled') throw new FieldError('this monitor type is not available', 'type');
+    if (role === 'member' && def.hosted === 'disabled') throw new FieldError('this monitor type is not available', 'type');
   }
 
   const name = has('name') ? (line(body['name'], 'name', { max: 100 }) as string) : existing ? existing.name : (line(undefined, 'name', { max: 100 }) as string);
@@ -254,10 +291,10 @@ function parseMonitorInput(ctx: AppContext, user: User, body: Record<string, unk
   if (has('config') || existing === null || typeChanged) {
     const input = has('config') ? body['config'] : {};
     if (!isPlainObject(input)) throw new FieldError('config must be an object', 'config');
-    const existingSecrets = existing && !typeChanged ? decryptSecrets(ctx, existing) : undefined;
+    const existingSecrets = existing && !typeChanged ? decryptSecrets(ctx, existing) : opts.existingSecrets;
     const validated = def.validate(input, {
       hosted: ctx.config.cloud.signupEnabled,
-      role: user.role,
+      role,
       config: ctx.config.uptime,
       ...(existingSecrets ? { existingSecrets } : {}),
     });
@@ -369,8 +406,11 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
   app.setErrorHandler(fieldErrorHandler);
   app.addHook('onRequest', rejectCrossSiteFetch);
   app.addHook('preHandler', requireAuth(ctx));
+  // Public status pages and badges must not outlive a deleted site / account in the caches.
+  const unsubs = [ctx.sites.onChange((c) => c.kind === 'deleted' && invalidatePublic(ctx)), ctx.users.onChange(() => invalidatePublic(ctx))];
   // Results recorded without a running engine (push / manual API paths) are written out on close.
   app.addHook('onClose', async () => {
+    for (const u of unsubs) u();
     const p = uptimeRuntime(ctx).processor as { flush?: () => void } | null;
     p?.flush?.();
   });
@@ -459,7 +499,7 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
     const user = requireUser(request);
     const site = assertSiteAccess(ctx, user, request.params.siteId, 'manage');
     const body = objectBody(request.body);
-    const limits = limitsFor(ctx, user);
+    const limits = limitsForSite(ctx, site);
     const parsed = parseMonitorInput(ctx, user, body, site, null);
     const push = parsed.fields.type === 'push' ? newPushToken() : null;
     const now = ctx.now();
@@ -471,7 +511,8 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
         repo.setSecrets(m.id, sealed.blob, sealed.keys, now);
       }
       if (parsed.tags) repo.setTags(m.id, parsed.tags);
-      repo.setChannels(m.id, parsed.channelIds ?? repo.defaultChannelIds(site.ownerId));
+      // Default channels are capped at the per-monitor maximum like an explicit list (audit LOW 6).
+      repo.setChannels(m.id, parsed.channelIds ?? repo.defaultChannelIds(site.ownerId).slice(0, limits.maxChannelsPerMonitor));
       return m;
     })();
     changed(created.id);
@@ -510,6 +551,8 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
       if (parsed.channelIds) repo.setChannels(m.id, parsed.channelIds);
     })();
     changed(m.id);
+    // name / visibility may have changed: drop cached public status pages and badges
+    invalidatePublic(ctx);
     const json = one(reload(m.id));
     if (push) json.pushUrl = pushUrl(ctx, (push as { token: string }).token);
     return { monitor: json };
@@ -519,6 +562,7 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
     const m = monitorFor(ctx, requireUser(request), request.params.uid, 'manage');
     repo.softDelete(m.id, ctx.now());
     changed(m.id);
+    invalidatePublic(ctx);
     schedulePurgeMonitors(ctx);
     return reply.code(204).send();
   });
@@ -535,48 +579,54 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
   app.post<UidRoute>('/api/monitors/:uid/clone', async (request, reply) => {
     const user = requireUser(request);
     const m = monitorFor(ctx, user, request.params.uid, 'manage');
-    const limits = limitsFor(ctx, user);
-    const push = m.type === 'push' ? newPushToken() : null;
+    const site = ctx.sites.byId(m.siteId);
+    if (!site) throw notFound('monitor not found');
+    // The copy goes through the same parsing, limits and type rules as a create (audit LOW 5):
+    // stored values above the owner's limits are clamped, unavailable types and configurations
+    // the owner may not use are refused. Secrets are carried over (re-encrypted for the new uid).
+    const limits = limitsForSite(ctx, site);
+    const secrets = decryptSecrets(ctx, m);
+    const config: Record<string, unknown> = { ...m.config };
+    // Secret key/value lists store only their names in the config: omitting them keeps the values.
+    for (const k of Object.keys(config)) if (Object.keys(secrets).some((sk) => sk.startsWith(`${k}.`))) delete config[k];
+    const intervalS = Math.min(MAX_INTERVAL_S, Math.max(limits.minIntervalS, m.intervalS));
+    const maxTimeout = Math.max(MIN_TIMEOUT_MS, Math.min(limits.maxTimeoutMs, Math.floor(intervalS * 800)));
+    const parent = m.parentId !== null ? repo.byId(m.parentId) : null;
+    const tagRepo = new TagRepo(ctx.db);
+    const body: Record<string, unknown> = {
+      type: m.type,
+      name: cleanText(`${m.name} (copy)`, 100),
+      description: m.description,
+      active: m.active,
+      intervalS,
+      retryIntervalS: Math.min(MAX_INTERVAL_S, Math.max(limits.minIntervalS, m.retryIntervalS)),
+      maxRetries: Math.min(m.maxRetries, limits.maxRetries),
+      resendEvery: Math.min(1000, Math.max(0, m.resendEvery)),
+      timeoutMs: Math.min(maxTimeout, Math.max(MIN_TIMEOUT_MS, m.timeoutMs)),
+      upsideDown: m.upsideDown,
+      certNotify: m.certNotify,
+      domainNotify: m.domainNotify,
+      config,
+      parentUid: parent && parent.siteId === m.siteId ? parent.uid : null,
+      tags: (repo.tagsFor([m.id]).get(m.id) ?? [])
+        .filter((t) => tagRepo.byUid(t.uid)?.ownerId === site.ownerId)
+        .slice(0, MAX_TAGS_PER_MONITOR)
+        .map((t) => ({ uid: t.uid, value: t.value })),
+      channelUids: (repo.channelUidsFor([m.id]).get(m.id) ?? []).slice(0, limits.maxChannelsPerMonitor),
+    };
+    const parsed = parseMonitorInput(ctx, user, body, site, null, { existingSecrets: secrets });
+    const push = parsed.fields.type === 'push' ? newPushToken() : null;
     const now = ctx.now();
     const created = ctx.db.transaction(() => {
       if (limits.monitorsPerSite !== null && repo.countBySite(m.siteId) >= limits.monitorsPerSite) throw limitReached('monitor');
-      const c = repo.insert(
-        {
-          siteId: m.siteId,
-          parentId: m.parentId,
-          type: m.type,
-          name: cleanText(`${m.name} (copy)`, 100),
-          description: m.description,
-          active: m.active,
-          intervalS: m.intervalS,
-          retryIntervalS: m.retryIntervalS,
-          maxRetries: m.maxRetries,
-          resendEvery: m.resendEvery,
-          timeoutMs: m.timeoutMs,
-          upsideDown: m.upsideDown,
-          certNotify: m.certNotify,
-          domainNotify: m.domainNotify,
-          config: m.config,
-          secrets: null,
-          secretKeys: [],
-          pushTokenHash: push?.hash ?? null,
-        },
-        now,
-      );
-      if (m.secrets) {
+      const c = repo.insert({ ...parsed.fields, siteId: m.siteId, secrets: null, secretKeys: [], pushTokenHash: push?.hash ?? null }, now);
+      if (parsed.secrets && Object.keys(parsed.secrets).length > 0) {
         // re-encrypt: the ciphertext is bound to the monitor uid
-        const sealed = sealSecrets(ctx, c.uid, decryptSecrets(ctx, m));
+        const sealed = sealSecrets(ctx, c.uid, parsed.secrets);
         repo.setSecrets(c.id, sealed.blob, sealed.keys, now);
       }
-      repo.setTags(
-        c.id,
-        (repo.tagsFor([m.id]).get(m.id) ?? []).flatMap((t) => {
-          const tag = new TagRepo(ctx.db).byUid(t.uid);
-          return tag ? [{ tagId: tag.id, value: t.value }] : [];
-        }),
-      );
-      const channelUids = repo.channelUidsFor([m.id]).get(m.id) ?? [];
-      repo.setChannels(c.id, repo.channelsByUid(channelUids).map((ch) => ch.id));
+      if (parsed.tags) repo.setTags(c.id, parsed.tags);
+      repo.setChannels(c.id, parsed.channelIds ?? []);
       if (m.type === 'manual') repo.setManual(c.id, m.manualStatus, m.manualMsg, now);
       return c;
     })();
@@ -615,6 +665,7 @@ export async function monitorRoutes(app: FastifyInstance, opts: { ctx: AppContex
     const enabled = bool(body['enabled'], 'enabled');
     if (!enabled) {
       repo.setPublicId(m.id, null, ctx.now());
+      invalidatePublic(ctx); // the cached badge must not be served any more
       return { publicId: null };
     }
     if (m.publicId) return { publicId: m.publicId };

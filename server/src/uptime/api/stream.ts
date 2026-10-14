@@ -1,11 +1,18 @@
 // Live updates over Server-Sent Events: GET /api/uptime/stream (docs/SPEC.md §8.3).
 // The reply is hijacked, so Fastify's onSend hook (security headers) does not run: the headers
-// are applied explicitly before writing the head. Only monitors of sites the user can access are
-// streamed; the session is re-validated on every keep-alive and the stream ends when it is gone.
+// are applied explicitly before writing the head.
+//
+// Access is decided per event with the *current* state, never with what was true at connect time
+// (audit MEDIUM 3: a demoted admin kept receiving every tenant's events): the account is re-read
+// (cached ≤ 1 s) and must still exist with the same role, and the event's site is re-read (cached
+// ≤ 1 s) and checked with canAccessSite(). The stream is closed as soon as the account is gone or
+// its role changed; the session itself is re-validated on every keep-alive.
 import type { ServerResponse } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../../context.js';
+import { canAccessSite } from '../../auth/access.js';
 import { requireAuth } from '../../auth/guard.js';
+import type { Site } from '../../data/sites.js';
 import type { User } from '../../data/users.js';
 import { tooMany } from '../../lib/errors.js';
 import { applySecurityHeaders } from '../../security.js';
@@ -22,9 +29,27 @@ export interface StreamOptions {
   keepAliveMs?: number;
 }
 
-function canSee(user: User, ownerId: number | null): boolean {
-  if (user.role === 'admin' || user.role === 'viewer') return true;
-  return user.role === 'member' && ownerId === user.id;
+/** Fresh lookups shared by all streams of an app: at most one query per key and TTL. */
+const LOOKUP_TTL_MS = 1000;
+
+class FreshCache<K, V> {
+  private readonly map = new Map<K, { at: number; v: V }>();
+  constructor(
+    private readonly load: (k: K) => V,
+    private readonly now: () => number,
+  ) {}
+  get(k: K): V {
+    const t = this.now();
+    const hit = this.map.get(k);
+    if (hit && t >= hit.at && t - hit.at < LOOKUP_TTL_MS) return hit.v;
+    const v = this.load(k);
+    if (this.map.size > 10_000) this.map.clear();
+    this.map.set(k, { at: t, v });
+    return v;
+  }
+  clear(): void {
+    this.map.clear();
+  }
 }
 
 export async function streamRoutes(app: FastifyInstance, opts: { ctx: AppContext } & StreamOptions): Promise<void> {
@@ -33,6 +58,14 @@ export async function streamRoutes(app: FastifyInstance, opts: { ctx: AppContext
   const perUser = new Map<number, number>();
   const open = new Set<() => void>();
   const guard = requireAuth(ctx);
+  // Real time (not ctx.now, which tests freeze): bounds the staleness of role / ownership checks.
+  const users = new FreshCache<number, User | null>((id) => ctx.users.byId(id), Date.now);
+  const sites = new FreshCache<string, Site | null>((id) => ctx.sites.byId(id), Date.now);
+  // Deletions and suspension changes are visible to the next event at once.
+  const unsubs = [ctx.sites.onChange(() => sites.clear()), ctx.users.onChange(() => users.clear())];
+  app.addHook('onClose', async () => {
+    for (const u of unsubs) u();
+  });
 
   app.addHook('preClose', async () => {
     for (const close of [...open]) close();
@@ -75,20 +108,37 @@ export async function streamRoutes(app: FastifyInstance, opts: { ctx: AppContext
         close();
       }
     };
+    /** The account as it is now: same id and role as at connect time, or the stream ends. */
+    const current = (): User | null => {
+      const fresh = users.get(user.id);
+      if (!fresh || fresh.role !== user.role) {
+        close();
+        return null;
+      }
+      return fresh;
+    };
+    const canSee = (e: { siteId: string }): boolean => {
+      if (closed) return false;
+      const u = current();
+      if (!u) return false;
+      const site = sites.get(e.siteId);
+      return site !== null && canAccessSite(u, site, 'read');
+    };
     const onBeat = (e: BeatEvent): void => {
-      if (!canSee(user, e.ownerId)) return;
+      if (!canSee(e)) return;
       send(`event: beat\ndata: ${JSON.stringify({ uid: e.uid, ts: e.ts, status: e.status, latencyMs: e.latencyMs, msg: e.msg })}\n\n`);
     };
     const onState = (e: StateEvent): void => {
-      if (!canSee(user, e.ownerId)) return;
+      if (!canSee(e)) return;
       send(`event: state\ndata: ${JSON.stringify({ uid: e.uid, status: e.status, since: e.since })}\n\n`);
     };
     const timer = setInterval(() => {
       // Re-validate the session (logout, password change, deleted account end the stream).
       guard.call(app, request, reply)
         .then(() => {
-          if (request.user?.id !== user.id) close();
-          else send(': keep-alive\n\n');
+          const now = request.user;
+          if (!now || now.id !== user.id || now.role !== user.role) close();
+          else if (current()) send(': keep-alive\n\n');
         })
         .catch(() => close());
     }, keepAliveMs);

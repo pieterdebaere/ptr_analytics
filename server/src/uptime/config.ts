@@ -17,11 +17,30 @@ export interface UptimeConfig {
   privateTargets: PrivateTargetsPolicy;
   /** Link-local / cloud metadata (169.254.0.0/16, fe80::/10, fd00:ec2::254 …). Always denied unless true (self-hosted only). */
   allowMetadata: boolean;
-  /** CIDRs or hostnames always allowed / always denied (deny wins). */
+  /**
+   * CIDRs or hostnames always allowed / always denied (deny wins). The allow list is an operator
+   * exception: it never applies to hosted members (they cannot reach private or metadata ranges).
+   */
   targetAllowlist: string[];
   targetDenylist: string[];
   /** Max response body bytes read by HTTP-like checks. */
   maxBodyBytes: number;
+  /**
+   * MEMBER_MAX_BODY_BYTES (256 KiB, never above maxBodyBytes): response body cap for hosted
+   * members' HTTP/keyword/JSON checks (limits the bandwidth a member can pull from third parties).
+   */
+  memberMaxBodyBytes: number;
+  /**
+   * UPTIME_DNS_SERVERS: resolvers (IP literals) for monitor/notification traffic; [] = system
+   * resolv.conf. In hosted mode this applies to operator traffic only when set explicitly.
+   */
+  dnsServers: string[];
+  /**
+   * Resolvers for hosted members' traffic: UPTIME_DNS_SERVERS, default public resolvers
+   * (1.1.1.1, 8.8.8.8) so members cannot enumerate names of the internal (VPC / cluster) DNS.
+   * `UPTIME_DNS_SERVERS=system` uses the system resolvers for everyone. Self-hosted: = dnsServers.
+   */
+  memberDnsServers: string[];
   rawRetentionHours: number;
   /** Events, outages and daily stats; 0 = forever. */
   retentionDays: number;
@@ -43,6 +62,12 @@ export interface UptimeConfig {
   /** User-Agent for outgoing checks. */
   userAgent: string;
 }
+
+/** Max request body (POST/PUT … payload) of a hosted member's HTTP monitor. */
+export const MEMBER_MAX_REQUEST_BODY_BYTES = 16 * 1024;
+
+/** Default resolvers for hosted members (public recursive resolvers, see memberDnsServers). */
+export const DEFAULT_MEMBER_DNS_SERVERS: readonly string[] = ['1.1.1.1', '8.8.8.8'];
 
 export class UptimeConfigError extends Error {
   override name = 'ConfigError';
@@ -90,6 +115,24 @@ function cidrOrHostList(env: Env, key: string): string[] {
   return out;
 }
 
+/** UPTIME_DNS_SERVERS: comma-separated IP literals, or "system". null = not set. */
+function dnsServerList(env: Env, key: string): string[] | 'system' | null {
+  const raw = str(env, key);
+  if (raw === undefined) return null;
+  if (raw.toLowerCase() === 'system') return 'system';
+  const out: string[] = [];
+  for (const part of raw.split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    const ip = p.startsWith('[') && p.endsWith(']') ? p.slice(1, -1) : p;
+    if (isIP(ip) === 0 || ip.includes('%')) throw new UptimeConfigError(`${key}: "${p}" is not an IP address (use IP literals, e.g. 1.1.1.1,8.8.8.8, or "system")`);
+    out.push(ip.toLowerCase());
+  }
+  if (out.length === 0) throw new UptimeConfigError(`${key} must list at least one IP address (or be "system")`);
+  if (out.length > 8) throw new UptimeConfigError(`${key}: at most 8 servers`);
+  return out;
+}
+
 export function loadUptimeConfig(env: Env, opts: { hosted: boolean; version: string; publicUrl: string | null }): UptimeConfig {
   const privateRaw = (str(env, 'UPTIME_PRIVATE_TARGETS') ?? (opts.hosted ? 'deny' : 'allow')).toLowerCase();
   if (privateRaw !== 'allow' && privateRaw !== 'deny') throw new UptimeConfigError('UPTIME_PRIVATE_TARGETS must be "allow" or "deny"');
@@ -114,6 +157,13 @@ export function loadUptimeConfig(env: Env, opts: { hosted: boolean; version: str
   if (opts.hosted && dockerEnabled) throw new UptimeConfigError('UPTIME_DOCKER_ENABLED is not permitted with SIGNUP_ENABLED');
   const dockerHost = str(env, 'UPTIME_DOCKER_HOST') ?? (dockerEnabled ? '/var/run/docker.sock' : null);
 
+  const dns = dnsServerList(env, 'UPTIME_DNS_SERVERS');
+  const dnsServers = Array.isArray(dns) ? dns : [];
+  const memberDnsServers = dns === null ? (opts.hosted ? [...DEFAULT_MEMBER_DNS_SERVERS] : []) : dnsServers;
+
+  const maxBodyBytes = int(env, 'UPTIME_MAX_BODY_BYTES', 1_048_576, 1024, 16 * 1_048_576);
+  const memberMaxBodyBytes = Math.min(maxBodyBytes, int(env, 'MEMBER_MAX_BODY_BYTES', 262_144, 1024, 16 * 1_048_576));
+
   const minIntervalS = int(env, 'UPTIME_MIN_INTERVAL_S', 20, 5, 86_400);
   const memberMinIntervalS = Math.max(minIntervalS, int(env, 'MEMBER_MIN_INTERVAL_S', 60, 5, 86_400));
 
@@ -126,7 +176,10 @@ export function loadUptimeConfig(env: Env, opts: { hosted: boolean; version: str
     allowMetadata,
     targetAllowlist: cidrOrHostList(env, 'UPTIME_TARGET_ALLOWLIST'),
     targetDenylist: cidrOrHostList(env, 'UPTIME_TARGET_DENYLIST'),
-    maxBodyBytes: int(env, 'UPTIME_MAX_BODY_BYTES', 1_048_576, 1024, 16 * 1_048_576),
+    maxBodyBytes,
+    memberMaxBodyBytes,
+    dnsServers,
+    memberDnsServers,
     rawRetentionHours: int(env, 'UPTIME_RAW_RETENTION_HOURS', 48, 25, 24 * 30),
     retentionDays: int(env, 'UPTIME_RETENTION_DAYS', 400, 0, 100_000),
     pingBinary: ping,

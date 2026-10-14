@@ -125,10 +125,14 @@ export function replaceSections(db: DB, pageId: number, sections: SectionInput[]
 
 /* ------------------------------------------------------------------- domains */
 
+/** Unverified claims are dropped after this time (the owner can add the domain again). */
+export const DOMAIN_CLAIM_TTL_MS = 7 * 86_400_000;
+
 export interface DomainRow {
   domain: string;
   status_page_id: number;
   verify_token: string;
+  created_at: number;
   verified_at: number | null;
 }
 
@@ -136,24 +140,55 @@ export function domainsOf(db: DB, pageId: number): DomainRow[] {
   return db.prepare('SELECT * FROM status_page_domains WHERE status_page_id = ? ORDER BY domain').all(pageId) as DomainRow[];
 }
 
-export function domainRow(db: DB, domain: string): DomainRow | null {
-  return (db.prepare('SELECT * FROM status_page_domains WHERE domain = ?').get(domain) as DomainRow | undefined) ?? null;
+/** This page's claim of a domain (pending or verified), or null. Other pages' claims are never looked at. */
+export function domainClaim(db: DB, domain: string, pageId: number): DomainRow | null {
+  return (
+    (db.prepare('SELECT * FROM status_page_domains WHERE domain = ? AND status_page_id = ?').get(domain, pageId) as DomainRow | undefined) ?? null
+  );
 }
 
-/** Replace the domain list, keeping token and verification of domains that stay. */
-export function replaceDomains(db: DB, pageId: number, domains: string[]): void {
+/** Drop unverified claims older than DOMAIN_CLAIM_TTL_MS. Returns how many. */
+export function expireDomainClaims(db: DB, now: number): number {
+  return db.prepare('DELETE FROM status_page_domains WHERE verified_at IS NULL AND created_at <= ?').run(now - DOMAIN_CLAIM_TTL_MS).changes;
+}
+
+/**
+ * Replace the page's domain list, keeping token and verification of domains that stay. New
+ * domains are pending claims; other pages may claim the same domain (nobody can block a
+ * domain they do not control, and the answer never tells whether someone else claimed it).
+ */
+export function replaceDomains(db: DB, pageId: number, domains: string[], now: number): void {
   const existing = new Map(domainsOf(db, pageId).map((d) => [d.domain, d]));
   for (const d of existing.keys()) {
     if (!domains.includes(d)) db.prepare('DELETE FROM status_page_domains WHERE domain = ? AND status_page_id = ?').run(d, pageId);
   }
-  const ins = db.prepare('INSERT INTO status_page_domains (domain, status_page_id, verify_token, verified_at) VALUES (?, ?, ?, NULL)');
+  const ins = db.prepare(
+    'INSERT INTO status_page_domains (domain, status_page_id, verify_token, created_at, verified_at) VALUES (?, ?, ?, ?, NULL)',
+  );
   for (const d of domains) {
-    if (!existing.has(d)) ins.run(d, pageId, `ptr-status-verify=${randomBytes(18).toString('base64url')}`);
+    if (!existing.has(d)) ins.run(d, pageId, `ptr-status-verify=${randomBytes(18).toString('base64url')}`, now);
   }
 }
 
-export function markDomainVerified(db: DB, domain: string, pageId: number, now: number | null): void {
-  db.prepare('UPDATE status_page_domains SET verified_at = ? WHERE domain = ? AND status_page_id = ?').run(now, domain, pageId);
+/** The verified claim of a domain (any page), or null. */
+export function verifiedClaim(db: DB, domain: string): DomainRow | null {
+  return (db.prepare('SELECT * FROM status_page_domains WHERE domain = ? AND verified_at IS NOT NULL').get(domain) as DomainRow | undefined) ?? null;
+}
+
+/**
+ * The page proved control of the domain (fresh DNS TXT check; the caller made sure no other
+ * page still holds a verification whose token is published): its claim becomes the one
+ * verified row and every other claim of the domain (other pages' pending claims, or the
+ * stale verification of a previous DNS owner) is removed. Atomic.
+ */
+export function markDomainVerified(db: DB, domain: string, pageId: number, now: number): boolean {
+  return db.transaction(() => {
+    const own = domainClaim(db, domain, pageId);
+    if (!own) return false;
+    db.prepare('DELETE FROM status_page_domains WHERE domain = ? AND status_page_id <> ?').run(domain, pageId);
+    db.prepare('UPDATE status_page_domains SET verified_at = ? WHERE domain = ? AND status_page_id = ?').run(own.verified_at ?? now, domain, pageId);
+    return true;
+  })();
 }
 
 /* ----------------------------------------------------------------- incidents */
@@ -236,6 +271,33 @@ export function getAsset(db: DB, sha256: string): { mime: string; bytes: Buffer 
 export function gcAsset(db: DB, sha256: string | null): void {
   if (!sha256) return;
   db.prepare('DELETE FROM assets WHERE sha256 = ? AND NOT EXISTS (SELECT 1 FROM status_pages WHERE logo_asset = ?)').run(sha256, sha256);
+}
+
+/** Is the asset the logo of at least one published page of a live site? (public serving) */
+export function assetPublished(db: DB, sha256: string): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM status_pages p JOIN sites s ON s.id = p.site_id AND s.deleted_at IS NULL
+         WHERE p.logo_asset = ? AND p.published = 1 AND p.deleted_at IS NULL LIMIT 1`,
+      )
+      .get(sha256) !== undefined
+  );
+}
+
+/**
+ * What the public JSON of a slug depends on beyond its own updates (which invalidate the
+ * cache): which page holds the slug, whether it is published, its site's state. null = not
+ * served.
+ */
+export function pageFingerprint(db: DB, slug: string): string | null {
+  const r = db
+    .prepare(
+      `SELECT p.id, p.updated_at, s.suspended FROM status_pages p JOIN sites s ON s.id = p.site_id AND s.deleted_at IS NULL
+       WHERE p.slug = ? AND p.deleted_at IS NULL AND p.published = 1`,
+    )
+    .get(slug) as { id: number; updated_at: number; suspended: number } | undefined;
+  return r ? `${r.id}:${r.updated_at}:${r.suspended}` : null;
 }
 
 export const assetUrl = (sha256: string | null): string | null => (sha256 ? `/api/public/assets/${sha256}` : null);

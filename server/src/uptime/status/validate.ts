@@ -92,9 +92,10 @@ const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
  * Custom domain for a status page: a lowercase DNS name with at least two labels, not an IP
- * address, not localhost, not the dashboard host or one of its subdomains.
+ * address, not localhost, not the dashboard host or the STATUS_PAGE_ORIGIN host, nor one of
+ * their subdomains.
  */
-export function normalizeStatusDomain(v: unknown, publicUrl: string | null): string {
+export function normalizeStatusDomain(v: unknown, publicUrl: string | null, statusPageOrigin: string | null = null): string {
   if (typeof v !== 'string') throw badRequest('invalid domain');
   const d = v.trim().toLowerCase().replace(/\.$/, '');
   const labels = d.split('.');
@@ -102,10 +103,11 @@ export function normalizeStatusDomain(v: unknown, publicUrl: string | null): str
     throw badRequest(`"${d.slice(0, 80)}" is not a valid domain name`);
   }
   if (d === 'localhost' || d.endsWith('.localhost') || d.endsWith('.local') || d.endsWith('.internal')) throw badRequest('this domain cannot be used');
-  if (publicUrl) {
+  for (const origin of [publicUrl, statusPageOrigin]) {
+    if (!origin) continue;
     try {
-      const host = new URL(publicUrl).hostname.toLowerCase();
-      if (d === host || d.endsWith(`.${host}`)) throw badRequest('the dashboard domain (or a subdomain of it) cannot be used');
+      const host = new URL(origin).hostname.toLowerCase();
+      if (d === host || d.endsWith(`.${host}`)) throw badRequest('the domain of this server (or a subdomain of it) cannot be used');
     } catch (err) {
       if (!(err instanceof TypeError)) throw err;
     }

@@ -125,15 +125,17 @@ export class ResultProcessor {
     const msg = cleanText(out.msg, MSG_MAX);
     const ops: WriteOp[] = [];
     const id = m.id;
+    const uid = m.uid;
 
     // heartbeat
-    ops.push((s) => s.heartbeat.run(id, ts, out.status, out.latencyMs, msg || null));
+    ops.push((s) => s.heartbeat.run(uid, id, ts, out.status, out.latencyMs, msg || null));
 
     // aggregates (time-weighted, split across buckets)
     const cap = gapCapMs(m.intervalS, m.retryIntervalS, m.timeoutMs);
     const beat = { ts, status: out.status, latencyMs: out.latencyMs, counted: out.status !== 3 };
     const stats = {
       monitorId: id,
+      uid,
       hour: beatContributions(prevBeat, beat, cap, HOUR_MS),
       day: beatContributions(prevBeat, beat, cap, DAY_MS),
     };
@@ -153,7 +155,8 @@ export class ResultProcessor {
       const holder: OutageHolder = { id: null, startedAt: ts };
       const confirmed = out.outage.confirm;
       ops.push((s) => {
-        holder.id = Number(s.outageOpen.run(id, ts, confirmed ? ts : null, msg || null).lastInsertRowid);
+        const res = s.outageOpen.run(uid, id, ts, confirmed ? ts : null, msg || null);
+        if (res.changes > 0) holder.id = Number(res.lastInsertRowid);
       });
       rt.outage = holder;
       rt.outageConfirmed = confirmed;
@@ -168,14 +171,14 @@ export class ResultProcessor {
     // event (Kuma's important beat)
     if (out.important) {
       const from = prevStatus === -1 ? null : prevStatus;
-      ops.push((s) => s.event.run(id, ts, from, out.status, msg || null));
+      ops.push((s) => s.event.run(uid, id, ts, from, out.status, msg || null));
     }
 
     // notifications
     if (out.notify) {
       const payload = this.payload(m, out.notify, ts, out.status, prevStatus, msg, out.latencyMs, extra.target ?? null);
       if (out.notify === 'up') payload.downtimeMs = downtimeMs;
-      ops.push(outboxOp(id, out.notify, payload, ts));
+      ops.push(outboxOp(id, uid, out.notify, payload, ts));
     }
 
     // TLS certificate + expiry notices
@@ -183,6 +186,7 @@ export class ResultProcessor {
       const tls = extra.tls;
       ops.push((s) =>
         s.tls.run(
+          uid,
           id,
           ts,
           tls.valid ? 1 : 0,
@@ -202,7 +206,7 @@ export class ResultProcessor {
         if (crossed.length > 0) {
           const payload = this.payload(m, 'cert', ts, out.status, prevStatus, `Certificate expires in ${daysLeft} day(s)`, null, extra.target ?? null);
           payload.cert = { daysLeft, notAfter: tls.notAfter, subject: tls.subject, host: extra.host ?? null };
-          ops.push(noticeOp(id, 'cert', tls.fingerprint256, crossed, payload, ts));
+          ops.push(noticeOp(id, uid, 'cert', tls.fingerprint256, crossed, payload, ts));
         }
       }
     }
@@ -225,6 +229,7 @@ export class ResultProcessor {
     const snapshot = { ...rt, outage: rt.outage };
     ops.push((s) =>
       s.state.run(
+        uid,
         id,
         snapshot.status,
         snapshot.retries,
@@ -282,7 +287,7 @@ export class ResultProcessor {
       if (crossed.length > 0) {
         const payload = this.payload(m, 'domain', ts, status, prevStatus, `Domain ${domain} expires in ${daysLeft} day(s)`, null, target);
         payload.domain = { daysLeft, expiresAt, domain };
-        ops.push(noticeOp(m.id, 'domain', `${domain}:${expiresAt}`, crossed, payload, ts));
+        ops.push(noticeOp(m.id, m.uid, 'domain', `${domain}:${expiresAt}`, crossed, payload, ts));
       }
     }
     return ops;
@@ -347,21 +352,21 @@ export class ResultProcessor {
   }
 }
 
-function outboxOp(monitorId: number, event: NotifyEvent, payload: NotifyPayload, ts: number): WriteOp {
+function outboxOp(monitorId: number, uid: string, event: NotifyEvent, payload: NotifyPayload, ts: number): WriteOp {
   const json = JSON.stringify(payload);
   return (s: Statements) => {
-    for (const r of s.channels.all(monitorId) as Array<{ id: number }>) s.outbox.run(r.id, monitorId, event, json, ts, ts);
+    for (const r of s.monitorChannels.all(monitorId, uid) as Array<{ id: number }>) s.outbox.run(r.id, monitorId, event, json, ts, ts);
   };
 }
 
 /** Send once per (monitor, kind, fingerprint, smallest crossed threshold); record every crossed threshold. */
-function noticeOp(monitorId: number, kind: 'cert' | 'domain', fingerprint: string, crossed: number[], payload: NotifyPayload, ts: number): WriteOp {
+function noticeOp(monitorId: number, uid: string, kind: 'cert' | 'domain', fingerprint: string, crossed: number[], payload: NotifyPayload, ts: number): WriteOp {
   const smallest = Math.min(...crossed);
   const fp = fingerprint.slice(0, 200);
   return (s: Statements) => {
     if (s.noticeExists.get(monitorId, kind, fp, smallest)) return;
     for (const t of crossed) s.noticeInsert.run(monitorId, kind, fp, t, ts);
-    outboxOp(monitorId, kind, payload, ts)(s);
+    outboxOp(monitorId, uid, kind, payload, ts)(s);
   };
 }
 

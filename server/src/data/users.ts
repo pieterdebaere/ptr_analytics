@@ -64,8 +64,37 @@ const toBilling = (r: UserRow): BillingState => ({
   cancelAtPeriodEnd: r.cancel_at_period_end === 1,
 });
 
+/** A user account was deleted (its sites were soft-deleted with it). */
+export type UserChangeListener = (change: { kind: 'deleted'; userId: number }) => void;
+
 export class UserRepo {
+  private readonly listeners = new Set<UserChangeListener>();
+
   constructor(private readonly db: DB) {}
+
+  /**
+   * Subscribe to account deletions (the uptime engine stops checking the account's monitors at
+   * once, public caches are dropped). Listeners run after the deleting transaction committed (or,
+   * when called inside an outer transaction, on the next tick). Returns the unsubscribe function.
+   */
+  onChange(fn: UserChangeListener): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private emit(change: Parameters<UserChangeListener>[0]): void {
+    if (this.listeners.size === 0) return;
+    // Deferred: an outer transaction (routes/users.ts) must have committed before listeners read.
+    setImmediate(() => {
+      for (const fn of this.listeners) {
+        try {
+          fn(change);
+        } catch {
+          // a listener must never break account deletion
+        }
+      }
+    });
+  }
 
   count(): number {
     return (this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
@@ -129,14 +158,38 @@ export class UserRepo {
    * so the `sites.owner_id ON DELETE CASCADE` never fires: a cascade into the sites would
    * delete all their analytics rows synchronously. The purge job removes the data later.
    * Login sessions and email tokens still cascade (a handful of rows).
+   *
+   * The account's notification channels cascade (ON DELETE CASCADE); the rows that reference them without a
+   * foreign key (queued notifications, delivery log, monitor links) are removed explicitly in the
+   * same transaction, so nothing of this account can ever be delivered to or shown for another
+   * channel (ids are not reused since v6/v7 either; this is defence in depth).
    */
   delete(id: number, now: number): boolean {
-    return this.db.transaction(() => {
+    const deleted = this.db.transaction(() => {
+      const siteIds = (this.db.prepare('SELECT id FROM sites WHERE owner_id = ?').all(id) as Array<{ id: string }>).map((r) => r.id);
       this.db
         .prepare('UPDATE sites SET deleted_at = COALESCE(deleted_at, ?), owner_id = NULL, suspended = 0 WHERE owner_id = ?')
         .run(now, id);
+      // Their monitors are hidden and unscheduled at once (purged with the sites).
+      const hideMonitors = this.db.prepare(
+        'UPDATE monitors SET deleted_at = COALESCE(deleted_at, ?), active = 0, push_token_hash = NULL, public_id = NULL WHERE site_id = ?',
+      );
+      for (const siteId of siteIds) hideMonitors.run(now, siteId);
+      const channels = this.db.prepare('SELECT id FROM notify_channels WHERE owner_id = ?').all(id) as Array<{ id: number }>;
+      if (channels.length > 0) {
+        const delOutbox = this.db.prepare('DELETE FROM notify_outbox WHERE channel_id = ?');
+        const delLog = this.db.prepare('DELETE FROM notify_log WHERE channel_id = ?');
+        const delLinks = this.db.prepare('DELETE FROM monitor_channels WHERE channel_id = ?');
+        for (const c of channels) {
+          delOutbox.run(c.id);
+          delLog.run(c.id);
+          delLinks.run(c.id);
+        }
+      }
       return this.db.prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
     })();
+    if (deleted) this.emit({ kind: 'deleted', userId: id });
+    return deleted;
   }
 
   /** Self-service sign-ups that have not verified their address yet. */

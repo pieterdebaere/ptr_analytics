@@ -14,6 +14,11 @@ export interface Config {
   dataDir: string;
   /** Normalised origin (no trailing slash), or null when unset. */
   publicUrl: string | null;
+  /**
+   * STATUS_PAGE_ORIGIN: separate origin for public status pages (spec §8.4), e.g.
+   * `https://status.example.com`; null = status pages are served on the dashboard origin.
+   */
+  statusPageOrigin: string | null;
   trustProxy: TrustProxy;
   cookieSecure: boolean;
   /** NODE_ENV === 'production' (only used for startup warnings). */
@@ -130,22 +135,43 @@ export function parseTrustProxy(value: string | undefined): TrustProxy {
   return parts;
 }
 
-export function parsePublicUrl(value: string | undefined): string | null {
+export function parsePublicUrl(value: string | undefined, key = 'PUBLIC_URL', example = 'https://analytics.example.com'): string | null {
   if (value === undefined) return null;
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new ConfigError(`PUBLIC_URL must be an absolute http(s) URL such as https://analytics.example.com (got "${value}")`);
+    throw new ConfigError(`${key} must be an absolute http(s) URL such as ${example} (got "${value}")`);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ConfigError(`PUBLIC_URL must use http or https (got "${value}")`);
+    throw new ConfigError(`${key} must use http or https (got "${value}")`);
   }
-  if (url.username || url.password) throw new ConfigError('PUBLIC_URL must not contain credentials');
+  if (url.username || url.password) throw new ConfigError(`${key} must not contain credentials`);
   if (url.pathname !== '/' || url.search || url.hash) {
-    throw new ConfigError('PUBLIC_URL must be an origin without path, query or fragment (e.g. https://analytics.example.com)');
+    throw new ConfigError(`${key} must be an origin without path, query or fragment (e.g. ${example})`);
   }
   return url.origin;
+}
+
+/**
+ * STATUS_PAGE_ORIGIN (optional): a separate origin for public status pages. Must differ from
+ * PUBLIC_URL's host (the whole point is that tenant content never renders on the dashboard
+ * origin) and must not be a subdomain of it.
+ */
+export function parseStatusPageOrigin(value: string | undefined, publicUrl: string | null): string | null {
+  const origin = parsePublicUrl(value, 'STATUS_PAGE_ORIGIN', 'https://status.example.com');
+  if (origin === null) return null;
+  if (publicUrl !== null) {
+    const status = new URL(origin).hostname;
+    const dash = new URL(publicUrl).hostname;
+    if (status === dash || status.endsWith(`.${dash}`)) {
+      throw new ConfigError('STATUS_PAGE_ORIGIN must use a different host than PUBLIC_URL (and not a subdomain of it), e.g. https://status.example.com');
+    }
+    if (publicUrl.startsWith('https://') && !origin.startsWith('https://')) {
+      throw new ConfigError('STATUS_PAGE_ORIGIN must use https when PUBLIC_URL does');
+    }
+  }
+  return origin;
 }
 
 /** The placeholder from the old example env file; refused so it never ends up in production. */
@@ -161,6 +187,7 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
   const host = str(env, 'HOST') ?? '127.0.0.1';
   const dataDir = path.resolve(cwd, str(env, 'DATA_DIR') ?? './data');
   const publicUrl = parsePublicUrl(str(env, 'PUBLIC_URL'));
+  const statusPageOrigin = parseStatusPageOrigin(str(env, 'STATUS_PAGE_ORIGIN'), publicUrl);
   const trustProxy = parseTrustProxy(str(env, 'TRUST_PROXY'));
 
   const cookieSecureRaw = str(env, 'COOKIE_SECURE');
@@ -225,6 +252,7 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
     host,
     dataDir,
     publicUrl,
+    statusPageOrigin,
     trustProxy,
     cookieSecure,
     production: str(env, 'NODE_ENV') === 'production',

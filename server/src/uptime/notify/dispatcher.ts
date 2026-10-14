@@ -10,7 +10,11 @@
 //   failures per channel and disables a channel after 10 (warning in the server log);
 // * members: at most MEMBER_NOTIFY_PER_HOUR deliveries per hour (beyond: dropped + logged);
 // * skips inactive / deleted channels and e-mail channels without confirmed recipients;
-// * housekeeping: notify_log retention (30 days), orphaned rows, purged channels — chunked.
+// * tenancy: a row is dropped (never delivered, never logged) unless its monitor belongs to a
+//   site of the channel's owner and matches the payload (maintenance notices: a maintenance of
+//   the same owner);
+// * housekeeping: notify_log retention (30 days), orphaned rows, rows / links whose monitor
+//   belongs to another owner, purged channels — chunked.
 // All I/O is async; database work per row is a handful of indexed statements.
 import type { AppContext } from '../../context.js';
 import type { NotifyPayload } from '../types.js';
@@ -194,6 +198,12 @@ export class Notifier implements NotifierHandle {
     }
     const provider = PROVIDERS.get(channel.type);
     const payload = parsePayload(row.payload);
+    if (payload && !this.belongsToChannelOwner(row, channel, payload)) {
+      // Never deliver (or log into the channel's history) a row that is not the channel owner's.
+      this.drop(row);
+      ctx.log.warn({ channel: channel.uid, outbox: row.id }, 'dropped a notification whose monitor does not belong to the channel owner');
+      return;
+    }
     if (!provider || !payload) {
       this.drop(row);
       this.log(row, false, null, provider ? 'invalid notification payload' : 'unknown channel type');
@@ -233,6 +243,37 @@ export class Notifier implements NotifierHandle {
     });
     if (this.stopped && !result.ok && this.stopController.signal.aborted) return; // aborted by shutdown: keep the row
     this.settle(row, channel, result);
+  }
+
+  /**
+   * Tenancy check of an outbox row against its channel (defence in depth next to AUTOINCREMENT
+   * channel ids): a monitor event must reference a live monitor whose (live) site is owned by the
+   * channel's owner (operator channels ↔ operator sites) and whose uid matches the payload; maintenance
+   * notices must reference a maintenance of the same owner; only test rows carry neither.
+   */
+  private belongsToChannelOwner(row: OutboxRow, channel: ChannelRow, payload: NotifyPayload): boolean {
+    const db = this.ctx.db;
+    if (payload.event !== row.event) return false;
+    if (row.monitor_id !== null) {
+      if (!payload.monitor || typeof payload.monitor.uid !== 'string') return false;
+      // Live monitor on a live site only: a deleted account's sites are detached (owner_id NULL)
+      // when soft-deleted, so a deleted site must never pass as an operator site.
+      const m = db
+        .prepare(
+          `SELECT m.uid, m.site_id, s.owner_id FROM monitors m JOIN sites s ON s.id = m.site_id
+           WHERE m.id = ? AND m.deleted_at IS NULL AND s.deleted_at IS NULL`,
+        )
+        .get(row.monitor_id) as { uid: string; site_id: string; owner_id: number | null } | undefined;
+      return !!m && m.owner_id === channel.owner_id && m.uid === payload.monitor.uid && m.site_id === payload.monitor.siteId;
+    }
+    if (payload.monitor) return false;
+    if (row.event === 'maint_start' || row.event === 'maint_end') {
+      const uid = payload.maintenance?.uid;
+      if (typeof uid !== 'string') return false;
+      const mt = db.prepare('SELECT owner_id FROM maintenances WHERE uid = ?').get(uid) as { owner_id: number | null } | undefined;
+      return !!mt && mt.owner_id === channel.owner_id;
+    }
+    return row.event === 'test';
   }
 
   private settle(row: OutboxRow, channel: ChannelRow, r: DeliverResult): void {
@@ -292,6 +333,27 @@ export class Notifier implements NotifierHandle {
       `DELETE FROM monitor_channels WHERE channel_id IN (SELECT DISTINCT channel_id FROM monitor_channels WHERE channel_id NOT IN (${dead}) LIMIT 20)`,
     );
     await loop(`DELETE FROM notify_log WHERE id IN (SELECT id FROM notify_log WHERE channel_id NOT IN (${dead}) LIMIT ${CHUNK})`);
+    // Rows whose monitor belongs to someone other than the channel owner (never written by this
+    // code, but never kept either), and links / pending deliveries of monitors that are gone.
+    const foreign = (t: string) =>
+      `SELECT x.id FROM ${t} x JOIN notify_channels c ON c.id = x.channel_id JOIN monitors m ON m.id = x.monitor_id
+       JOIN sites s ON s.id = m.site_id WHERE s.owner_id IS NOT c.owner_id LIMIT ${CHUNK}`;
+    await loop(`DELETE FROM notify_outbox WHERE id IN (${foreign('notify_outbox')})`);
+    await loop(`DELETE FROM notify_log WHERE id IN (${foreign('notify_log')})`);
+    await loop(
+      `DELETE FROM notify_outbox WHERE id IN (SELECT id FROM notify_outbox o WHERE o.monitor_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM monitors m WHERE m.id = o.monitor_id) LIMIT ${CHUNK})`,
+    );
+    // Log rows of purged monitors lose the monitor reference (a reused monitor id must not attach them).
+    await loop(
+      `UPDATE notify_log SET monitor_id = NULL WHERE id IN (SELECT id FROM notify_log l WHERE l.monitor_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM monitors m WHERE m.id = l.monitor_id) LIMIT ${CHUNK})`,
+    );
+    await loop(
+      `DELETE FROM monitor_channels WHERE (monitor_id, channel_id) IN (SELECT mc.monitor_id, mc.channel_id FROM monitor_channels mc JOIN notify_channels c ON c.id = mc.channel_id
+         LEFT JOIN monitors m ON m.id = mc.monitor_id LEFT JOIN sites s ON s.id = m.site_id
+         WHERE m.id IS NULL OR s.id IS NULL OR s.owner_id IS NOT c.owner_id LIMIT ${CHUNK})`,
+    );
     // Soft-deleted channels whose log rows are gone can go for good.
     db.prepare(`DELETE FROM notify_channels WHERE deleted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM notify_log l WHERE l.channel_id = notify_channels.id)`).run();
     db.prepare('UPDATE notify_email_recipients SET verify_token_hash = NULL, verify_expires_at = NULL WHERE verify_expires_at < ?').run(now);

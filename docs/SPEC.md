@@ -563,12 +563,22 @@ Schema: migration v6 (`server/src/uptime/schema/*.ts`).
   for `/metrics` (Prometheus) and read-only API automation.
 
 Configuration (all optional): `UPTIME_ENABLED` (true), `UPTIME_MIN_INTERVAL_S` (20),
-`UPTIME_CHECK_CONCURRENCY` (64), `UPTIME_PRIVATE_TARGETS`, `UPTIME_ALLOW_METADATA` (false),
-`UPTIME_TARGET_ALLOWLIST` / `UPTIME_TARGET_DENYLIST` (CIDRs/hostnames), `UPTIME_MAX_BODY_BYTES`
-(1 MiB), `UPTIME_RAW_RETENTION_HOURS` (48), `UPTIME_RETENTION_DAYS` (400), `UPTIME_PING_BINARY`
+`UPTIME_CHECK_CONCURRENCY` (64), `UPTIME_PRIVATE_TARGETS`, `UPTIME_ALLOW_METADATA` (false;
+metadata = link-local `169.254.0.0/16`/`fe80::/10` incl. 169.254.169.254, Alibaba
+`100.100.100.200`, Azure WireServer `168.63.129.16`, Oracle `192.0.0.192`, `fd00:ec2::254` and the
+metadata hostnames), `UPTIME_TARGET_ALLOWLIST` / `UPTIME_TARGET_DENYLIST` (CIDRs/hostnames; the
+allow list is an operator exception and never applies to hosted members, the deny list applies to
+everyone — use it for further provider-internal addresses), `UPTIME_DNS_SERVERS` (comma-separated IP
+literals or `system`; default: system resolvers, except hosted members whose names are resolved by
+`1.1.1.1,8.8.8.8` so they cannot enumerate internal DNS names — members get the same "target not
+allowed" for denied and non-existent names), `UPTIME_MAX_BODY_BYTES` (1 MiB),
+`MEMBER_MAX_BODY_BYTES` (256 KiB, response body cap for members; member request bodies ≤ 16 KiB),
+`UPTIME_RAW_RETENTION_HOURS` (48), `UPTIME_RETENTION_DAYS` (400), `UPTIME_PING_BINARY`
 (`/bin/ping`, empty disables), `UPTIME_DOCKER_ENABLED` (false) + `UPTIME_DOCKER_HOST`,
-`SECRETS_KEY` / `SECRETS_KEY_FILE`, `MEMBER_*` limits above, `REQUIRE_MFA_FOR_ADMINS` (false).
-Parsed in `server/src/uptime/config.ts`.
+`SECRETS_KEY` / `SECRETS_KEY_FILE` (must not be group/other-readable unless root-owned 0400/0440),
+`MEMBER_*` limits above, `REQUIRE_MFA_FOR_ADMINS` (false). HTTP-family monitors refuse https → http
+redirects unless `allowDowngrade` (self-hosted only) and never follow a redirect that would re-send
+the request body to another origin. Parsed in `server/src/uptime/config.ts`.
 
 ### 8.2 Engine
 

@@ -5,7 +5,7 @@ import { Notifier, RETRY_DELAYS_MS, startNotifier } from '../src/uptime/notify/d
 import { setNotifyOverrides } from '../src/uptime/notify/state.js';
 import type { NotifyPayload } from '../src/uptime/types.js';
 import { CLOUD_URL, api, createCloudApp, createTestApp, login, signupMember } from './helpers.js';
-import { FakeNet, TEST_SECRETS_KEY, downPayload, upPayload } from './uptime-notify-fakes.js';
+import { FakeNet, TEST_SECRETS_KEY, downPayload, enqueueOwned, ownedMonitor, upPayload } from './uptime-notify-fakes.js';
 
 const apps: FastifyInstance[] = [];
 const notifiers: Notifier[] = [];
@@ -43,11 +43,7 @@ async function createChannel(e: Env, body: Record<string, unknown>, cookie = e.c
 const hook = (n = 1) => ({ type: 'webhook', name: `Hook ${n}`, config: { url: `https://hooks.example.com/${n}` } });
 
 function enqueue(ctx: AppContext, channelId: number, payload: NotifyPayload = downPayload(), at = ctx.now()): number {
-  return Number(
-    ctx.db
-      .prepare('INSERT INTO notify_outbox (channel_id, monitor_id, event, payload, next_attempt_at, created_at) VALUES (?, NULL, ?, ?, ?, ?)')
-      .run(channelId, payload.event, JSON.stringify(payload), at, ctx.now()).lastInsertRowid,
-  );
+  return enqueueOwned(ctx, channelId, payload, at);
 }
 
 const outbox = (ctx: AppContext) => ctx.db.prepare('SELECT * FROM notify_outbox ORDER BY id').all() as Array<{ id: number; attempts: number; next_attempt_at: number }>;

@@ -6,6 +6,7 @@ import { redactError, secretValues } from '../src/uptime/notify/redact.js';
 import { buildMessage, escapeMarkdown, renderTemplate, templateProblem, templateVars, jsonStringEscape } from '../src/uptime/notify/render.js';
 import { PROVIDERS, WEBHOOK_PRESETS } from '../src/uptime/notify/providers/registry.js';
 import { SIGNATURE_HEADER, renderBody } from '../src/uptime/notify/providers/webhook.js';
+import { telegramHtml } from '../src/uptime/notify/providers/telegram.js';
 import { ValidationError, type NotifyPayload, type ValidateContext } from '../src/uptime/types.js';
 import { FakeNet, HOSTILE_NAME, downPayload, upPayload } from './uptime-notify-fakes.js';
 
@@ -262,6 +263,44 @@ describe('chat providers', () => {
     assertNeutral(String(body.text).replace(/<\/?b>|<a href="[^"]*">|<\/a>/g, ''));
     expect(() => provider('telegram').validate({ botToken: token, chatId: 'abc def' }, ADMIN)).toThrow(/Chat ID/);
     expect(() => provider('telegram').validate({ botToken: token, chatId: '1', serverUrl: 'https://tg.example.com' }, MEMBER)).toThrow(/not available/);
+  });
+
+  it('telegram: &/"-heavy names never produce a cut entity or an unbalanced tag (L3)', () => {
+    const amp = '&'.repeat(100);
+    const quot = '"'.repeat(200);
+    const payloads: NotifyPayload[] = [];
+    // Shift the entity boundaries across the old 4000-character cut.
+    for (let n = 0; n < 12; n++) {
+      payloads.push(
+        downPayload({
+          monitor: { uid: 'mon000000001', name: '&'.repeat(90 + n), type: 'http', target: `https://example.com/?${'&q="x"'.repeat(33)}`, siteId: 's', siteName: '"'.repeat(100) },
+          msg: '"'.repeat(200),
+        }),
+      );
+    }
+    payloads.push(
+      downPayload({ monitor: { uid: 'mon000000001', name: amp, type: 'http', target: `https://example.com/?${'&q="x"'.repeat(60)}`, siteId: 's', siteName: quot }, msg: quot }),
+      downPayload({ monitor: { uid: 'mon000000001', name: `${'"&<>'.repeat(40)}`, type: 'http', target: '&'.repeat(300), siteId: 's', siteName: '&'.repeat(150) }, msg: '<&>"\''.repeat(80) }),
+      { ...downPayload({ event: 'cert', msg: null }), cert: { daysLeft: 3, notAfter: Date.UTC(2026, 6, 1), subject: '&"'.repeat(150), host: '&'.repeat(253) } },
+    );
+    for (const p of payloads) {
+      const html = telegramHtml(buildMessage(p));
+      // Every '&' starts a complete entity; no '<' or '>' outside our own tags.
+      expect(html.replace(/&(amp|lt|gt|quot|#39);/g, '')).not.toContain('&');
+      const withoutTags = html.replace(/<\/?b>|<a href="[^"<>]*">|<\/a>/g, '');
+      expect(withoutTags).not.toMatch(/[<>]/);
+      expect((html.match(/<b>/g) ?? []).length).toBe((html.match(/<\/b>/g) ?? []).length);
+      expect((html.match(/<a /g) ?? []).length).toBe((html.match(/<\/a>/g) ?? []).length);
+      // Visible text (after entity parsing) stays within Telegram's limit.
+      const visible = withoutTags.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+      expect(Array.from(visible).length).toBeLessThanOrEqual(4096);
+      expect(html).toContain('<b>Reason:</b>'.replace('Reason', p.event === 'cert' ? 'Subject' : 'Reason'));
+    }
+    // A message far beyond the budget is cut on the plain text, never inside an entity.
+    const huge = telegramHtml({ ...buildMessage(payloads[0] as NotifyPayload), summary: '&'.repeat(5000) });
+    expect(huge.replace(/&amp;/g, '')).not.toContain('&');
+    expect(huge.startsWith('<b>')).toBe(true);
+    expect(huge).toContain('…');
   });
 
   it('teams: adaptive card', async () => {

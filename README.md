@@ -246,6 +246,13 @@ self-hosted install is unaffected unless you set `SIGNUP_ENABLED=true`.
 * **Reverse proxy.** Set `TRUST_PROXY` correctly: the sign-up, login and reset rate limits are
   per client IP (IPv6 per /64 and, for sign-up, per /48). With `TRUST_PROXY=false` behind a
   proxy every client shares one bucket; the server warns about this at startup.
+* **Uptime monitors (SSRF).** Members can never reach private, loopback or cloud-metadata
+  addresses (incl. Azure `168.63.129.16`); `UPTIME_TARGET_ALLOWLIST` does not apply to them. Add
+  any other provider-internal or sensitive addresses to `UPTIME_TARGET_DENYLIST`. Member names are
+  resolved through `UPTIME_DNS_SERVERS` (default `1.1.1.1,8.8.8.8`) so internal DNS stays hidden.
+  The server's own addresses (including `PUBLIC_URL`'s IPs) are denied: behind a shared CDN or
+  load balancer this also blocks unrelated sites on the same anycast IPs. Monitor traffic leaves
+  from the server's IP, so never allowlist that IP elsewhere (use a dedicated egress if you can).
 
 ### Stripe setup
 

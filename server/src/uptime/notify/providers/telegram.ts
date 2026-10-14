@@ -16,11 +16,38 @@ const FIELDS: readonly FieldDef[] = [
   { key: 'serverUrl', label: 'Bot API server', kind: 'url', placeholder: TELEGRAM_API, selfHostedOnly: true, group: 'Advanced', help: 'Self-hosted Bot API server (optional).' },
 ];
 
+/** Visible characters per message (Telegram allows 4096 after entity parsing). */
+export const TELEGRAM_TEXT_BUDGET = 4000;
+
+/**
+ * Telegram HTML. The length budget is applied to the plain (unescaped) text, field by field and
+ * on code-point boundaries, and only then is each piece escaped and wrapped in its tags: the
+ * result never ends in a cut entity (`&quo`) or an unclosed tag, which Telegram would reject
+ * ("can't parse entities") and so lose the alert.
+ */
 export function telegramHtml(m: Message): string {
-  const e = (s: string): string => escapeHtml(neutralizeMentions(s));
-  const lines = [`<b>${e(m.title)}</b>`, e(m.summary), ...m.facts.filter((f) => f.label !== 'Monitor').map((f) => `<b>${e(f.label)}:</b> ${e(f.value)}`)];
-  if (m.url) lines.push(`<a href="${escapeHtml(m.url)}">Open dashboard</a>`);
-  return lines.join('\n').slice(0, 4000);
+  let budget = TELEGRAM_TEXT_BUDGET;
+  const take = (s: string): string => {
+    const cps = Array.from(neutralizeMentions(s));
+    const out = cps.length <= budget ? cps : cps.slice(0, Math.max(0, budget - 1)).concat(budget > 0 ? ['…'] : []);
+    budget = Math.max(0, budget - out.length);
+    return escapeHtml(out.join(''));
+  };
+  const lines: string[] = [];
+  const push = (line: string): void => {
+    lines.push(line);
+    budget = Math.max(0, budget - 1); // the newline
+  };
+  push(`<b>${take(m.title)}</b>`);
+  push(take(m.summary));
+  for (const f of m.facts) {
+    if (f.label === 'Monitor' || budget <= 0) continue;
+    const label = take(`${f.label}:`);
+    const value = take(` ${f.value}`);
+    push(`<b>${label}</b>${value}`);
+  }
+  if (m.url && budget >= 'Open dashboard'.length) push(`<a href="${escapeHtml(m.url)}">${take('Open dashboard')}</a>`);
+  return lines.filter((l, i) => i < 2 || l !== '<b></b>').join('\n');
 }
 
 export const telegram: ProviderDefinition<Config, Secrets> = {

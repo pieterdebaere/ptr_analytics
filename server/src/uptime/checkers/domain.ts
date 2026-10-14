@@ -1,9 +1,9 @@
 // `domain`: domain registration expiry via RDAP. The registry RDAP base URL comes from the IANA
 // bootstrap file (https://data.iana.org/rdap/dns.json, cached 24 h); all requests go through
-// SafeNet (https only). `rdapDomainExpiry()` is exported for the engine's domain-expiry tracking
+// SafeNet (https only: http RDAP bases in the bootstrap file are ignored). `rdapDomainExpiry()` is exported for the engine's domain-expiry tracking
 // of other monitor types.
 import { ValidationError, type CheckerDefinition, type SafeNet } from '../types.js';
-import { NetError } from '../net/errors.js';
+import { NetError, abortError } from '../net/errors.js';
 import { normalizeHostname } from '../net/policy.js';
 import { daysLeft, down, guarded, int, str, up } from './common.js';
 
@@ -76,28 +76,34 @@ export function registrableDomain(host: string): string | null {
 /* ---------------------------------------------------------------- bootstrap */
 
 const BOOTSTRAP_TTL = 24 * 3600_000;
+/** Own deadline of the shared bootstrap download (independent of any caller's check timeout). */
+const BOOTSTRAP_TIMEOUT_MS = 20_000;
 let bootstrapUrl = 'https://data.iana.org/rdap/dns.json';
 let bootstrap: { at: number; services: Map<string, string> } | null = null;
 let bootstrapInflight: Promise<Map<string, string>> | null = null;
+/** Plain-http RDAP (bootstrap + bases): tests only. */
+let allowHttp = false;
 const expiryCache = new Map<string, { at: number; value: number | null }>();
 
-/** Test hooks. */
-export function setRdapBootstrapUrl(u: string): void {
+/** Test hooks. `opts.allowHttp` permits http:// bootstrap/base URLs (local test servers). */
+export function setRdapBootstrapUrl(u: string, opts: { allowHttp?: boolean } = {}): void {
   bootstrapUrl = u;
+  allowHttp = opts.allowHttp === true;
   bootstrap = null;
   bootstrapInflight = null;
   expiryCache.clear();
 }
 
-export function parseBootstrap(json: unknown): Map<string, string> {
+/** RDAP bases must be https (the registry answer decides DOWN/UP; no plain-text tampering). */
+export function parseBootstrap(json: unknown, opts: { allowHttp?: boolean } = {}): Map<string, string> {
   const out = new Map<string, string>();
   const services = (json as { services?: unknown } | null)?.services;
   if (!Array.isArray(services)) throw new NetError('ERDAP', 'invalid RDAP bootstrap file');
   for (const svc of services.slice(0, 5000)) {
     if (!Array.isArray(svc) || !Array.isArray(svc[0]) || !Array.isArray(svc[1])) continue;
     const urls = (svc[1] as unknown[]).filter((u): u is string => typeof u === 'string' && u.length < 512);
-    // Prefer https; plain http only when a registry publishes nothing else.
-    const base = urls.find((u) => u.startsWith('https://')) ?? urls.find((u) => u.startsWith('http://'));
+    // https only (plain http only through the test hook).
+    const base = urls.find((u) => u.startsWith('https://')) ?? (opts.allowHttp ? urls.find((u) => u.startsWith('http://')) : undefined);
     if (!base) continue;
     for (const tld of svc[0] as unknown[]) {
       if (typeof tld === 'string' && tld.length < 64) out.set(tld.toLowerCase(), base.endsWith('/') ? base : `${base}/`);
@@ -106,11 +112,24 @@ export function parseBootstrap(json: unknown): Map<string, string> {
   return out;
 }
 
+/**
+ * The bootstrap download is shared by all concurrent lookups (all tenants). It runs with its own
+ * timeout signal: a caller with a short check timeout only stops waiting for it and never aborts
+ * the download for the others.
+ */
 async function loadBootstrap(net: SafeNet, signal: AbortSignal): Promise<Map<string, string>> {
   if (bootstrap && Date.now() - bootstrap.at < BOOTSTRAP_TTL) return bootstrap.services;
   bootstrapInflight ??= (async () => {
     try {
-      const res = await net.request({ url: bootstrapUrl, method: 'GET', headers: { accept: 'application/json' }, maxRedirects: 3, maxBodyBytes: 2 * 1024 * 1024, signal });
+      if (!bootstrapUrl.startsWith('https://') && !allowHttp) throw new NetError('ERDAP', 'RDAP bootstrap URL must use https');
+      const res = await net.request({
+        url: bootstrapUrl,
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        maxRedirects: 3,
+        maxBodyBytes: 2 * 1024 * 1024,
+        signal: AbortSignal.timeout(BOOTSTRAP_TIMEOUT_MS),
+      });
       if (res.status !== 200 || res.truncated) throw new NetError('ERDAP', `RDAP bootstrap download failed (HTTP ${res.status})`);
       let json: unknown;
       try {
@@ -118,14 +137,33 @@ async function loadBootstrap(net: SafeNet, signal: AbortSignal): Promise<Map<str
       } catch {
         throw new NetError('ERDAP', 'invalid RDAP bootstrap file');
       }
-      const services = parseBootstrap(json);
+      const services = parseBootstrap(json, { allowHttp });
       bootstrap = { at: Date.now(), services };
       return services;
     } finally {
       bootstrapInflight = null;
     }
   })();
-  return bootstrapInflight;
+  return waitFor(bootstrapInflight, signal);
+}
+
+/** Waits for a shared promise until `signal` fires (the promise itself keeps running). */
+function waitFor<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(e);
+      },
+    );
+  });
 }
 
 export function rdapBaseFor(services: Map<string, string>, domain: string): string | null {
@@ -163,6 +201,7 @@ export async function rdapDomainExpiry(net: SafeNet, host: string, signal: Abort
   const services = await loadBootstrap(net, signal);
   const base = rdapBaseFor(services, domain);
   if (!base) throw new NetError('ERDAP', `no RDAP service for .${domain.split('.').pop()}`);
+  if (!base.startsWith('https://') && !allowHttp) throw new NetError('ERDAP', 'RDAP service does not use https');
   const res = await net.request({ url: `${base}domain/${encodeURIComponent(domain)}`, method: 'GET', headers: { accept: 'application/rdap+json, application/json' }, maxRedirects: 3, maxBodyBytes: 1024 * 1024, signal });
   if (res.status === 404) throw new NetError('ERDAP', 'domain not found in RDAP');
   if (res.status !== 200) throw new NetError('ERDAP', `RDAP server returned HTTP ${res.status}`);

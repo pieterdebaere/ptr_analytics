@@ -7,18 +7,26 @@ import { sessionToken } from './cookie.js';
 import { isMfaEnabled } from './mfa.js';
 
 /**
- * Routes an admin without MFA can still use while REQUIRE_MFA_FOR_ADMINS is on: who am I,
- * and the enrolment endpoints.
+ * Routes an admin / viewer without MFA can still use while REQUIRE_MFA_FOR_ADMINS is on: who
+ * am I, and the enrolment endpoints.
  */
 const MFA_POLICY_EXEMPT = new Set(['/api/auth/me', '/api/auth/mfa', '/api/auth/mfa/setup', '/api/auth/mfa/enable', '/api/auth/logout']);
 
-/** REQUIRE_MFA_FOR_ADMINS is on and this user is an admin without MFA. */
+/**
+ * Roles REQUIRE_MFA_FOR_ADMINS applies to: admins, and viewers (they can read every
+ * tenant's data, so a stolen viewer password is as bad as an admin's for confidentiality).
+ */
+export function mfaPolicyApplies(ctx: AppContext, user: User | null): boolean {
+  return ctx.config.uptime.requireMfaForAdmins && user !== null && (user.role === 'admin' || user.role === 'viewer');
+}
+
+/** REQUIRE_MFA_FOR_ADMINS is on and this user is an admin / viewer without MFA. */
 export function mfaSetupRequired(ctx: AppContext, user: User | null): boolean {
-  if (!ctx.config.uptime.requireMfaForAdmins || !user || user.role !== 'admin') return false;
+  if (!user || !mfaPolicyApplies(ctx, user)) return false;
   return !isMfaEnabled(ctx.db, user.id);
 }
 
-/** Admin must enrol MFA first (REQUIRE_MFA_FOR_ADMINS); enrolment endpoints stay usable. */
+/** Admin / viewer must enrol MFA first (REQUIRE_MFA_FOR_ADMINS); enrolment endpoints stay usable. */
 export function mfaPolicyBlocks(ctx: AppContext, request: FastifyRequest): boolean {
   const route = request.routeOptions.url;
   if (route !== undefined && MFA_POLICY_EXEMPT.has(route)) return false;

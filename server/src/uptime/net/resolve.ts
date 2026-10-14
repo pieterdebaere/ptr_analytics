@@ -31,9 +31,20 @@ function strip(host: string): string {
 }
 
 /**
+ * "Not found" error. Hosted members get exactly the same error as for a denied target, so the
+ * answer cannot be used to enumerate internal DNS names (`*.svc.cluster.local`, `*.ec2.internal`
+ * …: "exists but private" vs "does not exist"). Self-hosted admins keep the precise message.
+ */
+function notFound(policy: TargetPolicy, message: string): Error {
+  if (policy.hostedMember) return new TargetDeniedError('target not allowed');
+  return new NetError('ENOTFOUND', message);
+}
+
+/**
  * Resolves `host` (IP literal or hostname) and checks every address against the policy.
  * Throws TargetDeniedError if the name or ANY resolved address is denied (mixing a public and a
- * private record is refused), NetError(ENOTFOUND) when nothing was found.
+ * private record is refused), NetError(ENOTFOUND) when nothing was found (TargetDeniedError for
+ * hosted members, see notFound).
  */
 export async function resolveTarget(
   policy: TargetPolicy,
@@ -80,7 +91,7 @@ export async function resolveTarget(
         if (e.code === 'ECANCELLED') throw abortError(opts.signal);
         if (e.code === 'ETIMEOUT') throw new NetError('EDNSTIMEOUT', 'DNS lookup timed out');
       }
-      throw new NetError('ENOTFOUND', 'host not found');
+      throw notFound(policy, 'host not found');
     }
   }
   const addresses: Array<{ address: string; family: 4 | 6 }> = [];
@@ -102,7 +113,7 @@ export async function resolveTarget(
       }
     }
   }
-  if (addresses.length === 0) throw new NetError('ENOTFOUND', 'host not found');
+  if (addresses.length === 0) throw notFound(policy, 'host not found');
   return { host, addresses };
 }
 

@@ -4,7 +4,10 @@
 // * Unknown and unpublished pages answer the identical 404; badges of unknown/disabled ids
 //   render the same grey "N/A" badge (no existence oracle).
 // * Per-IP rate limits on every endpoint, short in-memory caches (status JSON 30 s, badges
-//   60 s) so a flood of requests costs little database work.
+//   60 s) so a flood of requests costs little database work. Entries older than 5 s are
+//   re-validated with one indexed lookup (deleted site, unpublished page, disabled badge).
+// * Logos are only served while a published page uses them (no upload oracle, nothing of
+//   unpublished pages); the dashboard reads them through the authenticated API.
 // * The global security headers (CSP, nosniff, CORP same-origin, …) apply to everything;
 //   badge SVGs and logo images override exactly the headers they need in this plugin's
 //   onSend hook (which runs after the global one).
@@ -14,12 +17,12 @@ import { clientIp, rateLimitKey } from '../../lib/client-ip.js';
 import { HttpError, badRequest, notFound, tooMany } from '../../lib/errors.js';
 import type { RateLimiter } from '../../lib/rate-limit.js';
 import { BADGE_STYLES, formatPercent, renderBadge, uptimeColor, validLabel, type BadgeColor, type BadgeStyle } from './badge.js';
-import { publicState } from './cache.js';
-import { certDaysLeft, monitorByPublicId, uptimeRatios } from './data.js';
+import { REVALIDATE_MS, publicState, type Checked, type TtlCache } from './cache.js';
+import { certDaysLeft, monitorByPublicId, monitorIdByPublicId, uptimeRatios } from './data.js';
 import { statusPageForHost } from './domains.js';
 import { buildPublicStatus, type PublicStatus } from './render.js';
 import { buildFeed } from './rss.js';
-import { getAsset, pageBySlug } from './store.js';
+import { assetPublished, getAsset, pageBySlug, pageFingerprint } from './store.js';
 import { SLUG_RE, normalizeStatusDomain } from './validate.js';
 
 const HOUR = 3_600_000;
@@ -77,15 +80,35 @@ export async function publicStatusRoutes(app: FastifyInstance, opts: { ctx: AppC
     return payload;
   });
 
+  /**
+   * Cached value, re-validated when older than REVALIDATE_MS: `fingerprint()` describes what
+   * the value was rendered for; a different answer drops the entry.
+   */
+  function revalidated<V>(cache: TtlCache<Checked<V>>, key: string, fingerprint: () => string): V | undefined {
+    const hit = cache.get(key);
+    if (!hit) return undefined;
+    const now = ctx.now();
+    if (now - hit.checkedAt < REVALIDATE_MS) return hit.value;
+    if (fingerprint() !== hit.fingerprint) {
+      cache.delete(key);
+      return undefined;
+    }
+    hit.checkedAt = now;
+    return hit.value;
+  }
+
+  const pageFp = (slug: string): string => pageFingerprint(db, slug) ?? '-';
+
   /** Public JSON of a published page (cached), or null. */
   const publicPage = (slug: string): PublicStatus | null => {
     if (!SLUG_RE.test(slug)) return null;
-    const cached = state.pages.get(slug) as PublicStatus | undefined;
+    const cached = revalidated(state.pages, slug, () => pageFp(slug)) as PublicStatus | undefined;
     if (cached) return cached;
+    const fingerprint = pageFp(slug);
     const page = pageBySlug(db, slug);
     if (!page || page.published !== 1) return null;
     const out = buildPublicStatus(ctx, page);
-    state.pages.set(slug, out);
+    state.pages.set(slug, { value: out, fingerprint, checkedAt: ctx.now() });
     return out;
   };
 
@@ -110,11 +133,13 @@ export async function publicStatusRoutes(app: FastifyInstance, opts: { ctx: AppC
     return reply.code(200).type('image/svg+xml; charset=utf-8').send(svg);
   };
 
-  const cachedBadge = (key: string, render: () => string): string => {
-    const hit = state.badges.get(key);
+  /** Badge SVG from the cache (re-validated with `fingerprint`) or freshly rendered. */
+  const cachedBadge = (key: string, fingerprint: () => string, render: () => string): string => {
+    const hit = revalidated(state.badges, key, fingerprint);
     if (hit !== undefined) return hit;
+    const fp = fingerprint();
     const svg = render();
-    state.badges.set(key, svg);
+    state.badges.set(key, { value: svg, fingerprint: fp, checkedAt: ctx.now() });
     return svg;
   };
 
@@ -141,7 +166,8 @@ export async function publicStatusRoutes(app: FastifyInstance, opts: { ctx: AppC
     const key = `${kind}\n${publicId}\n${periodKey}\n${p.style}\n${p.label ?? '\u0000'}`;
     // Malformed ids: the static N/A badge, no database work at all.
     if (!PUBLIC_ID_RE.test(publicId)) return sendBadge(reply, na(p, defaults[kind]));
-    const svg = cachedBadge(key, () => {
+    const badgeFp = (): string => String(monitorIdByPublicId(db, publicId));
+    const svg = cachedBadge(key, badgeFp, () => {
       const m = monitorByPublicId(db, publicId);
       if (!m) return na(p, defaults[kind]);
       const label = p.label ?? defaults[kind];
@@ -182,7 +208,7 @@ export async function publicStatusRoutes(app: FastifyInstance, opts: { ctx: AppC
     const p = badgeParams(request);
     const slug = request.params.slug;
     const key = `page\n${slug}\n${p.style}\n${p.label ?? '\u0000'}`;
-    const svg = cachedBadge(key, () => {
+    const svg = cachedBadge(key, () => (SLUG_RE.test(slug) ? pageFp(slug) : '-'), () => {
       const out = publicPage(slug);
       const label = p.label ?? 'status';
       if (!out) return na(p, 'status');
@@ -205,13 +231,16 @@ export async function publicStatusRoutes(app: FastifyInstance, opts: { ctx: AppC
   app.get<{ Params: { sha256: string } }>('/api/public/assets/:sha256', async (request, reply) => {
     limit(request, state.limits.asset);
     const sha = request.params.sha256;
-    const asset = SHA256_RE.test(sha) ? getAsset(db, sha) : null;
+    // Only logos a published page uses: no confirmation oracle for arbitrary uploads and
+    // nothing of unpublished pages (the dashboard uses the authenticated logo route).
+    const asset = SHA256_RE.test(sha) && assetPublished(db, sha) ? getAsset(db, sha) : null;
     if (!asset) throw notFound();
     override(reply, {
       'Content-Security-Policy': ASSET_CSP,
       'Content-Disposition': 'inline',
       'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      // Content-addressed, but not immutable: it stops being served when no published page uses it.
+      'Cache-Control': 'public, max-age=3600',
     });
     // Only the three sniffed raster types are ever stored (CHECK constraint).
     return reply.code(200).type(asset.mime).send(asset.bytes);

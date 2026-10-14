@@ -86,6 +86,11 @@ export class MaintenanceRepo {
     return rows.map(toRecord);
   }
 
+  /** Paused maintenances whose window start was announced (the engine still owes a maint_end). */
+  listPausedAnnounced(): MaintenanceRecord[] {
+    return (this.db.prepare('SELECT * FROM maintenances WHERE active = 0 AND notified_start IS NOT NULL ORDER BY id').all() as Row[]).map(toRecord);
+  }
+
   /** Active maintenances with at least one monitor (engine cache). */
   listActive(): MaintenanceRecord[] {
     return (this.db.prepare('SELECT * FROM maintenances WHERE active = 1 ORDER BY id').all() as Row[]).map(toRecord);
@@ -108,6 +113,10 @@ export class MaintenanceRepo {
 
   countByOwner(ownerId: number | null): number {
     return (this.db.prepare('SELECT COUNT(*) AS n FROM maintenances WHERE owner_id IS ?').get(ownerId) as { n: number }).n;
+  }
+
+  countCronByOwner(ownerId: number | null): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM maintenances WHERE owner_id IS ? AND strategy = 'cron'`).get(ownerId) as { n: number }).n;
   }
 
   create(ownerId: number | null, m: MaintenanceInput, now: number): MaintenanceRecord {

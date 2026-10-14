@@ -1,4 +1,5 @@
 // Test doubles for the notification module: a recording SafeNet and payload builders.
+import type { AppContext } from '../src/context.js';
 import type { HttpRequestOptions, HttpResponse, NotifyPayload, SafeNet } from '../src/uptime/types.js';
 
 export interface RecordedRequest extends HttpRequestOptions {
@@ -81,3 +82,44 @@ export function upPayload(over: Partial<NotifyPayload> = {}): NotifyPayload {
 }
 
 export const TEST_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+
+/* ------------------------------------------------------------- outbox rows */
+
+const ownedMonitors = new WeakMap<AppContext, Map<string, { id: number; uid: string; siteId: string }>>();
+let ownedSeq = 0;
+
+/** A live monitor on a site of `ownerId` (null = operator site), created once per app and owner. */
+export function ownedMonitor(ctx: AppContext, ownerId: number | null): { id: number; uid: string; siteId: string } {
+  let byOwner = ownedMonitors.get(ctx);
+  if (!byOwner) ownedMonitors.set(ctx, (byOwner = new Map()));
+  const key = String(ownerId);
+  const hit = byOwner.get(key);
+  if (hit) return hit;
+  const n = ++ownedSeq;
+  const site = ctx.sites.create(`Site ${n}`, [`s${n}.example.com`], ctx.now(), ownerId);
+  const uid = `own${String(n).padStart(9, '0')}`;
+  const r = ctx.db
+    .prepare(
+      `INSERT INTO monitors (uid, site_id, type, name, interval_s, retry_interval_s, timeout_ms, config, created_at, updated_at)
+       VALUES (?, ?, 'http', ?, 60, 60, 10000, '{}', ?, ?)`,
+    )
+    .run(uid, site.id, `Monitor ${uid}`, ctx.now(), ctx.now());
+  const m = { id: Number(r.lastInsertRowid), uid, siteId: site.id };
+  byOwner.set(key, m);
+  return m;
+}
+
+/**
+ * Queue an outbox row the way the engine does: a monitor event references a monitor of the
+ * channel's owner and the payload names that monitor.
+ */
+export function enqueueOwned(ctx: AppContext, channelId: number, payload: NotifyPayload = downPayload(), at = ctx.now()): number {
+  const ch = ctx.db.prepare('SELECT owner_id FROM notify_channels WHERE id = ?').get(channelId) as { owner_id: number | null };
+  const m = ownedMonitor(ctx, ch.owner_id);
+  const p: NotifyPayload = payload.monitor ? { ...payload, monitor: { ...payload.monitor, uid: m.uid, siteId: m.siteId } } : payload;
+  return Number(
+    ctx.db
+      .prepare('INSERT INTO notify_outbox (channel_id, monitor_id, event, payload, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(channelId, payload.monitor ? m.id : null, payload.event, JSON.stringify(p), at, ctx.now()).lastInsertRowid,
+  );
+}

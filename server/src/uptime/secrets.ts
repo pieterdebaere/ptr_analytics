@@ -103,15 +103,29 @@ function decodeKeyFile(raw: Buffer, file: string): Buffer {
   throw new SecretsError(`${file}: secrets key file must contain 32 bytes (base64 or hex)`);
 }
 
-function checkPermissions(file: string, strict: boolean): void {
+export function checkPermissions(file: string, strict: boolean): void {
   const st = fs.statSync(file);
   if (!st.isFile()) throw new SecretsError(`${file}: secrets key file is not a regular file`);
   if (process.platform === 'win32') return;
-  // Generated files must stay 0600. Operator-supplied files (e.g. Docker secrets, 0444 root) must
-  // at least not be writable by group/others.
-  const mask = strict ? 0o077 : 0o022;
-  if ((st.mode & mask) !== 0) {
-    throw new SecretsError(`${file}: insecure permissions ${(st.mode & 0o777).toString(8)} — run \`chmod 600 ${file}\``);
+  const mode = st.mode & 0o777;
+  const fix = `run \`chmod 600 ${file}\``;
+  // Generated files must stay 0600.
+  if (strict) {
+    if ((mode & 0o077) !== 0) throw new SecretsError(`${file}: insecure permissions ${mode.toString(8)} — ${fix}`);
+    return;
+  }
+  // Operator-supplied files (SECRETS_KEY_FILE): never writable by group/others, and not readable
+  // by group/others either — except a root-owned 0400/0440 file (Docker / Kubernetes secret
+  // mounted read-only for the service's group).
+  if ((mode & 0o022) !== 0) throw new SecretsError(`${file}: insecure permissions ${mode.toString(8)} (writable by group/others) — ${fix}`);
+  if ((mode & 0o044) !== 0) {
+    const dockerSecret = st.uid === 0 && (mode === 0o400 || mode === 0o440);
+    if (!dockerSecret) {
+      throw new SecretsError(
+        `${file}: secrets key file is readable by group/others (mode ${mode.toString(8)}) — ${fix} ` +
+          '(Docker secrets: mount root-owned with mode 0400, or 0440 with the server in the group)',
+      );
+    }
   }
 }
 

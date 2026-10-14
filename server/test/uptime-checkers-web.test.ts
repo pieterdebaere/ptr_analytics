@@ -9,7 +9,7 @@ import type { Duplex } from 'node:stream';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CHECKERS } from '../src/uptime/checkers/registry.js';
 import { clearOAuthTokenCache } from '../src/uptime/checkers/http.js';
-import { setRdapBootstrapUrl } from '../src/uptime/checkers/domain.js';
+import { rdapDomainExpiry, setRdapBootstrapUrl } from '../src/uptime/checkers/domain.js';
 import { close, listen, opensslAvailable, runCheck, testCerts, testNet, uptimeConfig } from './uptime-net-fixtures.js';
 
 const def = (t: string) => CHECKERS.get(t)!;
@@ -275,6 +275,10 @@ describe('domain (RDAP)', () => {
     const u = new URL(req.url ?? '/', 'http://x');
     if (u.pathname === '/dns.json') {
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ services: [[['test'], [`http://127.0.0.1:${rdapPort}/rdap/`]]] }));
+    } else if (u.pathname === '/slow-dns.json') {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ services: [[['test'], [`http://127.0.0.1:${rdapPort}/rdap/`]]] }));
+      }, 400);
     } else if (u.pathname === '/rdap/domain/example.test') {
       res.writeHead(200, { 'content-type': 'application/rdap+json' }).end(JSON.stringify({ events: [{ eventAction: 'expiration', eventDate: new Date(Date.now() + 100 * 86_400_000 + 3_600_000).toISOString() }] }));
     } else if (u.pathname === '/rdap/domain/soon.test') {
@@ -287,7 +291,7 @@ describe('domain (RDAP)', () => {
   });
   beforeAll(async () => {
     rdapPort = await listen(rdap);
-    setRdapBootstrapUrl(`http://127.0.0.1:${rdapPort}/dns.json`);
+    setRdapBootstrapUrl(`http://127.0.0.1:${rdapPort}/dns.json`, { allowHttp: true });
   });
   afterAll(async () => {
     setRdapBootstrapUrl('https://data.iana.org/rdap/dns.json');
@@ -303,6 +307,30 @@ describe('domain (RDAP)', () => {
     expect(await runCheck(def('domain'), { domain: 'noexp.test' })).toMatchObject({ status: 'up', domainExpiresAt: null });
     expect(await runCheck(def('domain'), { domain: 'missing.test' })).toMatchObject({ status: 'down', msg: 'Domain not found in RDAP' });
     expect(await runCheck(def('domain'), { domain: 'example.unknowntld' })).toMatchObject({ status: 'down', msg: 'No RDAP service for .unknowntld' });
+  });
+
+  it('requires https for the bootstrap file and the RDAP bases (L7)', async () => {
+    try {
+      setRdapBootstrapUrl(`http://127.0.0.1:${rdapPort}/dns.json`);
+      expect(await runCheck(def('domain'), { domain: 'example.test' })).toMatchObject({ status: 'down', msg: 'RDAP bootstrap URL must use https' });
+    } finally {
+      setRdapBootstrapUrl(`http://127.0.0.1:${rdapPort}/dns.json`, { allowHttp: true });
+    }
+  });
+
+  it("a caller's short timeout does not abort the shared bootstrap download of other callers (L7)", async () => {
+    try {
+      setRdapBootstrapUrl(`http://127.0.0.1:${rdapPort}/slow-dns.json`, { allowHttp: true });
+      const net = testNet();
+      const short = rdapDomainExpiry(net, 'example.test', AbortSignal.timeout(50));
+      const long = rdapDomainExpiry(net, 'example.test', AbortSignal.timeout(5000));
+      await expect(short).rejects.toMatchObject({ code: 'ETIMEOUT' });
+      const r = await long;
+      expect(r.domain).toBe('example.test');
+      expect(r.expiresAt).toBeGreaterThan(Date.now());
+    } finally {
+      setRdapBootstrapUrl(`http://127.0.0.1:${rdapPort}/dns.json`, { allowHttp: true });
+    }
   });
 });
 

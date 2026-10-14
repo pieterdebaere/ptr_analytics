@@ -25,8 +25,10 @@ import {
   tlsSummary,
   up,
   url,
+  validHeaderValue,
   type Input,
 } from './common.js';
+import { MEMBER_MAX_REQUEST_BODY_BYTES } from '../config.js';
 
 export const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const;
 export const AUTH_METHODS = ['none', 'basic', 'bearer', 'oauth2', 'mtls'] as const;
@@ -56,6 +58,8 @@ export interface HttpConfig extends HttpAuthConfig {
   ignoreTls: boolean;
   ipFamily: 'auto' | 'ipv4' | 'ipv6';
   cacheBuster: boolean;
+  /** Follow https → http redirects (self-hosted only; refused for hosted members). */
+  allowDowngrade?: boolean;
 }
 
 export type HttpSecrets = Record<string, string>;
@@ -150,6 +154,15 @@ export const HTTP_FIELDS: FieldDef[] = [
     help: 'Single codes or ranges, e.g. 200-299, 301.',
   },
   { key: 'maxRedirects', label: 'Max. redirects', kind: 'number', default: 10, min: 0, max: 20, group: 'Request', help: '0 = do not follow redirects.' },
+  {
+    key: 'allowDowngrade',
+    label: 'Follow https → http redirects',
+    kind: 'boolean',
+    default: false,
+    group: 'Advanced',
+    selfHostedOnly: true,
+    help: 'By default a redirect from https to plain http fails the check. Redirects that would re-send the request body to another origin are never followed.',
+  },
   IGNORE_TLS_FIELD,
   IP_FAMILY_FIELD,
   { key: 'cacheBuster', label: 'Cache buster', kind: 'boolean', default: false, group: 'Advanced', help: 'Append a random query parameter to bypass caches.' },
@@ -180,6 +193,7 @@ export function validateAuth(input: Input, ctx: ValidateContext): { config: Http
   } else if (authMethod === 'bearer') {
     const t = secret(input, 'bearerToken', ctx, { max: 8192 });
     if (!t) throw new ValidationError('bearerToken is required', 'bearerToken');
+    if (!validHeaderValue(t)) throw new ValidationError('bearerToken contains characters that are not allowed in HTTP headers', 'bearerToken');
     secrets.bearerToken = t;
   } else if (authMethod === 'oauth2') {
     config.oauthTokenUrl = url(input, 'oauthTokenUrl', ctx, { httpsOnly: isMember(ctx) });
@@ -210,6 +224,11 @@ export function validateHttp(input: Input, ctx: ValidateContext): { config: Http
   if (dup) throw new ValidationError(`header ${dup} is set twice`, 'secretHeaders');
   const bodyEncoding = oneOf(input, 'bodyEncoding', ['json', 'form', 'raw'] as const, 'json');
   const body = method === 'GET' || method === 'HEAD' ? '' : str(input, 'body', { max: 65536, multiline: true, trim: false });
+  if (member && Buffer.byteLength(body, 'utf8') > MEMBER_MAX_REQUEST_BODY_BYTES) {
+    throw new ValidationError(`body must be at most ${MEMBER_MAX_REQUEST_BODY_BYTES / 1024} KiB`, 'body');
+  }
+  const allowDowngrade = bool(input, 'allowDowngrade');
+  if (allowDowngrade && member) throw new ValidationError('allowDowngrade is not available on this server', 'allowDowngrade');
   if (body.trim() !== '' && bodyEncoding === 'json') {
     try {
       JSON.parse(body);
@@ -230,6 +249,7 @@ export function validateHttp(input: Input, ctx: ValidateContext): { config: Http
     ignoreTls: bool(input, 'ignoreTls'),
     ipFamily: ipFamily(input),
     cacheBuster: bool(input, 'cacheBuster'),
+    allowDowngrade,
     ...auth.config,
   };
   return { config, secrets: { ...sh.secrets, ...auth.secrets } };
@@ -286,7 +306,7 @@ async function oauthToken(ctx: CheckContext<HttpAuthConfig, HttpSecrets>, force:
   } catch {
     throw new NetError('EOAUTH', 'OAuth token response is not JSON');
   }
-  if (typeof parsed.access_token !== 'string' || parsed.access_token.length === 0 || parsed.access_token.length > 16384 || /[\r\n]/.test(parsed.access_token)) {
+  if (typeof parsed.access_token !== 'string' || parsed.access_token.length === 0 || parsed.access_token.length > 16384 || !validHeaderValue(parsed.access_token)) {
     throw new NetError('EOAUTH', 'OAuth token response has no access_token');
   }
   const type = typeof parsed.token_type === 'string' && /^[A-Za-z-]{1,32}$/.test(parsed.token_type) ? parsed.token_type : 'Bearer';
@@ -355,6 +375,7 @@ export async function performHttp(ctx: CheckContext<HttpConfig, HttpSecrets>, ma
       maxBodyBytes,
       signal: ctx.signal,
       clientCert: clientCertOf(ctx),
+      allowDowngrade: c.allowDowngrade === true,
     });
   };
   const res = await send(false);

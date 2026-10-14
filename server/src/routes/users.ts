@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { PASSWORD_MAX, PASSWORD_MIN, isValidEmail } from '../config.js';
 import type { AppContext } from '../context.js';
+import { apiKeyState } from '../auth/api-keys.js';
 import { currentUser, requireAdmin, requireAuth } from '../auth/guard.js';
 import { ENTITLED_STATUSES, ROLES, type Role } from '../data/users.js';
 import { schedulePurge } from '../jobs/purge.js';
@@ -97,11 +98,15 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
         ctx.users.setRole(id, role);
         // members are limited to their allowance; other roles never have suspended sites
         ctx.billing.recompute(id);
+        // Sessions (and the live streams they authorise, re-checked every 25 s) were opened
+        // with the old role: the user signs in again (also when demoting oneself).
+        ctx.authSessions.deleteForUser(id);
       }
       if (newHash !== undefined) {
         ctx.users.setPasswordHash(id, newHash);
-        // A password change invalidates the user's other sessions.
+        // A password reset invalidates the user's sessions and API keys.
         ctx.authSessions.deleteForUser(id);
+        apiKeyState(ctx).repo.deleteForUser(id);
       }
     });
     tx();

@@ -27,14 +27,19 @@ export const txtLookup = {
   },
 };
 
-/** Does `_ptr-status.<domain>` carry the token? DNS errors count as "not verified". */
-export async function verifyDomainTxt(domain: string, token: string): Promise<boolean> {
+/** TXT values of `_ptr-status.<domain>` (trimmed); DNS errors give an empty list. */
+export async function domainTxtValues(domain: string): Promise<string[]> {
   try {
     const records = await txtLookup.resolve(`_ptr-status.${domain}`);
-    return records.some((r) => r.trim() === token);
+    return records.map((r) => r.trim());
   } catch {
-    return false;
+    return [];
   }
+}
+
+/** Does `_ptr-status.<domain>` carry the token? DNS errors count as "not verified". */
+export async function verifyDomainTxt(domain: string, token: string): Promise<boolean> {
+  return (await domainTxtValues(domain)).includes(token);
 }
 
 /** Normalise a Host header value: lowercase, without port and trailing dot. */

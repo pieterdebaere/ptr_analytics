@@ -2,14 +2,15 @@
 // pages must belong to the same owner.
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../../context.js';
-import { conflict, notFound } from '../../lib/errors.js';
+import { conflict, notFound, tooMany } from '../../lib/errors.js';
+import { RateLimiter } from '../../lib/rate-limit.js';
 import { isPlainObject, objectBody } from '../../lib/body.js';
 import { isValidTimeZone, parseLocalDate } from '../../lib/time.js';
 import { MaintenanceRepo, type MaintenanceInput, type MaintenanceRecord } from '../data/maintenance.js';
 import { MonitorRepo } from '../data/monitors.js';
 import { CronError, parseCron } from '../maintenance/cron.js';
 import { maintenanceInfo } from '../maintenance/index.js';
-import { STRATEGIES, parseHHMM, zonedTime, type DayOfMonth, type Strategy } from '../maintenance/windows.js';
+import { STRATEGIES, cronCombinations, parseHHMM, zonedTime, type DayOfMonth, type Strategy } from '../maintenance/windows.js';
 import { uptimeRuntime } from '../runtime.js';
 import {
   FieldError,
@@ -27,6 +28,13 @@ import {
 } from './shared.js';
 
 const MAX_PER_OWNER = 100;
+/** Cron windows per member (each is evaluated by the engine and on every list). */
+const MAX_CRON_PER_OWNER = 20;
+/** A cron schedule may match at most this many hour×minute combinations per day. */
+export const MAX_CRON_COMBINATIONS = 60;
+/** Per-user request budgets (per minute) of the maintenance API. */
+const READS_PER_MIN = 120;
+const WRITES_PER_MIN = 30;
 const MAX_LINKS = 500;
 const MAX_DURATION_S = 31 * 86_400;
 
@@ -183,7 +191,10 @@ function parseInput(body: Record<string, unknown>, existing: MaintenanceRecord |
       const cron = pick('cron', existing?.cron);
       if (typeof cron !== 'string') throw new FieldError('cron is required', 'cron');
       try {
-        parseCron(cron);
+        const spec = parseCron(cron);
+        if (cronCombinations(spec) > MAX_CRON_COMBINATIONS) {
+          throw new CronError(`cron may match at most ${MAX_CRON_COMBINATIONS} times per day (hour × minute combinations)`);
+        }
       } catch (err) {
         throw new FieldError(err instanceof CronError ? err.message : 'invalid cron expression', 'cron');
       }
@@ -198,6 +209,19 @@ export async function maintenanceRoutes(app: FastifyInstance, opts: { ctx: AppCo
   const { ctx } = opts;
   const repo = new MaintenanceRepo(ctx.db);
   const monitors = new MonitorRepo(ctx.db);
+  const reads = new RateLimiter(READS_PER_MIN, 60_000, ctx.now, 20_000);
+  const writes = new RateLimiter(WRITES_PER_MIN, 60_000, ctx.now, 20_000);
+  // Every response evaluates schedules: budget them per user (and API key) like other costly routes.
+  app.addHook('preHandler', async (request, reply) => {
+    if (!request.url.startsWith('/api/maintenances')) return;
+    const user = request.user;
+    if (!user) return;
+    const limiter = request.method === 'GET' || request.method === 'HEAD' ? reads : writes;
+    if (!limiter.hit(`u${user.id}`)) {
+      reply.header('Retry-After', '60');
+      throw tooMany();
+    }
+  });
   const changed = (): void => {
     try {
       uptimeRuntime(ctx).engine?.maintenanceChanged();
@@ -251,6 +275,9 @@ export async function maintenanceRoutes(app: FastifyInstance, opts: { ctx: AppCo
     const links = parseLinks(body, owner);
     const m = ctx.db.transaction(() => {
       if (user.role === 'member' && repo.countByOwner(owner) >= MAX_PER_OWNER) throw conflict('maintenance limit reached');
+      if (user.role === 'member' && input.strategy === 'cron' && repo.countCronByOwner(owner) >= MAX_CRON_PER_OWNER) {
+        throw conflict('cron maintenance limit reached');
+      }
       const created = repo.create(owner, input, ctx.now());
       if (links.monitorIds) repo.setMonitors(created.id, links.monitorIds);
       if (links.pageIds) repo.setStatusPages(created.id, links.pageIds);
@@ -273,6 +300,9 @@ export async function maintenanceRoutes(app: FastifyInstance, opts: { ctx: AppCo
     const input = parseInput(body, m);
     const links = parseLinks(body, m.ownerId);
     ctx.db.transaction(() => {
+      if (m.ownerId !== null && input.strategy === 'cron' && m.strategy !== 'cron' && repo.countCronByOwner(m.ownerId) >= MAX_CRON_PER_OWNER) {
+        throw conflict('cron maintenance limit reached');
+      }
       repo.update(m.id, input, ctx.now());
       if (links.monitorIds) repo.setMonitors(m.id, links.monitorIds);
       if (links.pageIds) repo.setStatusPages(m.id, links.pageIds);

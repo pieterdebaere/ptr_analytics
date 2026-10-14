@@ -260,7 +260,9 @@ describe('protocol helpers', () => {
     expect(rdapBaseFor(services, 'example.com')).toBe('https://rdap.verisign.com/com/v1/');
     expect(rdapBaseFor(services, 'example.co.uk')).toBe('https://rdap.nominet.uk/uk/');
     expect(rdapBaseFor(services, 'example.bad')).toBeNull();
-    expect(rdapBaseFor(services, 'example.old')).toBe('http://rdap.old/');
+    // http-only registries are ignored (https required, L7) unless the test hook allows it.
+    expect(rdapBaseFor(services, 'example.old')).toBeNull();
+    expect(rdapBaseFor(parseBootstrap({ services: [[['old'], ['http://rdap.old/']]] }, { allowHttp: true }), 'example.old')).toBe('http://rdap.old/');
     expect(() => parseBootstrap({})).toThrow();
     expect(expiryFromRdap({ events: [{ eventAction: 'registration', eventDate: '2000-01-01T00:00:00Z' }, { eventAction: 'expiration', eventDate: '2030-08-13T04:00:00Z' }] })).toBe(Date.parse('2030-08-13T04:00:00Z'));
     expect(expiryFromRdap({ events: 'x' })).toBeNull();

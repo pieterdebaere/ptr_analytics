@@ -1,6 +1,7 @@
-// Public status page JSON (docs/SPEC.md §8.4). Data minimisation: no internal ids (monitor ids
-// are opaque per page), no targets unless "show URL" is on for an http(s) monitor, no check
-// messages, no site ids except the analytics site the owner chose to expose.
+// Public status page JSON (docs/SPEC.md §8.4). Data minimisation: no internal ids (monitor and
+// incident ids are opaque per page), no targets unless "show URL" is on for an http(s) monitor
+// (origin + path only), no check messages, no site ids except the analytics site the owner
+// chose to expose, only maintenances explicitly linked to the page.
 import { createHash } from 'node:crypto';
 import type { AppContext } from '../../context.js';
 import { statusName } from '../types.js';
@@ -72,6 +73,11 @@ export function opaqueMonitorId(pageUid: string, monitorUid: string): string {
   return createHash('sha256').update(`status-page\n${pageUid}\n${monitorUid}`).digest('base64url').slice(0, 16);
 }
 
+/** Stable, opaque id of an incident on one page (not the internal incident uid). */
+export function opaqueIncidentId(pageUid: string, incidentUid: string): string {
+  return createHash('sha256').update(`status-incident\n${pageUid}\n${incidentUid}`).digest('base64url').slice(0, 16);
+}
+
 export function overallStatus(statuses: readonly PublicMonitorStatus[]): OverallStatus {
   const counted = statuses.filter((s) => s !== 'unknown' && s !== 'paused');
   if (counted.length === 0) return 'unknown';
@@ -140,7 +146,7 @@ export function buildPublicStatus(ctx: AppContext, page: PageRow): PublicStatus 
     overall: overallStatus(statuses),
     sections: outSections,
     incidents: publicIncidents(db, page.id).map((i) => ({
-      id: i.uid,
+      id: opaqueIncidentId(page.uid, i.uid),
       title: i.title,
       body: i.body,
       style: i.style,
@@ -149,7 +155,7 @@ export function buildPublicStatus(ctx: AppContext, page: PageRow): PublicStatus 
       updatedAt: i.updated_at,
       resolvedAt: i.resolved_at,
     })),
-    maintenance: maintenanceForPage(db, page.id, ids, now),
+    maintenance: maintenanceForPage(db, page.id, now),
     updatedAt: now,
   };
 }

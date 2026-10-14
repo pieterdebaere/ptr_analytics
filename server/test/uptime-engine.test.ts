@@ -359,6 +359,7 @@ describe('engine: push monitors', () => {
     await t.app.inject({ method: 'GET', url: `${m.pushUrl}?status=down` });
     flush();
     expect(beats(m.id).map((b) => b.status)).toEqual([1]);
+    await clock.advance(SEC); // at most one stored beat per second and monitor
     await t.app.inject({ method: 'GET', url: `${m.pushUrl}` });
     flush();
     expect(beats(m.id).map((b) => b.status)).toEqual([1, 0]);
@@ -460,6 +461,7 @@ describe('engine: restart and shutdown', () => {
     start();
     await clock.advance(30 * SEC);
     flush();
+    console.log('DBG', JSON.stringify(beats(m.id)), clock.t);
     expect(state(m.id)).toMatchObject({ status: 0, retries: 3 });
     const hb = beats(m.id).map((b) => b.status);
     expect(hb).toEqual([2, 2, 0]);

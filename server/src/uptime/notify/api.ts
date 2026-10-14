@@ -5,8 +5,10 @@
 //   GET    /api/notification-channels/:uid            PATCH, DELETE
 //   POST   /api/notification-channels/:uid/test       POST /api/notification-channels/test (unsaved)
 //   GET    /api/notification-channels/:uid/log?limit
-//   GET    /api/notification-channels/verify?token=   (public: e-mail double opt-in)
+//   GET    /api/notification-channels/verify?token=   (public: e-mail double opt-in page, no state change)
+//   POST   /api/notification-channels/verify          (public: form body token=…&answer=confirm|decline)
 //   GET|POST /api/notification-channels/unsubscribe?token= (public: one-click unsubscribe, RFC 8058)
+//   POST   /api/notification-channels/resubscribe     (public: form body token=<unsubscribe token>)
 //
 // Secrets are write-only: responses carry `secretsSet`; in `config`, an omitted or "" secret
 // keeps the stored value and `null` clears it.
@@ -36,7 +38,17 @@ import {
   softDelete,
 } from './channels.js';
 import { deliver, savedTarget, type DeliverTarget } from './deliver.js';
-import { TOKEN_RE, confirmToken, deliveryRecipients, recipientStatus, resendVerification, syncRecipients, unsubscribeToken } from './email.js';
+import {
+  TOKEN_RE,
+  answerVerification,
+  deliveryRecipients,
+  recipientStatus,
+  resendVerification,
+  resubscribeToken,
+  syncRecipients,
+  unsubscribeToken,
+  verificationInfo,
+} from './email.js';
 import { PROVIDERS, WEBHOOK_PRESETS } from './providers/registry.js';
 import { TEMPLATE_VARS, escapeHtml } from './render.js';
 import { isHosted, notifyState } from './state.js';
@@ -104,7 +116,7 @@ function safeSecretKeys(ctx: AppContext, row: ChannelRow): string[] {
 }
 
 function channelJson(ctx: AppContext, row: ChannelRow, monitorCount: number) {
-  const recipients = row.type === 'email' ? recipientStatus(ctx, row.id) : null;
+  const recipients = row.type === 'email' ? recipientStatus(ctx, row) : null;
   return {
     uid: row.uid,
     type: row.type,
@@ -161,19 +173,49 @@ function assertCanManage(user: User): void {
   if (user.role === 'member' && !user.emailVerified) throw forbidden('verify your e-mail address first');
 }
 
-function page(reply: FastifyReply, status: number, title: string, paragraphs: string[], form?: { action: string; button: string }): FastifyReply {
+interface PageForm {
+  action: string;
+  button: string;
+  /** Hidden fields (escaped). */
+  fields: Record<string, string>;
+}
+
+function page(reply: FastifyReply, status: number, title: string, paragraphs: string[], forms: PageForm[] = []): FastifyReply {
   const body =
     '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
-    `<meta name="robots" content="noindex"><title>${escapeHtml(title)}</title></head><body><main>` +
+    `<meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title></head><body><main>` +
     `<h1>${escapeHtml(title)}</h1>` +
     paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('') +
-    (form
-      ? `<form method="post" action="${escapeHtml(form.action)}"><input type="hidden" name="List-Unsubscribe" value="One-Click">` +
-        `<button type="submit">${escapeHtml(form.button)}</button></form>`
-      : '') +
+    forms
+      .map(
+        (f) =>
+          `<form method="post" action="${escapeHtml(f.action)}">` +
+          Object.entries(f.fields)
+            .map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`)
+            .join('') +
+          `<button type="submit">${escapeHtml(f.button)}</button></form>`,
+      )
+      .join('') +
     '<p>PTR Analytics</p></main></body></html>';
   return reply.code(status).header('content-type', 'text/html; charset=utf-8').header('cache-control', 'no-store').send(body);
 }
+
+/** Fields of a public form POST (application/x-www-form-urlencoded string, or a JSON object). */
+function formFields(body: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof body === 'string') {
+    for (const [k, v] of new URLSearchParams(body)) if (!(k in out)) out[k] = v;
+  } else if (isPlainObject(body)) {
+    for (const [k, v] of Object.entries(body)) if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
+const resubscribeForm = (token: string): PageForm => ({
+  action: '/api/notification-channels/resubscribe',
+  button: 'Re-subscribe',
+  fields: { token },
+});
 
 function queryToken(q: unknown): string {
   const t = q && typeof q === 'object' ? (q as Record<string, unknown>)['token'] : undefined;
@@ -192,7 +234,8 @@ export async function notifyRoutes(app: FastifyInstance, opts: { ctx: AppContext
     throw err;
   });
 
-  // One-click unsubscribe posts `List-Unsubscribe=One-Click` as a form (RFC 8058); the body is ignored.
+  // Public HTML forms (opt-in answer, re-subscribe) and RFC 8058 one-click unsubscribe
+  // (`List-Unsubscribe=One-Click`, body ignored) post url-encoded forms; parsed by formFields().
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string', bodyLimit: 1024 }, (_req, body, done) => done(null, body));
   app.addContentTypeParser('multipart/form-data', { parseAs: 'string', bodyLimit: 4096 }, (_req, body, done) => done(null, body));
 
@@ -254,12 +297,49 @@ export async function notifyRoutes(app: FastifyInstance, opts: { ctx: AppContext
   });
 
   // Static paths before `/:uid` (find-my-way prefers static segments anyway).
+  //
+  // E-mail double opt-in. The GET only shows a page (mail link scanners fetch links and must not
+  // subscribe anybody); the recipient answers with a POST whose body carries the token — the
+  // token is the authorisation, so this exact POST route is exempt from the X-PA-Request check
+  // (security.ts). The page names no member-chosen text beyond a short plain label.
   app.get('/api/notification-channels/verify', async (request, reply) => {
     if (!ctx.limits.tokenIp.hit(rateLimitKey(clientIp(request)))) return page(reply, 429, 'Too many attempts', ['Please try again later.']);
-    const done = confirmToken(ctx, queryToken(request.query));
+    const token = queryToken(request.query);
+    const info = verificationInfo(ctx, token);
+    if (!info) return page(reply, 400, 'Link invalid or expired', ['This confirmation link is invalid, was already used or has expired.']);
+    return page(
+      reply,
+      200,
+      'Confirm uptime alerts',
+      [
+        `A user of PTR Analytics wants to send uptime monitoring alerts to ${info.address}` +
+          (info.label ? ` (notification channel "${info.label}").` : '.'),
+        'Do you want to receive these alerts? Every alert contains a link to unsubscribe. If you decline, you will not be asked again.',
+      ],
+      [
+        { action: '/api/notification-channels/verify', button: 'Confirm and receive alerts', fields: { token, answer: 'confirm' } },
+        { action: '/api/notification-channels/verify', button: 'Decline and do not ask again', fields: { token, answer: 'decline' } },
+      ],
+    );
+  });
+
+  app.post('/api/notification-channels/verify', async (request, reply) => {
+    if (!ctx.limits.tokenIp.hit(rateLimitKey(clientIp(request)))) return page(reply, 429, 'Too many attempts', ['Please try again later.']);
+    const f = formFields(request.body);
+    const answer = f['answer'] === 'decline' ? 'decline' : f['answer'] === 'confirm' ? 'confirm' : null;
+    const done = answer ? answerVerification(ctx, f['token'] ?? '', answer) : null;
     if (!done) return page(reply, 400, 'Link invalid or expired', ['This confirmation link is invalid, was already used or has expired.']);
+    if (answer === 'decline') {
+      return page(
+        reply,
+        200,
+        'Declined',
+        [`${done.address} will not receive these uptime alerts, and you will not be asked again.`],
+        done.unsubToken ? [{ ...resubscribeForm(done.unsubToken), button: 'Changed your mind? Receive the alerts' }] : [],
+      );
+    }
     return page(reply, 200, 'Address confirmed', [
-      `${done.address} will now receive uptime alerts of the notification channel "${done.channelName}".`,
+      `${done.address} will now receive uptime alerts` + (done.label ? ` of the notification channel "${done.label}".` : '.'),
       'Every alert contains a link to unsubscribe.',
     ]);
   });
@@ -267,17 +347,31 @@ export async function notifyRoutes(app: FastifyInstance, opts: { ctx: AppContext
   app.get('/api/notification-channels/unsubscribe', async (request, reply) => {
     const token = queryToken(request.query);
     if (!TOKEN_RE.test(token)) return page(reply, 400, 'Link invalid', ['This unsubscribe link is invalid.']);
-    return page(reply, 200, 'Unsubscribe from uptime alerts', ['Do you want to stop receiving these uptime alert e-mails?'], {
-      action: `/api/notification-channels/unsubscribe?token=${encodeURIComponent(token)}`,
-      button: 'Unsubscribe',
-    });
+    return page(reply, 200, 'Unsubscribe from uptime alerts', ['Do you want to stop receiving these uptime alert e-mails?'], [
+      {
+        action: `/api/notification-channels/unsubscribe?token=${encodeURIComponent(token)}`,
+        button: 'Unsubscribe',
+        fields: { 'List-Unsubscribe': 'One-Click' },
+      },
+    ]);
   });
 
   app.post('/api/notification-channels/unsubscribe', async (request, reply) => {
     if (!ctx.limits.tokenIp.hit(rateLimitKey(clientIp(request)))) return page(reply, 429, 'Too many attempts', ['Please try again later.']);
-    const ok = unsubscribeToken(ctx, queryToken(request.query));
+    const token = queryToken(request.query);
+    const ok = unsubscribeToken(ctx, token);
     if (!ok) return page(reply, 400, 'Link invalid', ['This unsubscribe link is invalid.']);
-    return page(reply, 200, 'Unsubscribed', ['You will not receive these uptime alert e-mails any more.']);
+    return page(reply, 200, 'Unsubscribed', ['You will not receive these uptime alert e-mails any more.'], [resubscribeForm(token)]);
+  });
+
+  // Only the recipient can undo an unsubscribe / decline: authorised by their unsubscribe token
+  // (in the body; exempt from the X-PA-Request check like the one-click unsubscribe).
+  app.post('/api/notification-channels/resubscribe', async (request, reply) => {
+    if (!ctx.limits.tokenIp.hit(rateLimitKey(clientIp(request)))) return page(reply, 429, 'Too many attempts', ['Please try again later.']);
+    const r = resubscribeToken(ctx, formFields(request.body)['token'] ?? '');
+    if (r === null) return page(reply, 400, 'Link invalid', ['This link is invalid or the notification channel no longer exists.']);
+    if (r === 'allowed') return page(reply, 200, 'Done', ['The sender may invite this address again; you will be asked to confirm.']);
+    return page(reply, 200, 'Subscribed again', ['You will receive these uptime alert e-mails again. Every alert contains a link to unsubscribe.']);
   });
 
   app.post('/api/notification-channels/test', { preHandler: auth }, async (request) => {
@@ -406,11 +500,16 @@ export async function notifyRoutes(app: FastifyInstance, opts: { ctx: AppContext
       if (!Number.isFinite(limit)) throw badRequest('limit must be 1..200');
       const entries = ctx.db
         .prepare(
+          // Channel AND ownership: only rows of this (live) channel, and only rows whose monitor
+          // (if any) belongs to the channel's owner; a row of a purged monitor shows no monitor uid.
           `SELECT l.ts, l.event, l.ok, l.http_status, l.error, m.uid AS monitor_uid FROM notify_log l
+           JOIN notify_channels c ON c.id = l.channel_id AND c.deleted_at IS NULL AND c.owner_id IS ?
            LEFT JOIN monitors m ON m.id = l.monitor_id
-           WHERE l.channel_id = ? ORDER BY l.ts DESC, l.id DESC LIMIT ?`,
+           LEFT JOIN sites s ON s.id = m.site_id
+           WHERE l.channel_id = ? AND (m.id IS NULL OR (s.id IS NOT NULL AND s.owner_id IS c.owner_id))
+           ORDER BY l.ts DESC, l.id DESC LIMIT ?`,
         )
-        .all(row.id, limit) as Array<{ ts: number; event: string; ok: number; http_status: number | null; error: string | null; monitor_uid: string | null }>;
+        .all(row.owner_id, row.id, limit) as Array<{ ts: number; event: string; ok: number; http_status: number | null; error: string | null; monitor_uid: string | null }>;
       return {
         entries: entries.map((e) => ({ ts: e.ts, event: e.event, ok: e.ok === 1, httpStatus: e.http_status, error: e.error, monitorUid: e.monitor_uid })),
       };

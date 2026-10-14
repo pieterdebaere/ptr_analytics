@@ -86,6 +86,17 @@ export function monitorsByIds(db: DB, ids: readonly number[]): Map<number, Monit
   return out;
 }
 
+/** Id of the live monitor with this badge id (cheap validity check for cached badges). */
+export function monitorIdByPublicId(db: DB, publicId: string): number | null {
+  const r = db
+    .prepare(
+      `SELECT m.id FROM monitors m JOIN sites si ON si.id = m.site_id AND si.deleted_at IS NULL
+       WHERE m.public_id = ? AND m.deleted_at IS NULL`,
+    )
+    .get(publicId) as { id: number } | undefined;
+  return r?.id ?? null;
+}
+
 export function monitorByPublicId(db: DB, publicId: string): MonitorInfo | null {
   const r = db.prepare(`${MONITOR_SELECT} AND m.public_id = ?`).get(publicId) as MonitorRow | undefined;
   return r ? toInfo(r) : null;
@@ -233,8 +244,9 @@ export function tagsFor(db: DB, ids: readonly number[]): Map<number, TagInfo[]> 
 }
 
 /**
- * Public link for a monitor ("show URL"): only an http(s) `url` from its configuration, with
- * credentials removed. Anything else (hosts, ports, DNS names, connection strings) stays hidden.
+ * Public link for a monitor ("show URL"): only an http(s) `url` from its configuration,
+ * reduced to origin + path — credentials, query string (tokens, API keys) and fragment are
+ * never published. Anything else (hosts, ports, DNS names, connection strings) stays hidden.
  */
 export function publicMonitorUrl(configJson: string): string | null {
   let cfg: unknown;
@@ -249,9 +261,7 @@ export function publicMonitorUrl(configJson: string): string | null {
   try {
     const u = new URL(raw);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    u.username = '';
-    u.password = '';
-    return u.toString();
+    return `${u.origin}${u.pathname}`;
   } catch {
     return null;
   }
@@ -272,20 +282,21 @@ export interface MaintenanceWindow {
 const UPCOMING_MS = 7 * DAY;
 
 /**
- * Maintenance shown on a status page: active maintenances linked to the page or to one of its
- * monitors, evaluated with the engine's window logic (uptime/maintenance): the current window
- * ("under-maintenance") or the next one starting within 7 days ("scheduled").
+ * Maintenance shown on a status page: active maintenances explicitly linked to the page
+ * (`statusPageUids`), evaluated with the engine's window logic (uptime/maintenance): the
+ * current window ("under-maintenance") or the next one starting within 7 days ("scheduled").
+ * A maintenance linked only to monitors of the page is NOT announced (its title and
+ * description may be internal): the affected monitors still show status "maintenance".
  */
-export function maintenanceForPage(db: DB, statusPageId: number, monitorIds: readonly number[], now: number): MaintenanceWindow[] {
+export function maintenanceForPage(db: DB, statusPageId: number, now: number): MaintenanceWindow[] {
   const ids = (
     db
       .prepare(
-        `SELECT id FROM maintenances WHERE active = 1 AND (
-           id IN (SELECT maintenance_id FROM maintenance_status_pages WHERE status_page_id = @page)
-           OR id IN (SELECT maintenance_id FROM maintenance_monitors WHERE monitor_id IN (SELECT value FROM json_each(@ids))))
+        `SELECT id FROM maintenances WHERE active = 1
+           AND id IN (SELECT maintenance_id FROM maintenance_status_pages WHERE status_page_id = ?)
          ORDER BY id LIMIT 100`,
       )
-      .all({ page: statusPageId, ids: JSON.stringify(monitorIds) }) as Array<{ id: number }>
+      .all(statusPageId) as Array<{ id: number }>
   ).map((r) => r.id);
   const out: MaintenanceWindow[] = [];
   for (const m of new MaintenanceRepo(db).byIds(ids)) {

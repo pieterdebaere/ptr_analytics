@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { PASSWORD_MAX, PASSWORD_MIN, isValidEmail, mailboxKey } from '../config.js';
 import type { AppContext } from '../context.js';
 import { requireMember } from '../auth/access.js';
+import { apiKeyState } from '../auth/api-keys.js';
 import { requireAuth } from '../auth/guard.js';
 import { isMfaEnabled, issueMfaChallenge } from '../auth/mfa.js';
 import { schedulePurge } from '../jobs/purge.js';
@@ -71,6 +72,8 @@ export async function accountRoutes(app: FastifyInstance, opts: { ctx: AppContex
     currency: cloud.priceCurrency,
     termsUrl: cloud.termsUrl,
     privacyUrl: cloud.privacyUrl,
+    // Origin public status pages are served on (STATUS_PAGE_ORIGIN), null = this origin.
+    statusPageOrigin: ctx.config.statusPageOrigin,
   }));
 
   app.post('/api/auth/signup', async (request, reply) => {
@@ -195,6 +198,8 @@ export async function accountRoutes(app: FastifyInstance, opts: { ctx: AppContex
       // The reset link proves control of the mailbox.
       ctx.users.markVerified(id, now);
       ctx.authSessions.deleteForUser(id);
+      // A reset is the recovery path after a compromise: API keys go too.
+      apiKeyState(ctx).repo.deleteForUser(id);
       // Every outstanding verify / reset link of the account stops working.
       ctx.userTokens.deleteForUser(id);
       return id;

@@ -9,6 +9,7 @@ import { deliveryRecipients } from './email.js';
 import { DeliveryError } from './http.js';
 import { redactError, secretValues } from './redact.js';
 import { buildMessage, clean } from './render.js';
+import { selfAddressesReady } from '../runtime.js';
 import { notifyState, safeNetFor, sendViaOperator, sendViaSmtp } from './state.js';
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
@@ -51,14 +52,25 @@ function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-function classify(err: unknown): { retryable: boolean; httpStatus: number | null; retryAfterMs?: number; message: unknown } {
+/**
+ * The one message hosted members get for every failure before an HTTP answer arrived (name not
+ * found, destination refused by the policy, connection refused/reset, TLS failure): telling
+ * them apart would let members enumerate internal DNS names or probe ports (no oracle, SPEC §8.1).
+ */
+export const MEMBER_CONNECT_ERROR = 'could not connect to the destination';
+
+function classify(err: unknown, hostedMember: boolean): { retryable: boolean; httpStatus: number | null; retryAfterMs?: number; message: unknown } {
   if (err instanceof DeliveryError) {
     return { retryable: err.opts.retryable, httpStatus: err.opts.httpStatus ?? null, ...(err.opts.retryAfterMs !== undefined ? { retryAfterMs: err.opts.retryAfterMs } : {}), message: err };
   }
   const name = err instanceof Error ? err.name : '';
-  if (name === 'TargetDeniedError') return { retryable: false, httpStatus: null, message: 'destination not allowed' };
   if (name === 'ValidationError') return { retryable: false, httpStatus: null, message: err };
   if (name === 'AbortError' || name === 'TimeoutError') return { retryable: true, httpStatus: null, message: 'timed out' };
+  // Members: identical message AND identical retry behaviour (the "retry n/3" suffix in the log
+  // would otherwise tell "denied" from "not found" apart).
+  // A rejected certificate comes from an allowed, reachable host: keep that hint.
+  if (hostedMember && name !== 'TlsCertificateError') return { retryable: true, httpStatus: null, message: MEMBER_CONNECT_ERROR };
+  if (name === 'TargetDeniedError') return { retryable: false, httpStatus: null, message: 'destination not allowed' };
   // Network errors (ECONNREFUSED, ECONNRESET, DNS …) are transient.
   return { retryable: true, httpStatus: null, message: err };
 }
@@ -97,6 +109,8 @@ export async function deliver(
   const secretList = secretValues(t.secrets);
   try {
     const message = buildMessage(payload);
+    // Hosted mode: never send before the server's own addresses are known (they are denied).
+    await abortable(selfAddressesReady(ctx), controller.signal);
     const net = safeNetFor(ctx, t.hostedMember);
     const sendCtx: NotifySendContext<Record<string, unknown>, Record<string, string>> = {
       config: t.config,
@@ -114,7 +128,7 @@ export async function deliver(
     const res = await abortable(t.provider.send(sendCtx), controller.signal);
     return { ok: true, httpStatus: res.httpStatus ?? null, error: null, retryable: false };
   } catch (err) {
-    const c = classify(err);
+    const c = classify(err, t.hostedMember);
     return {
       ok: false,
       httpStatus: c.httpStatus,

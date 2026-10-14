@@ -8,16 +8,15 @@
 // / SSE event, and a second copy of the secret box and network policy — more moving parts for
 // no gain at the scale this targets. Every callback is guarded so a failing checker, listener or
 // write can never crash the server.
-import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import os from 'node:os';
 import type { AppContext } from '../../context.js';
 import { MaintenanceRepo } from '../data/maintenance.js';
 import { MonitorRepo, type MonitorRecord } from '../data/monitors.js';
-import { MaintenanceIndex, currentWindow } from '../maintenance/index.js';
+import { MaintenanceIndex } from '../maintenance/index.js';
 import { rdapDomainExpiry } from '../checkers/registry.js';
 import { createSafeNet, type TargetPolicyOptions } from '../net/index.js';
-import { uptimeRuntime, type CheckerMap, type EngineControl } from '../runtime.js';
+import { embeddedIPv4, formatIp, parseIp } from '../net/ip.js';
+import { getSelfAddresses, selfAddressesReady, uptimeRuntime, type CheckerMap, type EngineControl } from '../runtime.js';
 import type { CheckContext, CheckResult, SafeNet } from '../types.js';
 import { CheckLimiter } from './limiter.js';
 import { closeProcessor, processorFor, safeError, type ProcessorOptions, type ResultProcessor } from './processor.js';
@@ -43,9 +42,20 @@ export interface EngineOptions {
   watchdogGraceMs?: number;
   stopTimeoutMs?: number;
   perOwnerConcurrency?: number;
+  /** Concurrent checks per (owner, destination). */
   perDestinationConcurrency?: number;
-  /** Addresses that are always denied as targets (default: resolved PUBLIC_URL host in hosted mode). */
+  /**
+   * Checks per minute per destination across all hosted members (UPTIME_DEST_MAX_PER_MIN, default
+   * 60; 0 = unlimited). Over budget, checks are deferred, never dropped. Operator monitors are not budgeted.
+   */
+  destMaxPerMin?: number;
+  /**
+   * Addresses that are always denied as member targets. Default: getSelfAddresses() (hosted mode:
+   * local interfaces + PUBLIC_URL host, refreshed every 10 min; self-hosted: none).
+   */
   selfAddresses?: string[];
+  /** Resolved destination addresses are cached this long per monitor (per-destination limits). */
+  destCacheMs?: number;
   /** RDAP lookup for monitors with domainNotify (tests inject a fake; default: checkers/domain). */
   domainLookup?: (net: SafeNet, host: string, signal: AbortSignal) => Promise<{ domain: string; expiresAt: number | null }>;
 }
@@ -64,7 +74,10 @@ interface Entry {
   sinceWall: number;
   target: string | null;
   host: string | null;
+  /** Normalised destination host (or IP literal) of the check. */
   dest: string | null;
+  /** Resolved address of `dest` (hosted members), used as the limiter key; cached briefly. */
+  destIp: { key: string; at: number } | null;
 }
 
 const PUSH_BUFFER_MS = 1000;
@@ -83,7 +96,10 @@ export class Engine implements EngineControl, EngineHandle {
   private readonly inFlight = new Map<number, { done: Promise<void>; abort: AbortController }>();
   private readonly timers = new Set<unknown>();
   private readonly nets = new Map<boolean, SafeNet>();
-  private selfAddresses: string[];
+  /** The self address list the cached nets were built with (identity compare). */
+  private netsSelf: readonly string[] | null = null;
+  private readonly unsubs: Array<() => void> = [];
+  private resyncTimer: NodeJS.Immediate | null = null;
   private readonly domainLookups = new Map<string, number>();
   private offset = 0;
   private startWall = 0;
@@ -111,10 +127,20 @@ export class Engine implements EngineControl, EngineHandle {
     this.scheduler = new Scheduler(engineClock, (id, due) => this.onDue(id, due));
     const cfg = ctx.config.uptime;
     this.limiter = new CheckLimiter(
-      { global: cfg.checkConcurrency, perOwner: opts.perOwnerConcurrency ?? 4, perDestination: opts.perDestinationConcurrency ?? 2 },
+      {
+        global: cfg.checkConcurrency,
+        perOwner: opts.perOwnerConcurrency ?? 4,
+        perDestination: opts.perDestinationConcurrency ?? 2,
+        destPerMinute: opts.destMaxPerMin ?? destMaxPerMinFromEnv(),
+      },
       () => this.engineNow(),
+      { set: (fn, ms) => this.clock.setTimer(fn, ms), clear: (h) => this.clock.clearTimer(h) },
     );
-    this.selfAddresses = opts.selfAddresses ?? [];
+  }
+
+  /** Hosted mode: checks of member monitors must never reach this server (see getSelfAddresses). */
+  private selfList(): readonly string[] {
+    return this.opts.selfAddresses ?? getSelfAddresses(this.ctx);
   }
 
   /** Engine time: monotonic, aligned with the wall clock at start. */
@@ -140,12 +166,38 @@ export class Engine implements EngineControl, EngineHandle {
     this.unsubscribe = this.processor.onStatusChange((m) => {
       if (m.parentId !== null) this.groupSoon(m.parentId);
     });
-    this.scheduler.start();
+    // Site deletions / suspensions (billing allowance) and account deletions take effect at once,
+    // not only at the next periodic resync.
+    this.unsubs.push(
+      this.ctx.sites.onChange(() => this.resyncSoon()),
+      this.ctx.users.onChange(() => this.resyncSoon()),
+    );
     this.every(this.opts.resyncMs ?? 60_000, () => this.resync());
     this.every(this.opts.maintenanceTickMs ?? 30_000, () => this.maintenanceTick());
     uptimeRuntime(this.ctx).engine = this;
-    if (this.opts.selfAddresses === undefined && this.ctx.config.cloud.signupEnabled) void this.resolveSelf();
+    // Hosted mode: no check runs before the server's own addresses are known (they are denied as
+    // member targets). Checks scheduled meanwhile (startup, run-now, new monitors) simply wait.
+    if (this.opts.selfAddresses !== undefined || !this.ctx.config.cloud.signupEnabled) this.scheduler.start();
+    else {
+      void selfAddressesReady(this.ctx).then(() => {
+        if (!this.stopped) this.scheduler.start();
+      });
+    }
     this.ctx.log.info(`Uptime engine started (${this.entries.size} monitor(s)).`);
+  }
+
+  /** A promise that resolves once checks can run (tests, startup diagnostics). */
+  ready(): Promise<void> {
+    if (this.opts.selfAddresses !== undefined || !this.ctx.config.cloud.signupEnabled) return Promise.resolve();
+    return selfAddressesReady(this.ctx);
+  }
+
+  private resyncSoon(): void {
+    if (this.stopped || this.resyncTimer !== null) return;
+    this.resyncTimer = setImmediate(() => {
+      this.resyncTimer = null;
+      if (!this.stopped) this.guard(() => this.resync());
+    });
   }
 
   async stop(): Promise<void> {
@@ -156,6 +208,9 @@ export class Engine implements EngineControl, EngineHandle {
     this.scheduler.stop();
     for (const t of this.timers) this.clock.clearTimer(t);
     this.timers.clear();
+    for (const u of this.unsubs.splice(0)) u();
+    if (this.resyncTimer !== null) clearImmediate(this.resyncTimer);
+    this.resyncTimer = null;
     this.unsubscribe?.();
     this.limiter.drain('engine stopping');
     const pending = [...this.inFlight.values()];
@@ -271,10 +326,22 @@ export class Engine implements EngineControl, EngineHandle {
     if (prev) {
       // Update in place: a check may be running for this entry (its `running` flag and the
       // identity checks in reschedule() must stay valid).
-      Object.assign(prev, { m, phase, intervalMs, target, host, dest });
+      const destIp = prev.dest === dest && prev.m.ownerId === m.ownerId ? prev.destIp : null;
+      Object.assign(prev, { m, phase, intervalMs, target, host, dest, destIp });
       return prev;
     }
-    const e: Entry = { m, phase, intervalMs, lastDue: this.engineNow(), running: false, sinceWall: this.clock.wall(), target, host, dest };
+    const e: Entry = {
+      m,
+      phase,
+      intervalMs,
+      lastDue: this.engineNow(),
+      running: false,
+      sinceWall: this.clock.wall(),
+      target,
+      host,
+      dest,
+      destIp: null,
+    };
     this.entries.set(m.id, e);
     return e;
   }
@@ -419,13 +486,61 @@ export class Engine implements EngineControl, EngineHandle {
     this.reschedule(e, status);
   }
 
+  private hostedMember(m: MonitorRecord): boolean {
+    return this.ctx.config.cloud.signupEnabled && m.ownerId !== null;
+  }
+
   private submitCheck(e: Entry): void {
     e.running = true;
     const m = e.m;
-    const owner = this.ctx.config.cloud.signupEnabled ? m.ownerId : null;
+    const member = this.hostedMember(m);
+    // Hosted members: the destination is keyed by its resolved address, so different names of one
+    // host (aliases, wildcard DNS, trailing dots, IP spellings) share its slots and budget.
+    if (member && e.dest !== null && !isIP(e.dest)) {
+      const cached = e.destIp;
+      if (cached && this.clock.wall() - cached.at < (this.opts.destCacheMs ?? 5 * 60_000)) {
+        this.enqueue(e, cached.key);
+        return;
+      }
+      void this.resolveDest(e).then((key) => {
+        if (this.stopped || this.entries.get(m.id) !== e) {
+          e.running = false;
+          return;
+        }
+        this.enqueue(e, key);
+      });
+      return;
+    }
+    this.enqueue(e, e.dest);
+  }
+
+  /** Resolved destination key (first address, canonical), or the host name when resolution fails. */
+  private async resolveDest(e: Entry): Promise<string | null> {
+    const host = e.dest as string;
+    const ctrl = new AbortController();
+    const t = this.clock.setTimer(() => ctrl.abort(), 5000);
+    try {
+      const r = await this.netFor(true).resolve(host, { signal: ctrl.signal });
+      const first = r.addresses.map((a) => destinationOf(a.address)).filter((x): x is string => x !== null).sort()[0];
+      const key = first ?? host;
+      e.destIp = { key, at: this.clock.wall() };
+      return key;
+    } catch {
+      // denied / unknown names fail fast in the check itself; keep the name as the key
+      return host;
+    } finally {
+      this.clock.clearTimer(t);
+    }
+  }
+
+  private enqueue(e: Entry, dest: string | null): void {
+    const m = e.m;
+    const member = this.hostedMember(m);
+    const owner = member ? m.ownerId : null;
     this.limiter.submit({
       owner,
-      dest: e.dest,
+      dest,
+      budgeted: member,
       deadline: this.engineNow() + e.intervalMs,
       drop: (reason) => {
         e.running = false;
@@ -466,7 +581,7 @@ export class Engine implements EngineControl, EngineHandle {
         secrets,
         timeoutMs: m.timeoutMs,
         signal: ctrl.signal,
-        net: this.netFor(this.ctx.config.cloud.signupEnabled && m.ownerId !== null),
+        net: this.netFor(this.hostedMember(m)),
         userAgent: this.ctx.config.uptime.userAgent,
         maxBodyBytes: this.ctx.config.uptime.maxBodyBytes,
         uptime: this.ctx.config.uptime,
@@ -520,7 +635,7 @@ export class Engine implements EngineControl, EngineHandle {
     const t = this.clock.setTimer(() => ctrl.abort(), 15_000);
     let net: SafeNet;
     try {
-      net = this.netFor(this.ctx.config.cloud.signupEnabled && e.m.ownerId !== null);
+      net = this.netFor(this.hostedMember(e.m));
     } catch {
       this.clock.clearTimer(t);
       return;
@@ -535,38 +650,24 @@ export class Engine implements EngineControl, EngineHandle {
       .finally(() => this.clock.clearTimer(t));
   }
 
+  /**
+   * SafeNet for checks (and RDAP lookups) of operator / member monitors. In hosted mode the
+   * server's own addresses are denied (self-hosted: none, documented in §8.1); the nets are
+   * rebuilt whenever the periodically refreshed self address list changes.
+   */
   private netFor(hostedMember: boolean): SafeNet {
+    const self = this.selfList();
+    if (self !== this.netsSelf) {
+      this.nets.clear();
+      this.netsSelf = self;
+    }
     let net = this.nets.get(hostedMember);
     if (!net) {
       const factory = this.opts.netFactory ?? createSafeNet;
-      net = factory({ config: this.ctx.config.uptime, selfAddresses: this.selfAddresses, hostedMember });
+      net = factory({ config: this.ctx.config.uptime, selfAddresses: self, hostedMember });
       this.nets.set(hostedMember, net);
     }
     return net;
-  }
-
-  /** Hosted mode: never let members target this server (PUBLIC_URL host and local interfaces). */
-  private async resolveSelf(): Promise<void> {
-    const addrs = new Set<string>();
-    for (const list of Object.values(os.networkInterfaces())) for (const a of list ?? []) addrs.add(a.address.split('%')[0] as string);
-    const url = this.ctx.config.publicUrl;
-    if (url) {
-      try {
-        const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
-        if (isIP(host)) addrs.add(host);
-        else {
-          const r = new Resolver({ timeout: 3000, tries: 2 });
-          const [v4, v6] = await Promise.allSettled([r.resolve4(host), r.resolve6(host)]);
-          if (v4.status === 'fulfilled') v4.value.forEach((a) => addrs.add(a));
-          if (v6.status === 'fulfilled') v6.value.forEach((a) => addrs.add(a));
-        }
-      } catch {
-        // best effort
-      }
-    }
-    if (this.stopped) return;
-    this.selfAddresses = [...addrs];
-    this.nets.clear();
   }
 
   // ---------------------------------------------------------------- periodic work
@@ -608,12 +709,17 @@ export class Engine implements EngineControl, EngineHandle {
     }
   }
 
-  /** maint_start / maint_end notifications (once per window, persisted across restarts). */
+  /**
+   * maint_start / maint_end notifications (once per window, persisted across restarts). Cheap:
+   * active maintenances come from the in-memory index (window lookups cached), the database is
+   * only asked for paused maintenances whose window was announced and must still be closed.
+   */
   maintenanceTick(): void {
     const wall = this.clock.wall();
     this.reevaluateMaintenance();
-    for (const m of this.maintRepo.list('all')) {
-      const w = m.active ? currentWindow(m, wall) : null;
+    const list = [...this.maint.active(), ...this.maintRepo.listPausedAnnounced()];
+    for (const m of list) {
+      const w = m.active ? this.maint.window(m, wall) : null;
       const start = w ? w.start : null;
       if (start === m.notifiedStart) continue;
       if (start !== null && m.notifiedStart !== null && start !== m.notifiedStart) {
@@ -623,6 +729,7 @@ export class Engine implements EngineControl, EngineHandle {
       const event = start !== null ? 'maint_start' : 'maint_end';
       this.processor.maintenanceNotice(event, m, this.maintRepo.monitorIds(m.id));
       this.maintRepo.setNotifiedStart(m.id, start);
+      m.notifiedStart = start; // the index keeps this record until its next reload
     }
   }
 
@@ -657,19 +764,42 @@ export function scrubSecrets(msg: string, secrets: Record<string, string>): stri
   return out;
 }
 
-/** Destination key for the per-destination limit: the host of a URL / host:port / host. */
+/**
+ * Destination key for the per-destination limits: the host of a URL / host:port / host, lower-case
+ * without trailing dots; IP literals in canonical form, IPv6 embeddings of IPv4 (mapped, NAT64 …)
+ * as the IPv4 address, so different spellings of one destination share one key.
+ */
 export function destinationOf(target: string | null): string | null {
   if (!target) return null;
+  let host: string | null;
   try {
-    if (target.includes('://')) return new URL(target).hostname.toLowerCase() || null;
+    if (target.includes('://')) host = new URL(target).hostname.toLowerCase() || null;
+    else {
+      const t = target.trim().toLowerCase();
+      if (t.startsWith('[')) host = t.slice(1, t.indexOf(']') > 0 ? t.indexOf(']') : undefined) || null;
+      else if (isIP(t) === 6) host = t;
+      else {
+        const colon = t.indexOf(':');
+        host = colon > 0 && t.indexOf(':', colon + 1) === -1 ? t.slice(0, colon) : t.split('/')[0] || null;
+      }
+    }
   } catch {
     return null;
   }
-  const t = target.trim().toLowerCase();
-  if (t.startsWith('[')) return t.slice(1, t.indexOf(']') > 0 ? t.indexOf(']') : undefined) || null;
-  const colon = t.indexOf(':');
-  if (colon > 0 && t.indexOf(':', colon + 1) === -1) return t.slice(0, colon);
-  return t.split('/')[0] || null;
+  if (!host) return null;
+  host = host.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!host) return null;
+  const ip = parseIp(host);
+  if (ip) return formatIp(embeddedIPv4(ip) ?? ip);
+  return host;
+}
+
+/** UPTIME_DEST_MAX_PER_MIN (default 60, 0 = unlimited): member checks per destination per minute. */
+export function destMaxPerMinFromEnv(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['UPTIME_DEST_MAX_PER_MIN']?.trim();
+  if (raw === undefined || raw === '') return 60;
+  if (!/^\d{1,6}$/.test(raw)) return 60;
+  return Number(raw);
 }
 
 /** Create and start an engine (tests pass fakes through `opts`). */

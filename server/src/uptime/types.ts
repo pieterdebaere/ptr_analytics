@@ -127,6 +127,8 @@ export interface HttpRequestOptions {
   signal: AbortSignal;
   /** Client certificate (mTLS), PEM. */
   clientCert?: { cert: string; key: string; ca?: string };
+  /** Follow https → http redirects (default false; always false for hosted members). */
+  allowDowngrade?: boolean;
 }
 
 export interface HttpResponse {

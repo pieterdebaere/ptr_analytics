@@ -99,7 +99,8 @@ export type PolicyDecision = { ok: true; category: IpCategory } | { ok: false; c
  * Decision order for an address:
  *  1. deny list (CIDR, also matched against an embedded IPv4) and the server's own addresses → deny
  *  2. unspecified / broadcast / multicast / reserved → deny (always)
- *  3. allow list (CIDR) → allow
+ *  3. allow list (CIDR) → allow — never for hosted members: the allow list is an operator
+ *     exception and must not open private or metadata ranges to tenants
  *  4. link-local + cloud metadata → allow only with UPTIME_ALLOW_METADATA (never for hosted members)
  *  5. private / loopback / CGNAT / ULA and special-purpose ranges → hosted members: deny; a hostname
  *     on the allow list: allow; otherwise UPTIME_PRIVATE_TARGETS
@@ -115,7 +116,8 @@ export class TargetPolicy {
 
   constructor(settings: PolicySettings) {
     this.hostedMember = settings.hostedMember === true;
-    this.allow = hostRules(settings.config.targetAllowlist);
+    // L1: hosted members ignore the allow list entirely (CIDRs and hostnames).
+    this.allow = hostRules(this.hostedMember ? [] : settings.config.targetAllowlist);
     this.deny = hostRules(settings.config.targetDenylist);
     this.self = hostRules(settings.selfAddresses ?? []);
     this.privateAllowed = !this.hostedMember && settings.config.privateTargets === 'allow';

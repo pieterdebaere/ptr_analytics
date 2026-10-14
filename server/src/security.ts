@@ -62,8 +62,14 @@ const CSRF_EXEMPT_ROUTES = new Set([
   // RFC 8058 one-click unsubscribe: mail providers POST without our header; authorised by the
   // 256-bit token in the URL, the only effect is unsubscribing that one recipient.
   '/api/notification-channels/unsubscribe',
-  // Uptime push monitors (spec 8.4): public, cookie-less, authorised by the token in the URL.
+  // E-mail double opt-in answer and re-subscribe (plain HTML forms on the pages behind the links in
+  // our mails): authorised by the 256-bit token in the POST body, effect limited to that one recipient.
+  '/api/notification-channels/verify',
+  '/api/notification-channels/resubscribe',
+  // Uptime push monitors (spec 8.4): public, cookie-less, authorised by the token in the URL
+  // or in the X-Push-Token header.
   '/api/push/:token',
+  '/api/push',
 ]);
 
 export function registerCsrfCheck(app: FastifyInstance, config: Config): void {

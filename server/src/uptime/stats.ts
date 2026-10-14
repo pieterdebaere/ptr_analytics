@@ -118,6 +118,49 @@ export function recentUptimes(db: DB, monitorIds: readonly number[], now: number
   return out;
 }
 
+/** Number of recent heartbeats included with every monitor in list responses. */
+export const RECENT_BEATS = 50;
+
+export interface RecentBeat {
+  t: number;
+  status: number;
+  latencyMs: number | null;
+}
+
+/**
+ * The last `limit` heartbeats of many monitors (oldest first), one query per 400 monitors: a CTE
+ * finds each monitor's cut-off timestamp with one primary-key seek (`ORDER BY ts DESC LIMIT 1
+ * OFFSET limit-1`) and the join reads exactly the rows after it.
+ */
+export function recentBeats(db: DB, monitorIds: readonly number[], limit = RECENT_BEATS): Map<number, RecentBeat[]> {
+  const out = new Map<number, RecentBeat[]>();
+  const n = Math.max(1, Math.min(500, Math.floor(limit)));
+  for (const chunk of chunks(monitorIds, 400)) {
+    if (chunk.length === 0) continue;
+    const rows = db
+      .prepare(
+        `WITH ids(id) AS (VALUES ${chunk.map(() => '(?)').join(',')}),
+         cut AS (
+           SELECT id, COALESCE((SELECT ts FROM heartbeats WHERE monitor_id = ids.id ORDER BY ts DESC LIMIT 1 OFFSET ${n - 1}), 0) AS c FROM ids
+         )
+         SELECT h.monitor_id AS m, h.ts AS t, h.status AS s, h.latency_ms AS l
+         FROM cut JOIN heartbeats h ON h.monitor_id = cut.id AND h.ts >= cut.c
+         ORDER BY h.monitor_id, h.ts`,
+      )
+      .raw()
+      .all(...chunk) as Array<[number, number, number, number | null]>;
+    for (const [m, t, status, latencyMs] of rows) {
+      let list = out.get(m);
+      if (!list) {
+        list = [];
+        out.set(m, list);
+      }
+      list.push({ t, status, latencyMs });
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- heartbeat series
 
 export interface SeriesPoint {

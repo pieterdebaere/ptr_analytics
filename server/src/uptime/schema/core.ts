@@ -1,9 +1,11 @@
 // Migration v6, part 1 — monitors, heartbeats, stats, maintenance, tags (owner: uptime core).
 // v6 is not released yet: this SQL may still be edited. After release, append new migrations instead.
+// Ids of monitors, tags and maintenances are AUTOINCREMENT: an id is never handed out twice, so rows
+// that reference a deleted object by id (links, outbox/log rows, late writes) never reach a new one.
 // No ON DELETE CASCADE on large tables: soft delete + chunked background purge (see jobs/purge.ts).
 export const CORE_SCHEMA = `
 CREATE TABLE monitors (
-  id               INTEGER PRIMARY KEY,
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,       -- never reused: late writes / links of a purged monitor cannot reach a new one
   uid              TEXT NOT NULL UNIQUE,                    -- 12 chars [a-z0-9], external id
   site_id          TEXT NOT NULL REFERENCES sites(id),      -- tenancy, billing and soft delete follow the site
   parent_id        INTEGER REFERENCES monitors(id),         -- group monitor (same site, no cycles)
@@ -141,7 +143,7 @@ CREATE TABLE domain_expiry (
 );
 
 CREATE TABLE tags (
-  id       INTEGER PRIMARY KEY,
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
   uid      TEXT NOT NULL UNIQUE,
   owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL = operator tag (few rows: cascade is cheap)
   name     TEXT NOT NULL,
@@ -157,7 +159,7 @@ CREATE TABLE monitor_tags (
 CREATE INDEX monitor_tags_tag ON monitor_tags(tag_id);
 
 CREATE TABLE maintenances (
-  id            INTEGER PRIMARY KEY,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
   uid           TEXT NOT NULL UNIQUE,
   owner_id      INTEGER REFERENCES users(id) ON DELETE CASCADE, -- NULL = operator
   title         TEXT NOT NULL,

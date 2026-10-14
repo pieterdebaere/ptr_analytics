@@ -83,8 +83,9 @@ describe('migration v4 (hosted mode)', () => {
     try {
       expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
       expect(db.prepare(`SELECT COUNT(*) AS n FROM events WHERE site_id = 'zzzzzzzzzzzz'`).get()).toEqual({ n: 1 });
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toMatch(/pre-existing row\(s\) in auth_sessions/);
+      // reported by every users rebuild (v4, v7), never fatal
+      expect(warnings.length).toBeGreaterThanOrEqual(1);
+      for (const w of warnings) expect(w).toMatch(/pre-existing row\(s\) in auth_sessions/);
       expect(db.prepare('SELECT COUNT(*) AS n FROM users').get()).toEqual({ n: 2 });
     } finally {
       db.close();

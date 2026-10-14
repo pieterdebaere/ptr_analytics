@@ -45,16 +45,22 @@ export function escapeXml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c] as string);
 }
 
-// eslint-disable-next-line no-control-regex
-const UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁯﻿\ud800-\udfff]/;
+/**
+ * Characters never put into a badge: C0/C1 controls, zero-width / bidi / format characters,
+ * lone surrogates (invalid UTF-16 → invalid XML), and the noncharacters U+FDD0–U+FDEF and
+ * U+xFFFE / U+xFFFF of every plane (U+FFFE / U+FFFF are not XML 1.0 characters at all and
+ * would make the SVG malformed). Applied per code point (`u` flag).
+ */
+// eslint-disable-next-line no-control-regex, no-misleading-character-class
+const UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufdd0-\ufdef\ufffe\uffff\p{Cs}]|[\u{1fffe}\u{1ffff}\u{2fffe}\u{2ffff}\u{3fffe}\u{3ffff}\u{4fffe}\u{4ffff}\u{5fffe}\u{5ffff}\u{6fffe}\u{6ffff}\u{7fffe}\u{7ffff}\u{8fffe}\u{8ffff}\u{9fffe}\u{9ffff}\u{afffe}\u{affff}\u{bfffe}\u{bffff}\u{cfffe}\u{cffff}\u{dfffe}\u{dffff}\u{efffe}\u{effff}\u{ffffe}\u{fffff}\u{10fffe}\u{10ffff}]/u;
 
-/** Validate a user-supplied label: ≤ 64 code points, no control / bidi / format characters. */
+/** Validate a user-supplied label: ≤ 64 code points, no control / bidi / format / non-XML characters. */
 export function validLabel(v: string): boolean {
   return [...v].length <= MAX_BADGE_TEXT && !UNSAFE_RE.test(v);
 }
 
 function clip(s: string): string {
-  const cps = [...s.replace(new RegExp(UNSAFE_RE.source, 'g'), '')];
+  const cps = [...s.replace(new RegExp(UNSAFE_RE.source, 'gu'), '')];
   return cps.length > MAX_BADGE_TEXT ? `${cps.slice(0, MAX_BADGE_TEXT - 1).join('')}…` : cps.join('');
 }
 

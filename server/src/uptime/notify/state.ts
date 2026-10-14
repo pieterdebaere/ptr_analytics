@@ -5,6 +5,7 @@ import type { AppContext } from '../../context.js';
 import { Mailer, safeHeaders, smtpTransport, type MailTransport } from '../../mail.js';
 import { RateLimiter } from '../../lib/rate-limit.js';
 import { createSafeNet } from '../net/index.js';
+import { getSelfAddresses } from '../runtime.js';
 import type { SafeNet } from '../types.js';
 import type { OutgoingNotifyMail } from './context.js';
 import { DeliveryError } from './http.js';
@@ -15,7 +16,7 @@ const DAY = 24 * HOUR;
 
 /** Test seams (fake network, captured mail, shorter timeouts). */
 export interface NotifyOverrides {
-  net?: (opts: { hostedMember: boolean }) => SafeNet;
+  net?: (opts: { hostedMember: boolean; selfAddresses: readonly string[] }) => SafeNet;
   /** Transport for the operator mailer used by self-hosted e-mail channels (no SIGNUP_ENABLED). */
   mailTransport?: MailTransport;
   /** Replaces direct SMTP delivery (self-hosted channel-specific SMTP servers). */
@@ -34,7 +35,8 @@ export interface NotifyState {
   memberHourly: RateLimiter;
   /** At most one "cap reached" warning per member and hour in the server log. */
   capWarned: RateLimiter;
-  nets: Map<string, SafeNet>;
+  /** SafeNet per policy, with the self address list it was built with (rebuilt when that list is refreshed). */
+  nets: Map<string, { net: SafeNet; self: readonly string[] }>;
   selfHostedMailer: Mailer | null | undefined;
 }
 
@@ -71,16 +73,25 @@ export function isHosted(ctx: AppContext): boolean {
   return ctx.config.cloud.signupEnabled;
 }
 
-/** SafeNet for a channel: members in hosted mode get the strict policy (https only, no private targets). */
+/**
+ * SafeNet for a channel: members in hosted mode get the strict policy (https only, no private
+ * targets). In hosted mode the server's own addresses (local interfaces, PUBLIC_URL host) are
+ * denied for all notification traffic, like for the engine (getSelfAddresses() is empty when
+ * self-hosted); the cached instance is rebuilt whenever that list is refreshed.
+ */
 export function safeNetFor(ctx: AppContext, hostedMember: boolean): SafeNet {
   const s = notifyState(ctx);
   const key = hostedMember ? 'member' : 'operator';
-  let net = s.nets.get(key);
-  if (!net) {
-    net = s.overrides.net ? s.overrides.net({ hostedMember }) : createSafeNet({ config: ctx.config.uptime, hostedMember });
-    s.nets.set(key, net);
+  const self = getSelfAddresses(ctx);
+  let entry = s.nets.get(key);
+  if (!entry || entry.self !== self) {
+    const net = s.overrides.net
+      ? s.overrides.net({ hostedMember, selfAddresses: self })
+      : createSafeNet({ config: ctx.config.uptime, hostedMember, selfAddresses: self });
+    entry = { net, self };
+    s.nets.set(key, entry);
   }
-  return net;
+  return entry.net;
 }
 
 /**

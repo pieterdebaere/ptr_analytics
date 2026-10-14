@@ -3,7 +3,20 @@ import { PASSWORD_MAX, PASSWORD_MIN, mailboxKey } from '../config.js';
 import type { AppContext } from '../context.js';
 import { sessionToken } from '../auth/cookie.js';
 import { currentUser, mfaSetupRequired, requireAuth } from '../auth/guard.js';
-import { answerMfaChallenge, challengeUser, dropChallenges, isMfaEnabled, issueMfaChallenge, mfaLimits, mfaStatus } from '../auth/mfa.js';
+import { apiKeyState } from '../auth/api-keys.js';
+import {
+  answerMfaChallenge,
+  challengeUser,
+  dropChallenges,
+  isMfaEnabled,
+  issueMfaChallenge,
+  mfaGate,
+  mfaLimits,
+  mfaStatus,
+  recordMfaFailure,
+  recordMfaSuccess,
+} from '../auth/mfa.js';
+import { notifySecurity } from '../auth/notices.js';
 import { resendVerification } from '../auth/verification.js';
 import { SESSION_TTL_MS, sessionCookieName } from '../auth/sessions.js';
 import { field, objectBody } from '../lib/body.js';
@@ -84,8 +97,10 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
 
   /**
    * Second login step: `{mfaToken, code | recoveryCode}` → session. Limited per client IP,
-   * per account and per token (5 attempts); the token is single use and dies with a password
-   * change. Everything after the body checks is synchronous (no interleaving requests).
+   * per token (5 attempts) and per account (progressive lockout + daily cap, auth/mfa.ts; a
+   * successful login does not reset the daily budget); the token is single use and dies with
+   * a password change. Everything after the body checks is synchronous (no interleaving
+   * requests).
    */
   app.post('/api/auth/login/mfa', async (request, reply) => {
     const body = objectBody(request.body);
@@ -99,15 +114,22 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const ipKey = rateLimitKey(clientIp(request));
     if (!limits.ip.hit(ipKey)) throw new HttpError(429, 'too many attempts, try again later');
     const owner = challengeUser(ctx, mfaToken);
-    if (owner !== null && !limits.user.hit(String(owner))) throw new HttpError(429, 'too many attempts, try again later');
+    if (owner !== null) {
+      const gate = mfaGate(ctx, owner);
+      if (!gate.ok) throw new HttpError(429, `too many wrong codes, try again in ${Math.ceil(gate.retryAfterMs / 60_000)} min`, 'mfa_locked');
+    }
     const res = answerMfaChallenge(ctx, mfaToken, { code, recoveryCode }, (id) => ctx.users.passwordHash(id));
     if (!res.ok) {
       if (res.reason === 'invalid_token') throw new HttpError(401, 'this sign-in has expired, please sign in again', 'mfa_expired');
+      if (owner !== null && recordMfaFailure(ctx, owner).alert) {
+        const victim = ctx.users.byId(owner);
+        if (victim) notifySecurity(ctx, victim, { kind: 'mfa-failures' });
+      }
       throw new HttpError(401, 'invalid code', 'invalid_code');
     }
     const user = ctx.users.byId(res.userId);
     if (!user || (user.role === 'member' && !user.emailVerified)) throw new HttpError(401, 'this sign-in has expired, please sign in again', 'mfa_expired');
-    limits.user.reset(String(user.id));
+    recordMfaSuccess(ctx, user.id);
     ctx.limits.loginEmailIp.reset(`${mailboxKey(user.email)}\n${ipKey}`);
     const { token } = ctx.authSessions.create(user.id, ctx.now());
     setSessionCookie(ctx, reply, token);
@@ -152,6 +174,8 @@ export async function authRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     ctx.limits.loginEmailIp.reset(`${mailboxKey(user.email)}\n${ipKey}`);
     ctx.users.setPasswordHash(user.id, await hashPassword(newPassword));
     ctx.authSessions.deleteForUser(user.id, request.authTokenHash ?? undefined);
+    // API keys minted with a stolen session must not survive the owner's password change.
+    apiKeyState(ctx).repo.deleteForUser(user.id);
     dropChallenges(ctx, user.id);
     return reply.code(204).send();
   });

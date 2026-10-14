@@ -4,9 +4,12 @@
 // notify_channels.owner_id cascades on user deletion (a deleted member's channels and their
 // encrypted secrets go with it). The other tables reference channels without foreign keys;
 // the dispatcher's housekeeping removes orphaned link/outbox/log rows in small chunks.
+// Channel ids are AUTOINCREMENT: an id is never handed out again, so rows left behind by a
+// deleted channel can never attach to another tenant's new channel (the dispatcher and the log
+// endpoint additionally check that the monitor of a row belongs to the channel's owner).
 export const NOTIFY_SCHEMA = `
 CREATE TABLE notify_channels (
-  id                   INTEGER PRIMARY KEY,
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   uid                  TEXT NOT NULL UNIQUE,
   owner_id             INTEGER REFERENCES users(id) ON DELETE CASCADE, -- NULL = operator channel
   type                 TEXT NOT NULL,                       -- provider id from the provider registry
@@ -38,6 +41,19 @@ CREATE TABLE notify_email_recipients (
   created_at        INTEGER NOT NULL,
   PRIMARY KEY (channel_id, address)
 ) WITHOUT ROWID;
+
+-- Hosted members' e-mail opt-outs: an address that unsubscribed from (or declined) a channel of
+-- this owner never gets an opt-in mail from this owner again — only the recipient can undo it
+-- (re-subscribe form, authorised by the recipient's unsubscribe token). Survives removing the
+-- address from the channel and deleting the channel.
+CREATE TABLE notify_email_optouts (
+  owner_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  address          TEXT NOT NULL,
+  unsub_token_hash TEXT NOT NULL,                           -- sha256 hex of the recipient's last unsubscribe token
+  created_at       INTEGER NOT NULL,
+  PRIMARY KEY (owner_id, address)
+) WITHOUT ROWID;
+CREATE INDEX notify_email_optouts_token ON notify_email_optouts(unsub_token_hash);
 
 CREATE TABLE monitor_channels (
   monitor_id INTEGER NOT NULL,

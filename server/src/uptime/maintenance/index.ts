@@ -2,7 +2,7 @@
 // to an active maintenance whose current window contains `now` (ANALYSIS §6.3).
 import type { DB } from '../../db/index.js';
 import { MaintenanceRepo, type MaintenanceRecord } from '../data/maintenance.js';
-import { currentWindow, maintenanceStatus, nextWindow, type Window } from './windows.js';
+import { currentWindow, maintenanceStatus, nextWindow, type MaintenanceDef, type Window } from './windows.js';
 
 export { currentWindow, maintenanceStatus, nextWindow } from './windows.js';
 export type { MaintenanceDef, MaintenanceStatus, Window } from './windows.js';
@@ -101,9 +101,54 @@ export function underMaintenance(db: DB, monitorIds: readonly number[], now: num
   return out;
 }
 
-/** Computed status + next/current window of a maintenance (API, status pages). */
-export function maintenanceInfo(m: MaintenanceRecord, now: number): { status: ReturnType<typeof maintenanceStatus>; nextWindow: Window | null } {
+export interface MaintenanceInfo {
+  status: ReturnType<typeof maintenanceStatus>;
+  nextWindow: Window | null;
+}
+
+/** Everything the evaluation depends on (a changed definition never hits a stale entry). */
+function fingerprint(m: MaintenanceDef & { id?: number; updatedAt?: number }): string {
+  return [
+    m.id ?? '',
+    m.updatedAt ?? '',
+    m.active ? 1 : 0,
+    m.strategy,
+    m.tz,
+    m.startsAt,
+    m.endsAt,
+    m.timeStart,
+    m.timeEnd,
+    m.weekdays.join(','),
+    m.daysOfMonth.join(','),
+    m.intervalDays,
+    m.cron,
+    m.durationS,
+  ].join('|');
+}
+
+const INFO_MEMO_MAX = 10_000;
+const infoMemo = new Map<string, { at: number; until: number; info: MaintenanceInfo }>();
+
+/**
+ * Computed status + next/current window of a maintenance (API, status pages). Memoised per
+ * definition (id, updatedAt and every schedule field) until the next instant at which the answer
+ * can change: the end of the current minute, the end of the current window, the start of the next
+ * window or endsAt, whichever comes first.
+ */
+export function maintenanceInfo(m: MaintenanceDef & { id?: number; updatedAt?: number }, now: number): MaintenanceInfo {
+  const key = fingerprint(m);
+  const hit = infoMemo.get(key);
+  if (hit && now >= hit.at && now < hit.until) return hit.info;
   const status = maintenanceStatus(m, now);
   const w = nextWindow(m, now);
-  return { status, nextWindow: w && Number.isFinite(w.end) ? w : null };
+  const info: MaintenanceInfo = { status, nextWindow: w && Number.isFinite(w.end) ? w : null };
+  let until = (Math.floor(now / 60_000) + 1) * 60_000;
+  if (w) {
+    if (w.start > now) until = Math.min(until, w.start);
+    else if (Number.isFinite(w.end)) until = Math.min(until, w.end);
+  }
+  if (m.endsAt !== null && m.endsAt > now) until = Math.min(until, m.endsAt);
+  if (infoMemo.size >= INFO_MEMO_MAX) infoMemo.clear();
+  infoMemo.set(key, { at: now, until, info });
+  return info;
 }

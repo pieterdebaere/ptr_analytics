@@ -112,6 +112,7 @@ describe('sign-up and verification', () => {
       currency: 'eur',
       termsUrl: 'https://example.com/terms',
       privacyUrl: 'https://example.com/privacy',
+      statusPageOrigin: null,
     });
   });
 

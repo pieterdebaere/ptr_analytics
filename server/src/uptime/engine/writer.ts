@@ -7,14 +7,20 @@ import { emptyDelta, mergeDelta, type StatDelta } from './aggregate.js';
 
 export type WriteOp = (s: Statements) => void;
 
-/** A statement whose last parameter (the monitor id of the EXISTS guard) is appended automatically. */
+/**
+ * A statement guarded by `WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ? AND uid = ?)`: `run(uid,
+ * id, ...)` appends the monitor id (first value) and the uid. Comparing the uid too means a late
+ * write can never land on another monitor, even if an id were ever handed out again (ids are
+ * AUTOINCREMENT since v6; this is defence in depth, audit HIGH 1).
+ */
 export interface Guarded {
-  run(...args: unknown[]): Database.RunResult;
+  run(uid: string, ...args: unknown[]): Database.RunResult;
 }
 
-/** `... WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)`: repeat the first argument (the monitor id). */
+const GUARD = 'EXISTS (SELECT 1 FROM monitors WHERE id = ? AND uid = ?)';
+
 function guarded(stmt: Database.Statement): Guarded {
-  return { run: (...args: unknown[]) => stmt.run(...args, args[0]) };
+  return { run: (uid: string, ...args: unknown[]) => stmt.run(...args, args[0], uid) };
 }
 
 export interface Statements {
@@ -27,6 +33,7 @@ export interface Statements {
   outageClose: Database.Statement;
   outbox: Database.Statement;
   channels: Database.Statement;
+  monitorChannels: Database.Statement;
   tls: Guarded;
   noticeExists: Database.Statement;
   noticeInsert: Database.Statement;
@@ -37,7 +44,7 @@ export interface Statements {
 
 const STAT_UPSERT = (table: string): string => `
   INSERT INTO ${table} (monitor_id, bucket, up_ms, down_ms, pending_ms, maint_ms, checks, failures, lat_n, lat_sum, lat_min, lat_max)
-  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${GUARD}
   ON CONFLICT (monitor_id, bucket) DO UPDATE SET
     up_ms = up_ms + excluded.up_ms, down_ms = down_ms + excluded.down_ms,
     pending_ms = pending_ms + excluded.pending_ms, maint_ms = maint_ms + excluded.maint_ms,
@@ -51,22 +58,22 @@ function prepare(db: DB): Statements {
     db,
     // Rows are only written while the monitor row exists (no orphans after a purge).
     heartbeat: guarded(db.prepare(
-      'INSERT OR REPLACE INTO heartbeats (monitor_id, ts, status, latency_ms, msg) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)',
+      `INSERT OR REPLACE INTO heartbeats (monitor_id, ts, status, latency_ms, msg) SELECT ?, ?, ?, ?, ? WHERE ${GUARD}`,
     )),
     state: guarded(db.prepare(
       `INSERT INTO monitor_state (monitor_id, status, retries, failed_since_notify, last_check_at, last_change_at, last_push_at,
          last_latency_ms, last_msg, open_outage_id)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${GUARD}
        ON CONFLICT (monitor_id) DO UPDATE SET status = excluded.status, retries = excluded.retries,
          failed_since_notify = excluded.failed_since_notify, last_check_at = excluded.last_check_at,
          last_change_at = excluded.last_change_at, last_push_at = excluded.last_push_at,
          last_latency_ms = excluded.last_latency_ms, last_msg = excluded.last_msg, open_outage_id = excluded.open_outage_id`,
     )),
     event: guarded(db.prepare(
-      'INSERT INTO monitor_events (monitor_id, ts, from_status, to_status, msg) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)',
+      `INSERT INTO monitor_events (monitor_id, ts, from_status, to_status, msg) SELECT ?, ?, ?, ?, ? WHERE ${GUARD}`,
     )),
     outageOpen: guarded(db.prepare(
-      'INSERT INTO outages (monitor_id, started_at, confirmed_at, ended_at, cause) SELECT ?, ?, ?, NULL, ? WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)',
+      `INSERT INTO outages (monitor_id, started_at, confirmed_at, ended_at, cause) SELECT ?, ?, ?, NULL, ? WHERE ${GUARD}`,
     )),
     outageConfirm: db.prepare('UPDATE outages SET confirmed_at = ?, cause = COALESCE(?, cause) WHERE id = ? AND confirmed_at IS NULL'),
     outageClose: db.prepare('UPDATE outages SET ended_at = ? WHERE id = ? AND ended_at IS NULL'),
@@ -77,9 +84,16 @@ function prepare(db: DB): Statements {
       `SELECT c.id FROM monitor_channels mc JOIN notify_channels c ON c.id = mc.channel_id
        WHERE mc.monitor_id = ? AND c.active = 1 AND c.deleted_at IS NULL ORDER BY c.id`,
     ),
+    // Recipients of a monitor's notification: only while that very monitor (id and uid) is live.
+    monitorChannels: db.prepare(
+      `SELECT c.id FROM monitor_channels mc JOIN notify_channels c ON c.id = mc.channel_id
+       WHERE mc.monitor_id = ? AND c.active = 1 AND c.deleted_at IS NULL
+         AND EXISTS (SELECT 1 FROM monitors m WHERE m.id = mc.monitor_id AND m.uid = ? AND m.deleted_at IS NULL)
+       ORDER BY c.id`,
+    ),
     tls: guarded(db.prepare(
       `INSERT INTO monitor_tls (monitor_id, checked_at, valid, hostname_ok, subject, issuer, sans, not_before, not_after, fingerprint256, chain)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM monitors WHERE id = ?)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${GUARD}
        ON CONFLICT (monitor_id) DO UPDATE SET checked_at = excluded.checked_at, valid = excluded.valid, hostname_ok = excluded.hostname_ok,
          subject = excluded.subject, issuer = excluded.issuer, sans = excluded.sans, not_before = excluded.not_before,
          not_after = excluded.not_after, fingerprint256 = excluded.fingerprint256, chain = excluded.chain`,
@@ -108,8 +122,8 @@ export interface WriterOptions {
 /** Queue of write operations + pre-aggregated stat deltas, flushed in one transaction. */
 export class BatchWriter {
   private ops: WriteOp[] = [];
-  private hour = new Map<string, { monitorId: number; bucket: number; d: StatDelta }>();
-  private day = new Map<string, { monitorId: number; bucket: number; d: StatDelta }>();
+  private hour = new Map<string, StatEntry>();
+  private day = new Map<string, StatEntry>();
   private results = 0;
   private timer: NodeJS.Timeout | null = null;
   private stmts: Statements | null = null;
@@ -125,12 +139,12 @@ export class BatchWriter {
   }
 
   /** Queue the writes of one result. */
-  add(ops: WriteOp[], stats?: { hour: Map<number, StatDelta>; day: Map<number, StatDelta>; monitorId: number }): void {
+  add(ops: WriteOp[], stats?: { hour: Map<number, StatDelta>; day: Map<number, StatDelta>; monitorId: number; uid: string }): void {
     if (this.closed) return;
     this.ops.push(...ops);
     if (stats) {
-      for (const [bucket, d] of stats.hour) merge(this.hour, stats.monitorId, bucket, d);
-      for (const [bucket, d] of stats.day) merge(this.day, stats.monitorId, bucket, d);
+      for (const [bucket, d] of stats.hour) merge(this.hour, stats.monitorId, stats.uid, bucket, d);
+      for (const [bucket, d] of stats.day) merge(this.day, stats.monitorId, stats.uid, bucket, d);
     }
     this.results++;
     if (this.results >= this.opts.maxQueued) {
@@ -185,8 +199,8 @@ export class BatchWriter {
               failed ??= err;
             }
           }
-          for (const { monitorId, bucket, d } of hour.values()) s.statHour.run(monitorId, bucket, ...deltaValues(d));
-          for (const { monitorId, bucket, d } of day.values()) s.statDay.run(monitorId, bucket, ...deltaValues(d));
+          for (const { monitorId, uid, bucket, d } of hour.values()) s.statHour.run(uid, monitorId, bucket, ...deltaValues(d));
+          for (const { monitorId, uid, bucket, d } of day.values()) s.statDay.run(uid, monitorId, bucket, ...deltaValues(d));
         })
         .immediate();
       if (failed !== null) this.opts.onError(failed);
@@ -201,11 +215,18 @@ export class BatchWriter {
   }
 }
 
-function merge(map: Map<string, { monitorId: number; bucket: number; d: StatDelta }>, monitorId: number, bucket: number, d: StatDelta): void {
-  const key = `${monitorId}:${bucket}`;
+interface StatEntry {
+  monitorId: number;
+  uid: string;
+  bucket: number;
+  d: StatDelta;
+}
+
+function merge(map: Map<string, StatEntry>, monitorId: number, uid: string, bucket: number, d: StatDelta): void {
+  const key = `${monitorId}:${uid}:${bucket}`;
   let e = map.get(key);
   if (!e) {
-    e = { monitorId, bucket, d: emptyDelta() };
+    e = { monitorId, uid, bucket, d: emptyDelta() };
     map.set(key, e);
   }
   mergeDelta(e.d, d);

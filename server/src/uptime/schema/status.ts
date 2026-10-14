@@ -26,12 +26,19 @@ CREATE TABLE status_pages (
 );
 CREATE INDEX status_pages_site ON status_pages(site_id) WHERE deleted_at IS NULL;
 
+-- Claims of custom domains. Several pages (tenants) may claim the same domain while it is
+-- unverified, so nobody can squat a domain they do not control; only one verified row per
+-- domain (partial unique index below). Unverified claims expire after 7 days.
 CREATE TABLE status_page_domains (
-  domain         TEXT PRIMARY KEY,
+  domain         TEXT NOT NULL,
   status_page_id INTEGER NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
   verify_token   TEXT NOT NULL,
-  verified_at    INTEGER
-);
+  created_at     INTEGER NOT NULL,
+  verified_at    INTEGER,
+  PRIMARY KEY (domain, status_page_id)
+) WITHOUT ROWID;
+CREATE UNIQUE INDEX status_page_domains_verified ON status_page_domains(domain) WHERE verified_at IS NOT NULL;
+CREATE INDEX status_page_domains_pending ON status_page_domains(created_at) WHERE verified_at IS NULL;
 
 CREATE TABLE status_page_sections (
   id             INTEGER PRIMARY KEY,
@@ -83,7 +90,14 @@ CREATE TABLE user_mfa (
   user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   totp_secret BLOB NOT NULL,                                -- encrypted
   enabled_at  INTEGER,                                      -- NULL while enrolment is pending
-  last_step   INTEGER NOT NULL DEFAULT 0                    -- replay protection
+  last_step   INTEGER NOT NULL DEFAULT 0,                   -- replay protection
+  -- Progressive lockout (auth/mfa.ts): consecutive failures (reset only by a correct factor),
+  -- failures in the current 24 h window (never reset by a success), lock end, last alert mail.
+  fail_streak      INTEGER NOT NULL DEFAULT 0,
+  fail_window_at   INTEGER NOT NULL DEFAULT 0,
+  fail_window_n    INTEGER NOT NULL DEFAULT 0,
+  locked_until     INTEGER NOT NULL DEFAULT 0,
+  fail_notified_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE user_recovery_codes (
   user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -107,5 +121,6 @@ CREATE TABLE api_keys (
 );
 CREATE INDEX api_keys_user ON api_keys(user_id);
 CREATE INDEX status_pages_analytics_site ON status_pages(analytics_site_id) WHERE analytics_site_id IS NOT NULL;
+CREATE INDEX status_pages_logo ON status_pages(logo_asset) WHERE logo_asset IS NOT NULL;
 CREATE INDEX status_page_domains_page ON status_page_domains(status_page_id);
 `;

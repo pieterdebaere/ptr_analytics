@@ -179,4 +179,35 @@ export const MIGRATIONS: readonly Migration[] = [
   // v6 — uptime monitoring (spec §8): monitors, heartbeats, stats, maintenance, tags,
   // notifications, status pages, incidents, MFA and API keys.
   CORE_SCHEMA + NOTIFY_SCHEMA + STATUS_SCHEMA,
+  // v7 — user ids are never reused (AUTOINCREMENT): in-memory state keyed by user id (rate limits,
+  // live-stream counters) and rows that outlive a deleted account can never reach a new account
+  // that would otherwise get the same id. Same columns, constraints and indexes as v4.
+  {
+    foreignKeysOff: true,
+    rebuilds: ['users'],
+    sql: `
+  CREATE TABLE users_v7 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'viewer', 'member')),
+    created_at INTEGER NOT NULL,
+    email_verified_at INTEGER,
+    stripe_customer_id TEXT UNIQUE,
+    stripe_subscription_id TEXT,
+    subscription_status TEXT NOT NULL DEFAULT 'none'
+      CHECK (subscription_status IN ('none', 'active', 'trialing', 'past_due', 'canceled', 'unpaid', 'incomplete')),
+    paid_sites INTEGER NOT NULL DEFAULT 0 CHECK (paid_sites >= 0),
+    cancel_at_period_end INTEGER NOT NULL DEFAULT 0 CHECK (cancel_at_period_end IN (0, 1))
+  );
+  INSERT INTO users_v7 (id, email, password_hash, role, created_at, email_verified_at, stripe_customer_id,
+      stripe_subscription_id, subscription_status, paid_sites, cancel_at_period_end)
+    SELECT id, email, password_hash, role, created_at, email_verified_at, stripe_customer_id,
+      stripe_subscription_id, subscription_status, paid_sites, cancel_at_period_end FROM users;
+  DROP TABLE users;
+  ALTER TABLE users_v7 RENAME TO users;
+  CREATE INDEX users_stripe_subscription ON users(stripe_subscription_id);
+  CREATE INDEX users_unverified ON users(created_at) WHERE email_verified_at IS NULL;
+  `,
+  },
 ];

@@ -19,35 +19,110 @@ export const RECOVERY_CODE_COUNT = 10;
 export const MFA_CHALLENGE_TTL_MS = 5 * 60_000;
 export const MFA_CHALLENGE_MAX_ATTEMPTS = 5;
 const MFA_WINDOW_MS = 15 * 60_000;
-/** Second-factor attempts per account per window (all paths: login, disable, regenerate). */
-const MFA_MAX_PER_USER = 10;
 /** Second-factor submissions per client IP per window. */
 const MFA_MAX_PER_IP = 30;
 const MAX_CHALLENGES = 10_000;
 const MAX_CHALLENGES_PER_USER = 5;
 const ISSUER = 'PTR Analytics';
 
+/*
+ * Per-account progressive lockout (all second-factor paths: login, enable, disable,
+ * regenerate, API key creation), stored in user_mfa so restarts and limiter eviction do not
+ * reset it:
+ * * the first MFA_FREE_FAILURES consecutive failures are free; every further one locks the
+ *   account's second factor for 30 s, 1 min, 2 min, … up to 1 h. Only a correct factor resets
+ *   the streak, i.e. never the attacker;
+ * * at most MFA_DAILY_CAP failures per 24 h window. A success does NOT reset this window, so
+ *   a legitimate login in between never hands an attacker a fresh budget (≤ 30 guesses/day
+ *   ≈ 1e-4 success chance per day with ±1 step);
+ * * the owner is e-mailed (when a mailer is configured) when the streak reaches the first
+ *   lock and when the daily cap is hit, at most once per MFA_ALERT_INTERVAL_MS.
+ */
+export const MFA_FREE_FAILURES = 5;
+export const MFA_LOCK_BASE_MS = 30_000;
+export const MFA_LOCK_MAX_MS = 60 * 60_000;
+export const MFA_DAILY_CAP = 30;
+export const MFA_FAIL_WINDOW_MS = 24 * 60 * 60_000;
+const MFA_ALERT_INTERVAL_MS = 6 * 60 * 60_000;
+
 const aad = (userId: number): string => `mfa:${userId}`;
 
 /* ------------------------------------------------------------------ limiters */
 
 export interface MfaLimits {
-  user: RateLimiter;
   ip: RateLimiter;
 }
 
 const limitsByCtx = new WeakMap<AppContext, MfaLimits>();
 
+/** Per-IP limiter for second-factor submissions (the per-account limit is mfaGate). */
 export function mfaLimits(ctx: AppContext): MfaLimits {
   let l = limitsByCtx.get(ctx);
   if (!l) {
-    l = {
-      user: new RateLimiter(MFA_MAX_PER_USER, MFA_WINDOW_MS, ctx.now, 20_000),
-      ip: new RateLimiter(MFA_MAX_PER_IP, MFA_WINDOW_MS, ctx.now, 20_000),
-    };
+    l = { ip: new RateLimiter(MFA_MAX_PER_IP, MFA_WINDOW_MS, ctx.now, 20_000) };
     limitsByCtx.set(ctx, l);
   }
   return l;
+}
+
+interface ThrottleRow {
+  fail_streak: number;
+  fail_window_at: number;
+  fail_window_n: number;
+  locked_until: number;
+  fail_notified_at: number;
+}
+
+function throttleRow(db: DB, userId: number): ThrottleRow | undefined {
+  return db
+    .prepare('SELECT fail_streak, fail_window_at, fail_window_n, locked_until, fail_notified_at FROM user_mfa WHERE user_id = ?')
+    .get(userId) as ThrottleRow | undefined;
+}
+
+/**
+ * May the account submit a second factor now? `retryAfterMs` > 0 when locked. Accounts
+ * without an MFA row are never locked (nothing to guess).
+ */
+export function mfaGate(ctx: AppContext, userId: number): { ok: boolean; retryAfterMs: number } {
+  const r = throttleRow(ctx.db, userId);
+  if (!r) return { ok: true, retryAfterMs: 0 };
+  const now = ctx.now();
+  let until = r.locked_until;
+  if (r.fail_window_n >= MFA_DAILY_CAP && now - r.fail_window_at < MFA_FAIL_WINDOW_MS) until = Math.max(until, r.fail_window_at + MFA_FAIL_WINDOW_MS);
+  return until > now ? { ok: false, retryAfterMs: until - now } : { ok: true, retryAfterMs: 0 };
+}
+
+/** Count a wrong second factor. `alert`: the owner should be told (rate limited). */
+export function recordMfaFailure(ctx: AppContext, userId: number): { alert: boolean; locked: boolean } {
+  return ctx.db.transaction(() => {
+    const r = throttleRow(ctx.db, userId);
+    if (!r) return { alert: false, locked: false };
+    const now = ctx.now();
+    const streak = r.fail_streak + 1;
+    const fresh = now - r.fail_window_at >= MFA_FAIL_WINDOW_MS;
+    const windowAt = fresh ? now : r.fail_window_at;
+    const windowN = fresh ? 1 : r.fail_window_n + 1;
+    let lockedUntil = r.locked_until;
+    if (streak >= MFA_FREE_FAILURES) {
+      const delay = Math.min(MFA_LOCK_MAX_MS, MFA_LOCK_BASE_MS * 2 ** Math.min(20, streak - MFA_FREE_FAILURES));
+      lockedUntil = Math.max(lockedUntil, now + delay);
+    }
+    if (windowN >= MFA_DAILY_CAP) lockedUntil = Math.max(lockedUntil, windowAt + MFA_FAIL_WINDOW_MS);
+    const noteworthy = streak === MFA_FREE_FAILURES || windowN === MFA_DAILY_CAP;
+    const alert = noteworthy && now - r.fail_notified_at >= MFA_ALERT_INTERVAL_MS;
+    ctx.db
+      .prepare(
+        `UPDATE user_mfa SET fail_streak = ?, fail_window_at = ?, fail_window_n = ?, locked_until = ?, fail_notified_at = ?
+         WHERE user_id = ?`,
+      )
+      .run(streak, windowAt, windowN, lockedUntil, alert ? now : r.fail_notified_at, userId);
+    return { alert, locked: lockedUntil > now };
+  })();
+}
+
+/** A correct factor ends the streak (the 24 h failure window is kept on purpose). */
+export function recordMfaSuccess(ctx: AppContext, userId: number): void {
+  ctx.db.prepare('UPDATE user_mfa SET fail_streak = 0, locked_until = 0 WHERE user_id = ?').run(userId);
 }
 
 /* ------------------------------------------------------------------- storage */
