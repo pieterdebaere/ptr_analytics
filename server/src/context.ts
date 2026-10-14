@@ -1,3 +1,4 @@
+import { loadSecretBox, type SecretBox } from './uptime/secrets.js';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from './config.js';
 import type { DB } from './db/index.js';
@@ -19,6 +20,8 @@ export type Clock = () => number;
 
 export interface AppContext {
   config: Config;
+  /** AES-256-GCM box for secrets at rest (uptime credentials, notification tokens, TOTP); created on first use. */
+  secretBox(): SecretBox;
   db: DB;
   now: Clock;
   log: FastifyBaseLogger;
@@ -108,8 +111,10 @@ export function createContext(
     );
   }
   const stripe = options.stripe ?? (cloud.stripeSecretKey ? new HttpStripeClient(cloud.stripeSecretKey) : null);
+  let box: SecretBox | null = null;
   return {
     config,
+    secretBox: () => (box ??= loadSecretBox(config.uptime, config.dataDir)),
     db,
     now,
     log,
