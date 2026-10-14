@@ -331,8 +331,12 @@ Bucket starts are computed in `tz` (DST-correct) and returned as ms epoch (`t`).
 #### Load protection
 Stats, vitals, overview and export queries run in a pool of worker threads with read-only
 SQLite connections (`STATS_WORKERS`), each with a time budget (`STATS_QUERY_TIMEOUT_MS` →
-`503 {"error":"query timed out"}`). Concurrency is capped (32 in flight globally, 6 per user;
-exports 1 per user and 2 globally → `429` with `Retry-After`). Identical queries are cached
+`503 {"error":"query timed out"}`). Concurrency is capped (32 in flight globally, 6 per user,
+and the last 8 global slots only go to users with nothing in flight; exports 1 per user and 2
+globally → `429` with `Retry-After`). Waiting queries are dispatched fairly between users
+(least recently served first). An export whose client reads nothing for
+`STATS_EXPORT_IDLE_TIMEOUT_MS` (30 s), or that runs longer than `STATS_EXPORT_MAX_DURATION_MS`
+(10 min), is aborted: the connection is closed and the slot freed. Identical queries are cached
 for `STATS_CACHE_TTL_MS`. Authenticated GETs carrying a `Sec-Fetch-Site` header other than
 `same-origin`/`none` are rejected with `403`. `HEAD` on export returns headers only.
 Vitals endpoints reject the `referrer`, `utm_*` and `event` filters with `400`.
@@ -373,13 +377,349 @@ CLS 25% (re-normalised over metrics that have data; `null` if none).
 * `GET /api/sites/:id/vitals/breakdown?metric=<m>&dimension=<path|hostname|country|device|browser|os>&limit` →
   `{rows: [{value, p75, count, rating}]}` sorted by count desc.
 
+#### Live map (globe)
+* `GET /api/sites/:id/stats/live` →
+  `{visitors, countries: [{country: string|null, visitors}], recent: [{ts, country: string|null, path}]}`
+  over the last 5 minutes (`recent` = newest pageviews first, max 50). Never cached.
+* `GET /api/live` → `{visitors, countries: [{country, visitors}], sites: [{id, name, visitors}]}`
+  aggregated over all sites the user can access (last 5 minutes).
+
 ## 5. Dashboard (`/dashboard`)
 
-React 18+ + Vite + TypeScript, `react-router-dom` for routing, **no other runtime
-dependencies** (charts are hand-written SVG). Plain CSS (CSS variables, light & dark theme
-following `prefers-color-scheme` with a manual toggle). No inline `<script>` and no
+React + Vite + TypeScript, `react-router-dom` for routing, Tailwind CSS v4 with
+[shadcn/ui](https://ui.shadcn.com) components (Base UI flavour, `src/components/ui`) and
+[Bklit UI](https://bklit.com) charts (`src/components/charts`, MIT). The 3D globe
+(`src/components/globe`) is drawn with d3-geo (orthographic projection) on a canvas.
+Light & dark theme following `prefers-color-scheme` with a manual toggle. No inline `<script>` and no
 `style="…"` attributes in `index.html` (strict CSP). Never use `dangerouslySetInnerHTML`.
 All analytics values (paths, referrers, event names, props, countries…) are untrusted.
 
 See the dashboard README for screens. All mutating requests send `X-PA-Request: 1`.
 Period + filters live in the URL query string so views are linkable.
+
+## 6. Hosted ("cloud") mode
+
+The same server can run as a hosted service where anyone can sign up. Everything below is
+**off by default**; a self-hosted install behaves exactly as described above.
+
+### 6.1 Configuration
+
+| var | default | meaning |
+|-----|---------|---------|
+| `SIGNUP_ENABLED` | `false` | allow public self-service sign-up (`member` accounts). Requires `SMTP_URL` + `MAIL_FROM` (email verification is mandatory) and an `https://` `PUBLIC_URL`. Startup warns loudly when `TRUST_PROXY=false`. |
+| `ALLOW_INSECURE_PUBLIC_URL` | `false` | development only: allow `SIGNUP_ENABLED` with an `http://` `PUBLIC_URL` (warns) |
+| `SMTP_URL` | – | e.g. `smtps://user:pass@smtp.example.com:465` (nodemailer URL). `smtp://` uses `requireTLS` (STARTTLS mandatory). |
+| `SMTP_ALLOW_INSECURE` | `false` | allow `smtp://` without STARTTLS (warns at startup) |
+| `MAIL_FROM` | – | e.g. `PTR Analytics <no-reply@example.com>` |
+| `SIGNUP_MAX_PER_HOUR` | `200` | sign-up requests per hour, all clients together (beyond: `503`) |
+| `MAIL_MAX_PER_HOUR` | `500` | outgoing mails per hour (beyond: sign-up / forgot `503`) |
+| `MAX_UNVERIFIED_ACCOUNTS` | `5000` | sign-up answers `503` while this many members are unverified |
+| `MEMBER_SITE_LIMIT` | `10` | max sites per member when billing is disabled |
+| `BILLING_ENABLED` | `false` | charge members per site via Stripe. Requires `SIGNUP_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`. |
+| `STRIPE_SECRET_KEY` | – | `sk_live_…` / `sk_test_…` (or a restricted key) |
+| `STRIPE_WEBHOOK_SECRET` | – | `whsec_…` of the webhook endpoint `PUBLIC_URL/api/billing/webhook` |
+| `STRIPE_PRICE_ID` | – | recurring per-unit price, e.g. €1.00 / month (`price_…`) |
+| `STRIPE_AUTOMATIC_TAX` | `false` | enable Stripe Tax on checkout |
+| `FREE_SITES` | `1` | sites included for free per member |
+| `PRICE_PER_SITE_CENTS` / `PRICE_CURRENCY` | `100` / `eur` | display only (Stripe's price is authoritative) |
+| `TERMS_URL` / `PRIVACY_URL` | – | links shown on the sign-up page (required to be accepted) |
+
+### 6.2 Accounts & tenancy
+
+Roles: `admin` (operator: all sites, user management, never billed), `viewer` (read-only
+access to all sites — self-hosted teams) and `member` (self-service account: sees and manages
+**only the sites it owns**). With `SIGNUP_ENABLED`, no new viewers can be created
+(`POST /api/users` / `PATCH` to `viewer` → `400`, CLI refuses; existing ones keep working).
+`sites.owner_id` references the creating user.
+Members: at most 5 domains per site, and no wildcard directly over a shared hosting suffix
+(`*.github.io`, `*.vercel.app`, `*.netlify.app`, `*.pages.dev`, `*.herokuapp.com`, `*.web.app`,
+`*.firebaseapp.com`, `*.onrender.com`, `*.fly.dev`, `*.azurewebsites.net`, `*.cloudfront.net`,
+`*.appspot.com`) → `400` (admins unaffected).
+
+**Deletion is soft** (schema v5: `sites.deleted_at`). Deleting a site (member or admin) sets
+`deleted_at`: from then on the site is invisible everywhere (access checks `404`, lists,
+overview, live map, ingest treats it as unknown, allowance). A background job purges its
+events, vitals and sessions in small adaptive chunks (yielding between them, like the
+retention cleanup), then deletes the row; it runs after every deletion and hourly. Deleting
+a user first soft-deletes and detaches (`owner_id = NULL`) its sites in the same transaction,
+so the `users → sites` cascade never deletes analytics rows synchronously.
+Every site-scoped endpoint (stats, vitals, export, live, settings) checks access:
+admin/viewer → any site; member → `owner_id = user.id`, otherwise `404`.
+`User = {id, email, role, createdAt, emailVerified}`; `Site` gains `suspended: boolean` and,
+for admins only, `ownerId: number|null` (`null` = operator site: never suspended, never
+deleted together with a user).
+
+### 6.3 Auth endpoints (cloud)
+
+* `GET /api/public-config` (no auth) →
+  `{signupEnabled, billingEnabled, freeSites, memberSiteLimit, pricePerSiteCents, currency, termsUrl, privacyUrl}`
+* `POST /api/auth/signup` `{email, password, acceptTerms: true}` → always `202 {ok:true}`
+  (no account enumeration). New address: create unverified member + send a verification link
+  `PUBLIC_URL/verify#token=…` (24 h). Existing member: send a "you already have an account"
+  mail with a reset link instead (operator accounts: the same mail without a link). Rate
+  limited per IP (IPv6 /64 and /48) and per email (`429`). Global caps (`SIGNUP_MAX_PER_HOUR`,
+  `MAIL_MAX_PER_HOUR`, mail queue full, `MAX_UNVERIFIED_ACCOUNTS`) → `503 {"error":"please try
+  again later"}`, checked before the address is looked at.
+* `POST /api/auth/verify` `{token, password}` → `200 {user}` + session cookie (marks the email
+  verified). The password must be the account's (scrypt, constant time; counts against the
+  login rate limits per IP / email+IP / email and the token-submission limit per IP). Any
+  failure (unknown/expired/used token, wrong password) → `400 {"error":"this link is invalid
+  or has expired"}`; a wrong password does **not** consume the token. Missing password → `400`.
+* `POST /api/auth/forgot` `{email}` → always `202 {ok:true}`; sends `PUBLIC_URL/reset#token=…`
+  (1 h) to members only (admins/viewers: nothing is sent; reset them with the CLI). `503` when
+  mail cannot be accepted (checked before the lookup).
+* `POST /api/auth/reset` `{token, password}` → `204`; signs out all sessions of that user and
+  invalidates all its tokens. Tokens of non-member accounts are refused (`400`).
+* Login of an unverified member → `401 {"error":"invalid email or password"}`, identical to a
+  wrong password. With the correct password the verification mail is re-sent in the
+  background (per account at most 1 per 10 min, 3 per day).
+* `DELETE /api/account` `{password}` (members) → `204`; cancels the Stripe subscriptions and
+  deletes the customer, deletes the user and soft-deletes all its sites (data purged in the
+  background).
+Tokens: 32 random bytes in the URL **fragment** (never sent to the server, so never in access
+logs or `Referer`), only `sha256(token)` stored, single use; up to 3 valid tokens per user and
+purpose (older ones are dropped). The SPA pages `/verify` and `/reset` are served with
+`Referrer-Policy: no-referrer`; the SPA reads the token from `location.hash` and POSTs it.
+Email addresses must be plain `local@domain` (no display names, comments, quotes, lists,
+`<>()",;:[]\`, whitespace or control characters); mail is addressed as `{address}` objects;
+identical recipient + template mails still in the queue are replaced (not duplicated).
+
+### 6.4 Billing (Stripe)
+
+Allowance for a member = `FREE_SITES + paidSites` (billing enabled) or `MEMBER_SITE_LIMIT`.
+`POST /api/sites` beyond the allowance → `402 {error, code: "upgrade_required"}`.
+* `GET /api/billing` →
+  `{enabled, freeSites, pricePerSiteCents, currency, sitesUsed, sitesAllowed, paidSites, status: "none"|"active"|"trialing"|"past_due"|"canceled"|"unpaid"|"incomplete", hasCustomer, cancelAtPeriodEnd}`
+  (`sitesAllowed` is authoritative). Billing endpoints are members-only (`403` otherwise);
+  checkout/quantity/portal/webhook are `404` when billing is disabled; `409` for state
+  conflicts (already subscribed, no subscription, …); `502` when Stripe fails.
+* `POST /api/billing/checkout` `{paidSites: 1..1000}` → `{url}` — Stripe Checkout (subscription,
+  `STRIPE_PRICE_ID` × paidSites). Only when the member has no active subscription.
+* `POST /api/billing/quantity` `{paidSites: 0..1000}` → `{billing}` — updates the existing
+  subscription quantity (prorated); `0` cancels at period end.
+* `POST /api/billing/portal` → `{url}` — Stripe customer portal (invoices, payment method, cancel).
+* `POST /api/billing/webhook` — Stripe webhook (no auth, no CSRF header; signature verified
+  with `STRIPE_WEBHOOK_SECRET`, 5 min tolerance, raw body ≤ 256 KB; with billing disabled it
+  answers `404` in `onRequest`, before reading the body). Handles
+  `checkout.session.completed`, `customer.subscription.created|updated|deleted`; the state is
+  always re-read from the Stripe API (webhook payloads are only a trigger).
+Paid-site count / status changes recompute `sites.suspended` for the member: the oldest
+`allowance` sites stay active, newer ones are suspended (ingest silently drops their events,
+the dashboard shows a banner). Nothing is deleted.
+Deleting **any** user that has a `stripe_customer_id` (whatever its current role) first cancels
+all its subscriptions and deletes the Stripe customer (`502`, nothing deleted, if Stripe fails);
+`cli delete-user` refuses such accounts. Changing the role of a member whose subscription is
+`active`/`trialing`/`past_due` → `409`.
+The Stripe API is called with `fetch` (no SDK).
+
+## 7. Landing page (`/landing`)
+
+Static marketing site (Vite + React + Tailwind + shadcn/Bklit, sharing components with the
+dashboard), deployed on its own domain. Build-time config: `VITE_APP_URL` (the hosted
+analytics server, e.g. `https://analytics.pieterdebaere.be`) and `VITE_REPO_URL`.
+
+## 8. Uptime monitoring
+
+Re-implementation of the functionality of [Uptime Kuma](https://github.com/louislam/uptime-kuma),
+integrated with the analytics. The full requirements analysis (feature inventory, protocols,
+notification request formats, threat model) is in [`docs/uptime/ANALYSIS.md`](uptime/ANALYSIS.md);
+this section is the binding contract. Shared server types: `server/src/uptime/types.ts`.
+Schema: migration v6 (`server/src/uptime/schema/*.ts`).
+
+### 8.1 Scope and decisions
+
+* Monitor types: `http`, `keyword`, `json`, `tcp`, `tls`, `dns`, `push`, `group`, `manual`, `ping`,
+  `websocket`, `smtp`, `ntp`, `redis`, `ssh`, `grpc_health`, `postgres`, `mysql`, `mongodb`,
+  `mqtt`, `docker` (self-hosted opt-in) and `domain` (RDAP domain expiry). No real-browser, full
+  database drivers, Kafka, GameDig or command-running types (see ANALYSIS §8.1 WON'T).
+* Statuses: `-1` unknown, `0` down, `1` up, `2` pending, `3` maintenance; retries, retry interval,
+  resend every N failed checks, upside-down mode, accepted status codes, certificate expiry
+  notices (21/14/7/3/1 days), domain expiry notices.
+* Monitors belong to a **site** (`site_id`); access, limits, suspension and soft delete follow the
+  site (spec §6.2). Tags, notification channels and maintenance windows belong to a user
+  (`owner_id`, `NULL` = operator object visible to admins/viewers). Links between objects are only
+  accepted within the same owner.
+* Hosted mode (members): `MEMBER_MONITORS_PER_SITE` (10), min interval `MEMBER_MIN_INTERVAL_S` (60),
+  timeout ≤ 30 s, retries ≤ 5, `MEMBER_STATUS_PAGES_PER_SITE` (1), `MEMBER_NOTIFY_CHANNELS` (10),
+  `MEMBER_NOTIFY_PER_HOUR` (120); private targets always denied; webhook URLs https only; e-mail
+  channels need double opt-in; types with `hosted: 'disabled'` refused. Limits and type rules
+  follow the role of the site's **owner** (create, PATCH and clone alike — an admin editing a
+  member's monitor gets the member rules; operator sites use the admin rules). Suspended sites:
+  monitors are paused, status pages show "monitoring paused". Suspensions (billing allowance), site
+  and account deletion reach the engine and the public caches at once.
+* Public status pages are served under `/status/:slug` (SPA route, no login) on the dashboard
+  origin, or — with `STATUS_PAGE_ORIGIN` (recommended in hosted mode) — only on that separate
+  origin (see §8.4). No custom CSS and no third-party scripts; Markdown subset only (rendered as
+  React elements).
+* Secrets (monitor credentials, notification tokens, TOTP secrets) are encrypted at rest with
+  AES-256-GCM (`SECRETS_KEY` or a generated `<DATA_DIR>/secrets.key`, mode 0600) and **write-only**
+  in the API: responses contain `secretsSet: string[]` instead of values; sending `""`/omitting a
+  secret field keeps the stored value, `null` clears it.
+* All outgoing connections go through the SSRF-safe `SafeNet` (resolve → check every address →
+  connect to that exact address; redirects re-checked; `dns.Resolver` with timeouts, never
+  `dns.lookup`). Policy: `UPTIME_PRIVATE_TARGETS` (`allow` self-hosted default, forced `deny` in
+  hosted mode), link-local/metadata always denied unless `UPTIME_ALLOW_METADATA`, allow/deny lists,
+  in hosted mode the server's own addresses (`PUBLIC_URL` host, local interfaces) are always denied
+  (self-hosted installs may monitor sites behind the same reverse proxy). The list is computed once
+  at startup (no check runs before it is known), refreshed every 10 minutes and shared by every
+  SafeNet (checks, run-now, RDAP, notifications): `getSelfAddresses(ctx)` in
+  `server/src/uptime/runtime.ts` (empty in self-hosted mode). Monitor and notification
+  traffic never uses `HTTP(S)_PROXY` / `NODE_USE_ENV_PROXY`; `/etc/hosts` is not consulted (names are
+  resolved with c-ares).
+* Realtime: Server-Sent Events (`GET /api/uptime/stream`), the dashboard falls back to polling.
+* Two-factor authentication (TOTP + recovery codes) for all accounts; API keys (bearer, scoped)
+  for `/metrics` (Prometheus) and read-only API automation.
+
+Configuration (all optional): `UPTIME_ENABLED` (true), `UPTIME_MIN_INTERVAL_S` (20),
+`UPTIME_CHECK_CONCURRENCY` (64), `UPTIME_DEST_MAX_PER_MIN` (60; checks of hosted members per
+destination and minute across all accounts, 0 = unlimited; over budget checks are deferred, never
+dropped), `UPTIME_PRIVATE_TARGETS`, `UPTIME_ALLOW_METADATA` (false;
+metadata = link-local `169.254.0.0/16`/`fe80::/10` incl. 169.254.169.254, Alibaba
+`100.100.100.200`, Azure WireServer `168.63.129.16`, Oracle `192.0.0.192`, `fd00:ec2::254` and the
+metadata hostnames), `UPTIME_TARGET_ALLOWLIST` / `UPTIME_TARGET_DENYLIST` (CIDRs/hostnames; the
+allow list is an operator exception and never applies to hosted members, the deny list applies to
+everyone — use it for further provider-internal addresses), `UPTIME_DNS_SERVERS` (comma-separated IP
+literals or `system`; default: system resolvers, except hosted members whose names are resolved by
+`1.1.1.1,8.8.8.8` so they cannot enumerate internal DNS names — members get the same "target not
+allowed" for denied and non-existent names), `UPTIME_MAX_BODY_BYTES` (1 MiB),
+`MEMBER_MAX_BODY_BYTES` (256 KiB, response body cap for members; member request bodies ≤ 16 KiB),
+`UPTIME_RAW_RETENTION_HOURS` (48), `UPTIME_RETENTION_DAYS` (400), `UPTIME_PING_BINARY`
+(`/bin/ping`, empty disables), `UPTIME_DOCKER_ENABLED` (false) + `UPTIME_DOCKER_HOST`,
+`SECRETS_KEY` / `SECRETS_KEY_FILE` (must not be group/other-readable unless root-owned 0400/0440),
+`MEMBER_*` limits above, `REQUIRE_MFA_FOR_ADMINS` (false; applies to admins and viewers),
+`STATUS_PAGE_ORIGIN` (§8.4, parsed in `server/src/config.ts`). HTTP-family monitors refuse https → http
+redirects unless `allowDowngrade` (self-hosted only) and never follow a redirect that would re-send
+the request body to another origin. Parsed in `server/src/uptime/config.ts`.
+
+### 8.2 Engine
+
+Scheduler with a min-heap on the monotonic clock, stable per-monitor phase jitter, anchored
+intervals (missed slots skipped, never bursts), global / per-owner / per-(owner, destination)
+concurrency limits (one tenant's slow checks never occupy another tenant's slots or make its checks
+expire as "no data"), a per-destination request budget shared by all hosted members
+(`UPTIME_DEST_MAX_PER_MIN`, served round robin per owner; the destination of a member check is its
+resolved address, so aliases and IP spellings share it), `AbortSignal` deadlines + watchdog. Results are written in batches (heartbeat, state,
+hourly/daily time-weighted aggregates, events, outages, outbox rows in one transaction). Status
+transitions are a pure, unit-tested function (`(state, result, settings, inMaintenance) → …`)
+reproducing Uptime Kuma's important/notify rules. An outage opens with the first failed check
+(DOWN or PENDING) and is confirmed on DOWN; a "no data" status (manual monitor without a status, empty
+group: PENDING, custom input with `noOutage`) never opens one. Group monitors derive their status from their
+children. Push monitors are DOWN when no push arrived within `interval` (grace period after
+start). Maintenance windows (strategies `manual`, `single`, `weekly`, `monthly`, `interval`,
+`cron`; IANA time zones) put monitors (and group descendants) in status 3 and suppress
+notifications. Evaluation is bounded (no enumeration of occurrences: binary search over one day's
+hour×minute combinations, one cached UTC offset per zone and local day, nothing evaluated outside
+`startsAt..endsAt`); consecutive overlapping cron windows are one maintenance (no end/start pair). Retention: raw heartbeats `UPTIME_RAW_RETENTION_HOURS`, hourly stats 90 days,
+daily stats/events/outages `UPTIME_RETENTION_DAYS`; purge in small chunks.
+Uptime = `up_ms / (up_ms + down_ms + pending_ms)` (time-weighted; maintenance and gaps excluded).
+
+### 8.3 API (authenticated, same conventions as §4.7: cookie session or API key, `X-PA-Request: 1` on mutations)
+
+`Monitor` JSON:
+```jsonc
+{ "uid": "k3j9x0abcd12", "siteId": "…", "parentUid": null, "type": "http", "name": "Homepage",
+  "description": null, "active": true, "intervalS": 60, "retryIntervalS": 60, "maxRetries": 1,
+  "resendEvery": 0, "timeoutMs": 10000, "upsideDown": false, "certNotify": true, "domainNotify": false,
+  "config": { /* type specific, see GET /api/uptime/types */ }, "secretsSet": ["password"],
+  "target": "https://example.com/", "tags": [{"uid","name","color","value"}], "channelUids": ["…"],
+  "publicId": null /* badges enabled when set */, "pushUrl": null /* push monitors only, shown once on create/regenerate */,
+  "state": { "status": 1, "since": 1791000000000, "lastCheckAt": …, "latencyMs": 123, "msg": "200 OK" },
+  "uptime24h": 0.9998, "uptime30d": 0.9991, "tls": { "notAfter": …, "daysLeft": 61, "issuer": "…", "valid": true } | null,
+  "recentBeats": [{ "t": 1791000000000, "status": 1, "latencyMs": 123 } /* last 50 heartbeats, oldest first */],
+  "createdAt": …, "updatedAt": … }
+```
+* `GET /api/uptime/types` → `{types: [{type, label, description, category, fields: FieldDef[], defaults, available: boolean, hostedAllowed: boolean}]}`
+  plus `{limits: {minIntervalS, maxTimeoutMs, maxRetries, monitorsPerSite|null}}` for the current user.
+* `GET /api/uptime/overview` → `{sites: [{siteId, total, up, down, pending, maintenance, paused, uptime30d}], monitors: Monitor[]}` (accessible sites only).
+  Every `Monitor` in a list (overview, site list) carries `recentBeats` (the last 50 heartbeats,
+  computed for all monitors in one query), so the dashboard needs no heartbeats request per monitor.
+* `GET /api/sites/:siteId/monitors` → `{monitors: Monitor[]}` ; `POST` (same fields as Monitor, writable ones) → `201 {monitor}` (402/409-style limits as `{error, code: "limit_reached"}`)
+* `GET|PATCH|DELETE /api/monitors/:uid` ; `POST /api/monitors/:uid/pause|resume|clone|check` (check = run now, rate limited;
+  clone validates like a create: values above the owner's limits are clamped, types / configurations the owner may not use → 400) ;
+  default channels linked to a new monitor are capped at the per-monitor maximum (members 5) ;
+  `POST /api/monitors/:uid/push-token` → `{pushUrl}` (regenerates) ; `POST /api/monitors/:uid/badges` `{enabled}` → `{publicId}`
+* `GET /api/monitors/:uid/heartbeats?period=24h|7d|30d|90d|custom&from&to&tz` →
+  `{interval: 'raw'|'hour'|'day', points: [{t, status, latencyMs, latencyMin, latencyMax, upRatio}]}` (≤ 500 points, down-sampled)
+* `GET /api/monitors/:uid/stats?period&tz` → `{uptime, previousUptime, avgLatencyMs, minLatencyMs, maxLatencyMs, checks, outages: number, downtimeMs, mttrMs, bars: [{t, upRatio|null, maintenance: boolean}] /* 90 local days */}`
+* `GET /api/monitors/:uid/events?before=<id>&limit` → `{events: [{id, ts, from, to, msg}]}` ; `GET /api/monitors/:uid/outages?limit&confirmed=0|1` → `{outages: [{id, startedAt, confirmedAt, endedAt, cause}]}`
+  (`confirmed=1`: only confirmed outages — the ones `stats.outages` counts; the dashboard lists these, an
+  unconfirmed outage is a failure that recovered during the retries)
+* `GET /api/uptime/stream` → `text/event-stream`; events `beat` `{uid, ts, status, latencyMs, msg}` and `state` `{uid, status, since}` for accessible monitors (heartbeat every 25 s).
+  Access is checked per event with the account's current role and the site's current owner (≤ 1 s
+  stale); the stream ends when the session ends or the account's role changes.
+* Tags: `GET|POST /api/tags`, `PATCH|DELETE /api/tags/:uid` (`{uid, name, color}`).
+* Maintenance: `GET|POST /api/maintenances`, `GET|PATCH|DELETE /api/maintenances/:uid`, `POST /api/maintenances/:uid/pause|resume`;
+  `{uid, title, description, active, strategy, tz, startsAt, endsAt, timeStart, timeEnd, weekdays: number[] /* 0=Sun */, daysOfMonth: (number|"L")[], intervalDays, cron, durationS, monitorUids, statusPageUids, status: "scheduled"|"under-maintenance"|"inactive"|"ended", nextWindow: {start, end}|null}`.
+  A cron schedule may match at most 60 hour×minute combinations per day (400 otherwise); members may
+  have 100 maintenances, at most 20 of them cron (409). Rate limited per user: 120 reads and 30
+  writes per minute (429).
+* Notification channels: `GET /api/notification-providers` → `{providers: [{id, label, category, fields: FieldDef[], hostedAllowed}]}`;
+  `GET|POST /api/notification-channels`, `GET|PATCH|DELETE /api/notification-channels/:uid`
+  (`{uid, type, name, config, secretsSet, isDefault, active, verified: boolean, consecutiveFailures, monitorCount}`; `applyToExisting: true` on create/update links it to all of the owner's monitors);
+  `POST /api/notification-channels/:uid/test` (rate limited) → `{ok, error?}`; `POST /api/notification-channels/test` with an unsaved channel body;
+  `GET /api/notification-channels/:uid/log?limit` → `{entries: [{ts, event, ok, httpStatus, error, monitorUid}]}`;
+  e-mail double opt-in (hosted mode): `GET /api/notification-channels/verify?token=` (public) only shows a
+  confirmation page; the recipient answers with `POST /api/notification-channels/verify` (form body `token`,
+  `answer=confirm|decline`) — link scanners cannot subscribe anyone. One-click unsubscribe links; an address that
+  unsubscribed or declined can only re-subscribe itself (`POST /api/notification-channels/resubscribe`), the
+  channel owner can never send it another opt-in mail. `PATCH … {resendVerification: true}` → `verificationSent: n`.
+* Status pages (per site): `GET /api/status-pages`, `POST /api/sites/:siteId/status-pages`, `GET|PATCH|DELETE /api/status-pages/:uid`
+  (`{uid, siteId, slug, title, description, footer, theme, accent, published, noindex, showTags, showCertExpiry, showPoweredBy, refreshS, analyticsSiteId, logoUrl, url, publicUrl, sections: [{name, monitors: [{uid, displayName, showUrl}]}], domains: [{domain, verified, verifyToken, txtName, expiresAt}]}`;
+  `logoUrl` is the authenticated `GET /api/status-pages/:uid/logo`, `publicUrl` the absolute public page URL);
+  `POST /api/status-pages/:uid/logo` (raw PNG/JPEG/WebP ≤ 512 KB, content sniffed and structurally validated) ; `GET|DELETE …/logo`;
+  custom domains: `POST /api/status-pages/:uid/domains/verify {domain}` (DNS TXT `_ptr-status.<domain>` = `verifyToken`).
+  Several pages may claim the same unverified domain (the answer never reveals other claims); the first page to
+  prove DNS control gets it and the other claims are deleted (a later proof only wins once the earlier verified
+  token is no longer published); unverified claims expire after 7 days (`expiresAt`);
+  incidents: `GET|POST /api/status-pages/:uid/incidents`, `PATCH|DELETE /api/incidents/:uid` (`{uid, title, body, style, pinned, createdAt, updatedAt, resolvedAt}`).
+* Security: `GET /api/auth/mfa` → `{enabled, pending, recoveryCodesLeft, required}`; `POST /api/auth/mfa/setup {password}` → `{secret, otpauthUrl}` (pending until confirmed);
+  `POST /api/auth/mfa/enable {password, code}` → `{recoveryCodes: string[], apiKeysRevoked}` (shown once; other sessions and all API keys are revoked,
+  the current session stays); `POST /api/auth/mfa/disable {password, code | recoveryCode}` (same revocations);
+  `POST /api/auth/mfa/recovery-codes {password, code | recoveryCode}` → new codes. Login with MFA: `POST /api/auth/login` answers
+  `200 {mfaRequired: true, mfaToken}` (no session yet); `POST /api/auth/login/mfa {mfaToken, code | recoveryCode}` → `{user}` + session.
+  Second-factor attempts (all paths) are limited per IP and per account: 5 free consecutive failures, then a lock of 30 s
+  doubling up to 1 h (`429 {code: "mfa_locked"}`), at most 30 failures per 24 h; only a correct factor ends the streak, a
+  success never resets the 24 h budget.
+  API keys: `GET|POST /api/api-keys` (`{name, scopes: ["read", "metrics", "metrics:all"], expiresInDays?, password, code? | recoveryCode?}` —
+  password always, a current second factor when MFA is on (`400 {code: "mfa_code_required"}` without it); `metrics:all` admins only →
+  key shown once `pa_<prefix>_<secret>`), `DELETE /api/api-keys/:uid`. All keys of an account are revoked on password change
+  or reset (dashboard, admin, hosted reset, CLI) and on MFA enable / disable / CLI `mfa-reset`. Failed key attempts are
+  limited per (client IP, key prefix); a valid key is always evaluated first and never blocked.
+  Notification mails to the owner (when mail is configured): MFA enabled / disabled, recovery codes regenerated, API key
+  created, repeated wrong second factors. A role change (`PATCH /api/users/:id`) revokes the user's sessions (and so its
+  live streams).
+
+### 8.4 Public endpoints (no auth)
+
+* `GET|POST|HEAD /api/push/:token?status=up|down&msg=&ping=` → `{ok: true}` (CORS `*`, rate limited per token/IP; unknown token → 404 after constant work).
+  The token may instead be sent in an `X-Push-Token` header to `GET|POST|HEAD /api/push` (keeps it out
+  of reverse-proxy access logs, which record paths and query strings). Per token: token bucket of 1
+  push per second with bursts of 10 (429 + `Retry-After`); at most one heartbeat per second is
+  stored per monitor (faster pushes are coalesced: the latest one is stored a second after the
+  previous beat). `HEAD` only checks the token and never records a beat (link scanners).
+* `GET /api/public/status/:slug` → status page JSON for published pages only (no internal ids, no targets unless `showUrl`;
+  `url` = origin + path only, never userinfo, query or fragment; incident ids opaque per page; only maintenances
+  explicitly linked to the page (`statusPageUids`) are listed — a maintenance linked only to monitors shows as their
+  status "maintenance" without its title/description):
+  `{title, description, footer, theme, accent, logoUrl, showPoweredBy, refreshS, analytics: {siteId, scriptUrl}|null, overall: "up"|"degraded"|"down"|"maintenance"|"unknown",
+   sections: [{name, monitors: [{id /* opaque per page */, name, status, uptime90d, bars: [{t, upRatio|null, maintenance}], url?, certDaysLeft?, tags?}]}],
+   incidents: [...pinned/unresolved + last 10 resolved], maintenance: [{title, description, start, end, status}], updatedAt}`;
+  `GET /status/:slug/feed.xml` (RSS of incidents and outages).
+* Badges (SVG, `Cache-Control: max-age=60`): `GET /api/public/badge/:publicId/status.svg`, `uptime.svg?period=24h|7d|30d|90d`,
+  `response.svg`, `cert.svg`; `GET /api/public/status/:slug/badge.svg`. Query parameters `label`, `style=flat|flat-square|for-the-badge`
+  (strictly validated, text escaped).
+* `GET /metrics` — Prometheus text format, requires `Authorization: Bearer <api key with "metrics" scope>`;
+  only the key owner's monitors (admins and viewers: their own plus the operator's sites, `owner_id NULL`); an
+  admin key with the explicit `metrics:all` scope exports every tenant.
+* Logos: `GET /api/public/assets/:sha256` only while a published page uses the asset (else 404).
+* Caches: status JSON 30 s, badges 60 s; entries older than 5 s are re-validated (page still published, site live,
+  badge id still assigned) before being served.
+* Origins (`STATUS_PAGE_ORIGIN`, optional, recommended in hosted mode — startup warning without it): when set, public
+  status pages are served only on that origin and on verified custom domains; `GET /status/:slug[/feed.xml]` on the
+  dashboard origin answers `302` to it. The status origin and every verified custom domain serve ONLY:
+  `/status/:slug`, `/status/:slug/feed.xml`, the SPA assets (`/assets/*`, `/favicon.svg`), `/api/public/*`,
+  `/script.js` + `/api/event` (the page's own analytics), `/healthz`, and `/` (custom domain: `302` to its page with
+  `Cache-Control: no-store` and `Vary: Host, X-Forwarded-Host`); everything else (login, dashboard, authenticated
+  API) is `404`. A custom domain only serves its own page. Without `STATUS_PAGE_ORIGIN` pages stay on the dashboard
+  origin, custom domains are restricted the same way.
+* `GET /uptime-bot` — plain page explaining the checks (linked from the User-Agent).

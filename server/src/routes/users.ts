@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { PASSWORD_MAX, PASSWORD_MIN, isValidEmail } from '../config.js';
 import type { AppContext } from '../context.js';
+import { apiKeyState } from '../auth/api-keys.js';
 import { currentUser, requireAdmin, requireAuth } from '../auth/guard.js';
-import { ROLES, type Role } from '../data/users.js';
+import { ENTITLED_STATUSES, ROLES, type Role } from '../data/users.js';
+import { schedulePurge } from '../jobs/purge.js';
 import { field, objectBody } from '../lib/body.js';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import { hashPassword } from '../lib/password.js';
@@ -14,7 +16,9 @@ function parseId(raw: unknown): number {
 }
 
 function parseRole(v: unknown): Role {
-  if (typeof v !== 'string' || !(ROLES as readonly string[]).includes(v)) throw badRequest('role must be "admin" or "viewer"');
+  if (typeof v !== 'string' || !(ROLES as readonly string[]).includes(v)) {
+    throw badRequest('role must be "admin", "viewer" or "member"');
+  }
   return v as Role;
 }
 
@@ -30,6 +34,14 @@ function assertStillAdmin(ctx: AppContext, userId: number): void {
 export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
   const preHandler = [requireAuth(ctx), requireAdmin()];
+  const hosted = ctx.config.cloud.signupEnabled;
+
+  /** Hosted mode: viewers can read every tenant's sites, so no new ones are made. */
+  const assertRoleAllowed = (role: Role): void => {
+    if (hosted && role === 'viewer') {
+      throw badRequest('viewer accounts are not available in hosted mode (viewers can read every member\'s sites)');
+    }
+  };
 
   app.get('/api/users', { preHandler }, async () => ({ users: ctx.users.list() }));
 
@@ -40,7 +52,8 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     if (!isValidEmail(email)) throw badRequest('invalid email');
     const password = field(body, 'password');
     if (!validPassword(password)) throw badRequest(`password must be ${PASSWORD_MIN}..${PASSWORD_MAX} characters`);
-    const role = parseRole(field(body, 'role') ?? 'viewer');
+    const role = parseRole(field(body, 'role') ?? (hosted ? undefined : 'viewer'));
+    assertRoleAllowed(role);
     const hash = await hashPassword(password);
     const me = currentUser(request);
     const user = ctx.db.transaction(() => {
@@ -60,6 +73,7 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const roleRaw = field(body, 'role');
     const passwordRaw = field(body, 'password');
     const role = roleRaw === undefined ? undefined : parseRole(roleRaw);
+    if (role !== undefined && role !== target.role) assertRoleAllowed(role);
     if (passwordRaw !== undefined && id === me.id) {
       // Own password: use POST /api/auth/password, which requires the current password.
       throw badRequest('use the account settings to change your own password');
@@ -75,12 +89,24 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
       if (!current) throw notFound('user not found');
       if (role !== undefined && role !== current.role) {
         if (current.role === 'admin' && ctx.users.countAdmins() <= 1) throw conflict('the last admin cannot be demoted');
+        // Billing (and its cancellation on deletion) only exists for members: a paying member
+        // must cancel first, otherwise the subscription would keep running unnoticed.
+        const billing = ctx.users.billing(id);
+        if (current.role === 'member' && billing && ENTITLED_STATUSES.has(billing.status)) {
+          throw conflict('this member has an active subscription; cancel it (or delete the account) before changing the role');
+        }
         ctx.users.setRole(id, role);
+        // members are limited to their allowance; other roles never have suspended sites
+        ctx.billing.recompute(id);
+        // Sessions (and the live streams they authorise, re-checked every 25 s) were opened
+        // with the old role: the user signs in again (also when demoting oneself).
+        ctx.authSessions.deleteForUser(id);
       }
       if (newHash !== undefined) {
         ctx.users.setPasswordHash(id, newHash);
-        // A password change invalidates the user's other sessions.
+        // A password reset invalidates the user's sessions and API keys.
         ctx.authSessions.deleteForUser(id);
+        apiKeyState(ctx).repo.deleteForUser(id);
       }
     });
     tx();
@@ -91,14 +117,22 @@ export async function userRoutes(app: FastifyInstance, opts: { ctx: AppContext }
     const me = currentUser(request);
     const id = parseId(request.params.id);
     if (id === me.id) throw badRequest('you cannot delete yourself');
-    const tx = ctx.db.transaction(() => {
+    const check = (): void => {
       assertStillAdmin(ctx, me.id);
       const target = ctx.users.byId(id);
       if (!target) throw notFound('user not found');
       if (target.role === 'admin' && ctx.users.countAdmins() <= 1) throw conflict('the last admin cannot be deleted');
-      ctx.users.delete(id);
-    });
-    tx();
+    };
+    check();
+    // Any Stripe customer (whatever the current role) is cancelled and deleted first; 502 and
+    // nothing deleted if Stripe fails.
+    await ctx.billing.cancelAll(id);
+    ctx.db.transaction(() => {
+      check();
+      // Sites are soft-deleted and their data purged in the background.
+      ctx.users.delete(id, ctx.now());
+    })();
+    schedulePurge(ctx);
     return reply.code(204).send();
   });
 }

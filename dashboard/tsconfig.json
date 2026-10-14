@@ -8,7 +8,9 @@
     "types": [],
     "noEmit": true,
     "allowImportingTsExtensions": false,
-    "useDefineForClassFields": true
+    "useDefineForClassFields": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src", "vite.config.ts", "vitest.config.ts"]
 }

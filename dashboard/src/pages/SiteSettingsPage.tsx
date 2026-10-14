@@ -1,9 +1,15 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, errorMessage } from '../api/client';
-import { DomainsInput } from '../components/DomainsInput';
-import { CodeBlock, Modal } from '../components/ui';
-import { useAuth, useIsAdmin } from '../hooks/auth';
+import { Trash2Icon } from 'lucide-react';
+import { api, errorMessage } from '@/api/client';
+import { CodeBlock } from '@/components/common';
+import { DomainsInput, MAX_DOMAINS, MEMBER_MAX_DOMAINS } from '@/components/DomainsInput';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { useAuth, useCanManageSites } from '@/hooks/auth';
 import {
   DECLARATIVE_EXAMPLE,
   IGNORE_SNIPPET,
@@ -12,62 +18,78 @@ import {
   TRACK_EXAMPLE,
   installSnippet,
   snippetOrigin,
-} from '../lib/snippet';
-import { displayText } from '../lib/safety';
+} from '@/lib/snippet';
+import { displayText } from '@/lib/safety';
 import { useSite } from './SiteLayout';
+
+function InlineCode({ children }: { children: ReactNode }) {
+  return <code className="rounded bg-muted px-1 py-0.5 text-[0.8em]">{children}</code>;
+}
 
 export function SiteSettingsPage() {
   const { site, reloadSites } = useSite();
   const { config } = useAuth();
-  const isAdmin = useIsAdmin();
+  const canManage = useCanManageSites();
   const origin = snippetOrigin(config?.publicUrl, window.location.origin);
 
   return (
-    <div className="settings">
-      <GeneralSettings key={site.id} readOnly={!isAdmin} onSaved={reloadSites} />
+    <div className="flex flex-col gap-4">
+      <GeneralSettings key={site.id} readOnly={!canManage} onSaved={reloadSites} />
 
-      <section className="card section">
-        <h2 className="section-title">Install</h2>
-        <p>
-          Add this line to the <code>&lt;head&gt;</code> of every page you want to track:
-        </p>
-        <CodeBlock code={installSnippet(origin, site.id)} />
-        <p className="muted small">
-          Site ID: <code>{site.id}</code>. Page views (including single-page-app navigations) and Speed Insights are
-          collected automatically. Visits are only accepted from the domains listed above.
-        </p>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Install</CardTitle>
+          <CardDescription>
+            Add this line to the <InlineCode>&lt;head&gt;</InlineCode> of every page you want to track.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <CodeBlock code={installSnippet(origin, site.id)} />
+          <p className="text-xs text-muted-foreground">
+            Site ID: <InlineCode>{site.id}</InlineCode>. Page views (including single-page-app navigations) and Speed Insights
+            are collected automatically. Visits are only accepted from the domains listed above.
+          </p>
+        </CardContent>
+      </Card>
 
-      <section className="card section">
-        <h2 className="section-title">Custom events</h2>
-        <p>Track conversions and other interactions from JavaScript:</p>
-        <CodeBlock code={TRACK_EXAMPLE} />
-        <p>
-          To call <code>pa</code> before the script has loaded, add this queue snippet above the script tag — queued
-          calls are sent once it loads:
-        </p>
-        <CodeBlock code={QUEUE_SNIPPET} />
-        <CodeBlock code={QUEUE_TRACK_EXAMPLE} />
-        <p>
-          Or track clicks without JavaScript using data attributes (<code>data-pa-event-*</code> attributes become
-          properties):
-        </p>
-        <CodeBlock code={DECLARATIVE_EXAMPLE} />
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Custom events</CardTitle>
+          <CardDescription>Track conversions and other interactions from JavaScript.</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3 text-sm">
+          <CodeBlock code={TRACK_EXAMPLE} />
+          <p>
+            To call <InlineCode>pa</InlineCode> before the script has loaded, add this queue snippet above the script tag —
+            queued calls are sent once it loads:
+          </p>
+          <CodeBlock code={QUEUE_SNIPPET} />
+          <CodeBlock code={QUEUE_TRACK_EXAMPLE} />
+          <p>
+            Or track clicks without JavaScript using data attributes (<InlineCode>data-pa-event-*</InlineCode> attributes
+            become properties):
+          </p>
+          <CodeBlock code={DECLARATIVE_EXAMPLE} />
+        </CardContent>
+      </Card>
 
-      <section className="card section">
-        <h2 className="section-title">Exclude your own visits</h2>
-        <p>
-          Open your website, open the browser console (developer tools) and run the following. The script then ignores
-          visits from this browser on that site:
-        </p>
-        <CodeBlock code={IGNORE_SNIPPET} />
-        <p className="muted small">
-          Use <code>localStorage.removeItem('pa_ignore')</code> to be counted again.
-        </p>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Exclude your own visits</CardTitle>
+          <CardDescription>
+            Open your website, open the browser console (developer tools) and run the following. The script then ignores
+            visits from this browser on that site.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <CodeBlock code={IGNORE_SNIPPET} />
+          <p className="text-xs text-muted-foreground">
+            Use <InlineCode>localStorage.removeItem('pa_ignore')</InlineCode> to be counted again.
+          </p>
+        </CardContent>
+      </Card>
 
-      {isAdmin ? <DangerZone /> : null}
+      {canManage ? <DangerZone /> : null}
     </div>
   );
 }
@@ -78,6 +100,9 @@ function GeneralSettings({ readOnly, onSaved }: { readOnly: boolean; onSaved: ()
   const [domains, setDomains] = useState<string[]>(site.domains);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const nameId = useId();
+  const { user } = useAuth();
+  const maxDomains = user?.role === 'member' ? MEMBER_MAX_DOMAINS : MAX_DOMAINS;
 
   useEffect(() => {
     setName(site.name);
@@ -104,37 +129,33 @@ function GeneralSettings({ readOnly, onSaved }: { readOnly: boolean; onSaved: ()
   };
 
   return (
-    <section className="card section">
-      <h2 className="section-title">General</h2>
-      <form className="form" onSubmit={onSubmit}>
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input
-            className="input"
-            value={name}
-            maxLength={100}
-            required
-            readOnly={readOnly}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </label>
-        <DomainsInput value={domains} onChange={setDomains} disabled={readOnly} />
-        {message ? (
-          <div className={message.kind === 'ok' ? 'form-ok' : 'form-error'} role="status">
-            {message.text}
+    <Card>
+      <form onSubmit={onSubmit} className="flex flex-col gap-4">
+        <CardHeader>
+          <CardTitle>General</CardTitle>
+          <CardDescription>{readOnly ? 'Only admins and the site owner can change these settings.' : 'Name and domains of this site.'}</CardDescription>
+        </CardHeader>
+        <CardContent className="flex max-w-xl flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <Label htmlFor={nameId}>Name</Label>
+            <Input id={nameId} value={name} maxLength={100} required readOnly={readOnly} onChange={(e) => setName(e.target.value)} />
           </div>
-        ) : null}
-        {readOnly ? (
-          <p className="muted small">Only admins can change site settings.</p>
-        ) : (
-          <div className="form-actions">
-            <button type="submit" className="btn btn-primary" disabled={busy || !dirty}>
-              {busy ? 'Saving…' : 'Save'}
-            </button>
-          </div>
+          <DomainsInput value={domains} onChange={setDomains} disabled={readOnly} max={maxDomains} />
+          {message ? (
+            <p className={message.kind === 'ok' ? 'text-sm text-good-text' : 'text-sm text-destructive'} role="status">
+              {message.text}
+            </p>
+          ) : null}
+        </CardContent>
+        {readOnly ? null : (
+          <CardFooter className="justify-end">
+            <Button type="submit" disabled={busy || !dirty}>
+              {busy ? 'Saving…' : 'Save changes'}
+            </Button>
+          </CardFooter>
         )}
       </form>
-    </section>
+    </Card>
   );
 }
 
@@ -147,8 +168,16 @@ function DangerZone() {
   const confirmed = confirm === site.name || confirm === displayText(site.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const confirmId = useId();
 
-  const onDelete = async () => {
+  const close = () => {
+    setOpen(false);
+    setConfirm('');
+    setError(null);
+  };
+
+  const onDelete = async (e: FormEvent) => {
+    e.preventDefault();
     if (!confirmed) return;
     setBusy(true);
     setError(null);
@@ -163,57 +192,52 @@ function DangerZone() {
   };
 
   return (
-    <section className="card section danger">
-      <h2 className="section-title">Danger zone</h2>
-      <div className="danger-row">
+    <Card className="ring-destructive/30">
+      <CardHeader>
+        <CardTitle className="text-destructive">Danger zone</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <strong>Delete this site</strong>
-          <p className="muted small">Permanently deletes the site and all its analytics and Speed Insights data.</p>
+          <div className="text-sm font-medium">Delete this site</div>
+          <p className="text-sm text-muted-foreground">Permanently deletes the site and all its analytics and Speed Insights data.</p>
         </div>
-        <button type="button" className="btn btn-danger" onClick={() => setOpen(true)}>
+        <Button type="button" variant="destructive" onClick={() => setOpen(true)} className="self-start sm:self-auto">
+          <Trash2Icon aria-hidden="true" />
           Delete site
-        </button>
-      </div>
-      {open ? (
-        <Modal
-          title="Delete site"
-          onClose={() => {
-            setOpen(false);
-            setConfirm('');
-          }}
-          footer={
-            <>
-              <button type="button" className="btn" onClick={() => setOpen(false)}>
-                Cancel
-              </button>
-              <button type="button" className="btn btn-danger" disabled={busy || !confirmed} onClick={onDelete}>
-                {busy ? 'Deleting…' : 'Delete permanently'}
-              </button>
-            </>
-          }
-        >
-          <p>
-            This deletes <strong className="break-all bidi-isolate">{displayText(site.name)}</strong> and all of its data. This cannot be undone.
-          </p>
-          <label className="field">
-            <span className="field-label">
-              Type <strong className="break-all bidi-isolate">{displayText(site.name)}</strong> to confirm
-            </span>
-            <input
-              className="input"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </label>
-          {error ? (
-            <div className="form-error" role="alert">
-              {error}
+        </Button>
+      </CardContent>
+      <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : close())}>
+        <DialogContent className="sm:max-w-md">
+          <form onSubmit={onDelete} className="grid gap-4">
+            <DialogHeader>
+              <DialogTitle>Delete site</DialogTitle>
+              <DialogDescription>
+                This deletes <strong className="bidi-isolate break-all text-foreground">{displayText(site.name)}</strong> and all of
+                its data. This cannot be undone.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor={confirmId} className="block leading-snug">
+                Type <strong className="bidi-isolate break-all">{displayText(site.name)}</strong> to confirm
+              </Label>
+              <Input id={confirmId} value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" spellCheck={false} />
             </div>
-          ) : null}
-        </Modal>
-      ) : null}
-    </section>
+            {error ? (
+              <p className="text-sm text-destructive" role="alert">
+                {error}
+              </p>
+            ) : null}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={close}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="destructive" disabled={busy || !confirmed}>
+                {busy ? 'Deleting…' : 'Delete permanently'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }

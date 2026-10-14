@@ -9,6 +9,8 @@ import {
   type BreakdownDimension,
   type BreakdownRow,
   type EventPropRow,
+  type LiveAll,
+  type LiveSite,
   type TimeseriesPoint,
   type Totals,
 } from './queries.js';
@@ -44,6 +46,8 @@ export type StatsOp =
       limit: number;
     }
   | { kind: 'realtime'; siteId: string; now: number }
+  | { kind: 'live'; siteId: string; now: number }
+  | { kind: 'liveAll'; siteIds: string[] | null; now: number }
   | { kind: 'overview'; sites: OverviewSiteInput[]; range: ResolvedRange }
   | {
       kind: 'vitalsSummary';
@@ -92,6 +96,8 @@ export interface StatsResults {
   breakdown: BreakdownRow[];
   eventProps: EventPropRow[];
   realtime: number;
+  live: LiveSite;
+  liveAll: LiveAll;
   overview: OverviewSite[];
   vitalsSummary: VitalsSummary;
   vitalsTimeseries: VitalsPoint[];
@@ -137,6 +143,10 @@ export class StatsHandlers {
         return this.stats.eventProps(op.siteId, op.range, op.filters, op.event, op.limit);
       case 'realtime':
         return this.stats.realtime(op.siteId, op.now);
+      case 'live':
+        return this.stats.live(op.siteId, op.now);
+      case 'liveAll':
+        return this.stats.liveAll(op.siteIds, op.now);
       case 'overview':
         return this.overview(op.sites, op.range);
       case 'vitalsSummary':

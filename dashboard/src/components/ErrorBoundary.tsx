@@ -52,18 +52,29 @@ export class ErrorBoundary extends Component<Props, State> {
     if (!this.state.hasError) return this.props.children;
     const app = this.props.variant === 'app';
     const Heading = app ? 'h1' : 'h2';
+    const link =
+      'font-medium text-foreground underline underline-offset-4 hover:text-foreground/80';
     return (
-      <div className={`crash${app ? ' crash-page' : ' card'}`} role="alert">
-        <Heading>Something went wrong</Heading>
-        <p className="muted">An unexpected error occurred while showing this page.</p>
-        <p>
-          <a href={currentHref()} onClick={reload}>
+      <div
+        role="alert"
+        className={
+          app
+            ? 'flex min-h-dvh flex-col items-center justify-center gap-2 p-6 text-center'
+            : 'flex flex-col items-center gap-2 rounded-xl px-6 py-12 text-center ring-1 ring-foreground/10'
+        }
+      >
+        <Heading className="text-lg font-semibold">Something went wrong</Heading>
+        <p className="text-sm text-muted-foreground">An unexpected error occurred while showing this page.</p>
+        <p className="text-sm">
+          <a className={link} href={currentHref()} onClick={reload}>
             Reload the page
           </a>
           {app ? null : (
             <>
-              {' · '}
-              <a href="/">Back to all sites</a>
+              <span className="text-muted-foreground">{' · '}</span>
+              <a className={link} href="/">
+                Back to all sites
+              </a>
             </>
           )}
         </p>

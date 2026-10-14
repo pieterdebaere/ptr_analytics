@@ -1,3 +1,4 @@
+import { enforceHostSplit, statusOriginWarnings } from '../uptime/status/hosts.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -34,6 +35,15 @@ function acceptsHtml(request: FastifyRequest): boolean {
 export async function staticRoutes(app: FastifyInstance, opts: { ctx: AppContext }): Promise<void> {
   const { ctx } = opts;
 
+  // Status-page hosts (STATUS_PAGE_ORIGIN, verified custom domains) only serve the public
+  // status page surface; the dashboard origin redirects status pages to STATUS_PAGE_ORIGIN.
+  // Root-level hook: applies to every route, including those registered before (spec §8.4).
+  for (const w of statusOriginWarnings(ctx.config)) ctx.log.warn(w);
+  app.addHook('onRequest', async (request, reply) => {
+    const answered = await enforceHostSplit(ctx, request, reply);
+    if (answered) return answered;
+  });
+
   app.get('/healthz', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
     return { ok: true };
@@ -66,6 +76,7 @@ export async function staticRoutes(app: FastifyInstance, opts: { ctx: AppContext
     return reply.code(200).type('text/html; charset=utf-8').header('Cache-Control', 'no-cache').send(html);
   };
 
+  // (On a verified custom status-page domain the host hook redirects `/` to its page.)
   app.get('/', async (_request, reply) => sendIndex(reply));
 
   if (hasDashboard) {

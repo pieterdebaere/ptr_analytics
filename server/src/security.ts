@@ -10,6 +10,9 @@ const PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=(), payment=()
 /** Routes that are embedded on third-party sites. */
 const CROSS_ORIGIN_PATHS = new Set(['/script.js', '/api/event']);
 
+/** Dashboard pages opened from mailed links carrying a token: never leak anything via Referer. */
+const NO_REFERRER_PATHS = new Set(['/verify', '/reset']);
+
 export function pathOf(url: string): string {
   const q = url.indexOf('?');
   return q === -1 ? url : url.slice(0, q);
@@ -23,7 +26,7 @@ export function isApiPath(path: string): boolean {
 export function applySecurityHeaders(request: FastifyRequest, reply: FastifyReply, config: Config): void {
   reply.header('Content-Security-Policy', CSP);
   reply.header('X-Content-Type-Options', 'nosniff');
-  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  reply.header('Referrer-Policy', NO_REFERRER_PATHS.has(pathOf(request.url)) ? 'no-referrer' : 'strict-origin-when-cross-origin');
   reply.header('X-Frame-Options', 'DENY');
   reply.header('Cross-Origin-Opener-Policy', 'same-origin');
   reply.header('Permissions-Policy', PERMISSIONS_POLICY);
@@ -45,14 +48,29 @@ export function registerSecurityHeaders(app: FastifyInstance, config: Config): v
 }
 
 /**
- * CSRF (spec 4.6): every non-GET/HEAD/OPTIONS request except the public ingest route must
+ * CSRF (spec 4.6): every non-GET/HEAD/OPTIONS request except the public ingest route and the
+ * Stripe webhook (server-to-server, authenticated by its signature, never by cookies) must
  * carry `X-PA-Request: 1`; a present Origin must equal PUBLIC_URL's origin (or the request Host).
  *
  * The exemption is decided on the *matched route* (`routeOptions.url`), not on the raw URL:
  * the router decodes and normalises paths (`/%61pi/users` routes to `/api/users`), so a check
  * on the raw string could be bypassed. Everything else is checked (default deny).
  */
-const CSRF_EXEMPT_ROUTES = new Set(['/api/event']);
+const CSRF_EXEMPT_ROUTES = new Set([
+  '/api/event',
+  '/api/billing/webhook',
+  // RFC 8058 one-click unsubscribe: mail providers POST without our header; authorised by the
+  // 256-bit token in the URL, the only effect is unsubscribing that one recipient.
+  '/api/notification-channels/unsubscribe',
+  // E-mail double opt-in answer and re-subscribe (plain HTML forms on the pages behind the links in
+  // our mails): authorised by the 256-bit token in the POST body, effect limited to that one recipient.
+  '/api/notification-channels/verify',
+  '/api/notification-channels/resubscribe',
+  // Uptime push monitors (spec 8.4): public, cookie-less, authorised by the token in the URL
+  // or in the X-Push-Token header.
+  '/api/push/:token',
+  '/api/push',
+]);
 
 export function registerCsrfCheck(app: FastifyInstance, config: Config): void {
   app.addHook('onRequest', async (request, reply) => {

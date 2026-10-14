@@ -140,3 +140,22 @@ export function normalizeDomain(input: string): string | null {
   if (!re.test(host)) return null;
   return wildcard ? `*.${host}` : host;
 }
+
+// Characters that never appear in a plain address but do in display-name forms
+// ("Name <a@b.c>", comments, quoted local parts, lists).
+const EMAIL_FORBIDDEN = /[\s<>()",;:[\]\\]/;
+
+/**
+ * Plain e-mail address check for sign-up / reset forms: exactly one "@", a
+ * dotted domain, no whitespace or display-name syntax, at most 254 chars.
+ */
+export function isPlainEmail(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length < 3 || value.length > 254) return false;
+  if (EMAIL_FORBIDDEN.test(value)) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+  const at = value.indexOf('@');
+  if (at < 1 || at !== value.lastIndexOf('@')) return false;
+  const domain = value.slice(at + 1);
+  return /^[^.]+(\.[^.]+)+$/.test(domain);
+}

@@ -57,6 +57,16 @@ describe('security headers', () => {
       expect(res.headers['strict-transport-security']).toBeUndefined();
     }
   });
+
+  it('send no Referer at all from the pages opened by mailed token links', async () => {
+    for (const url of ['/verify', '/reset', '/reset?x=1']) {
+      const res = await t.app.inject({ method: 'GET', url, headers: html });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers['referrer-policy'], url).toBe('no-referrer');
+      expect(res.headers['content-security-policy']).toBe(CSP);
+    }
+    expect((await t.app.inject({ method: 'GET', url: '/login', headers: html })).headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
+  });
 });
 
 describe('dashboard SPA', () => {

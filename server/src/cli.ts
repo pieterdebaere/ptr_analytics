@@ -1,19 +1,25 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { ConfigError, isValidEmail, loadConfig } from './config.js';
+import { ApiKeyRepo } from './auth/api-keys.js';
 import { AuthSessionRepo } from './auth/sessions.js';
 import { openDatabase } from './db/index.js';
 import { ROLES, UserRepo, type Role } from './data/users.js';
 import { generatePassword } from './lib/ids.js';
 import { hashPassword } from './lib/password.js';
+import { deleteMfa } from './auth/mfa.js';
+import { MONITORS_USAGE, MonitorsCliError, runMonitorsCli } from './uptime/data/cli.js';
 
 const USAGE = `PTR Analytics admin CLI
 
 Usage:
-  cli create-user <email> [admin|viewer]   create a user (default role: admin) and print a generated password
-  cli reset-password <email>               generate and print a new password (signs out all sessions)
+  cli create-user <email> [admin|viewer|member]
+                                           create a user (default role: admin) and print a generated password
+  cli reset-password <email>               generate and print a new password (signs out all sessions, revokes API keys)
   cli list-users                           list users
   cli delete-user <email>                  delete a user (the last admin cannot be deleted)
+  cli mfa-reset <email>                    remove two-factor authentication (TOTP + recovery codes), sign out and revoke API keys
+${MONITORS_USAGE}
 
 The database location is taken from DATA_DIR (default ./data).`;
 
@@ -34,6 +40,7 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
   const db = openDatabase(path.join(config.dataDir, 'analytics.db'));
   const users = new UserRepo(db);
   const sessions = new AuthSessionRepo(db);
+  const apiKeys = new ApiKeyRepo(db);
   try {
     const email = (args[0] ?? '').trim().toLowerCase();
     const needEmail = (): void => {
@@ -43,7 +50,10 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
       case 'create-user': {
         needEmail();
         const role = (args[1] ?? 'admin') as Role;
-        if (!ROLES.includes(role)) throw new CliError('Role must be "admin" or "viewer".');
+        if (!ROLES.includes(role)) throw new CliError('Role must be "admin", "viewer" or "member".');
+        if (role === 'viewer' && config.cloud.signupEnabled) {
+          throw new CliError('Viewer accounts are not available in hosted mode (SIGNUP_ENABLED): viewers can read every member\'s sites.');
+        }
         const password = generatePassword();
         const user = users.create(email, await hashPassword(password), role, Date.now());
         if (!user) throw new CliError(`A user with email ${printable(email)} already exists.`);
@@ -58,7 +68,9 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         const password = generatePassword();
         users.setPasswordHash(found.user.id, await hashPassword(password));
         sessions.deleteForUser(found.user.id);
+        const revoked = apiKeys.deleteForUser(found.user.id);
         out(`New password for ${printable(found.user.email)} (shown only once): ${password}`);
+        if (revoked > 0) out(`${revoked} API key(s) revoked.`);
         return;
       }
       case 'list-users': {
@@ -72,8 +84,40 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
         const found = users.byEmailWithHash(email);
         if (!found) throw new CliError(`No user with email ${printable(email)}.`);
         if (found.user.role === 'admin' && users.countAdmins() <= 1) throw new CliError('The last admin cannot be deleted.');
-        users.delete(found.user.id);
+        const billing = users.billing(found.user.id);
+        if (billing?.stripeCustomerId != null) {
+          throw new CliError(
+            'This account has a Stripe customer. Delete it from the dashboard (Users) instead: that cancels every ' +
+              'subscription and deletes the Stripe customer before the account is removed.',
+          );
+        }
+        users.delete(found.user.id, Date.now());
         out(`Deleted ${printable(found.user.email)}`);
+        out('Its sites are hidden now; the server purges their data in the background (at the latest on its next start).');
+        return;
+      }
+      case 'mfa-reset': {
+        needEmail();
+        const found = users.byEmailWithHash(email);
+        if (!found) throw new CliError(`No user with email ${printable(email)}.`);
+        const had = deleteMfa(db, found.user.id);
+        sessions.deleteForUser(found.user.id);
+        const revoked = apiKeys.deleteForUser(found.user.id);
+        out(
+          had
+            ? `Two-factor authentication removed for ${printable(found.user.email)}; all sessions signed out. The user can enrol again after signing in.`
+            : `${printable(found.user.email)} had no two-factor authentication; all sessions signed out.`,
+        );
+        if (revoked > 0) out(`${revoked} API key(s) revoked.`);
+        return;
+      }
+      case 'monitors': {
+        try {
+          runMonitorsCli(db, args, out, printable);
+        } catch (err) {
+          if (err instanceof MonitorsCliError) throw new CliError(err.message);
+          throw err;
+        }
         return;
       }
       default:

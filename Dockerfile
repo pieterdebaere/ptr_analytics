@@ -13,6 +13,7 @@ COPY package.json package-lock.json tsconfig.base.json ./
 COPY server/package.json server/
 COPY tracker/package.json tracker/
 COPY dashboard/package.json dashboard/
+COPY landing/package.json landing/
 RUN npm ci --ignore-scripts --no-audit --no-fund
 
 COPY server server

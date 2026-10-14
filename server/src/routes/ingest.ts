@@ -70,6 +70,9 @@ export async function ingestRoutes(app: FastifyInstance, opts: { ctx: AppContext
       if (!hostnameAllowed(site.domains, originHost)) return invalid(reply);
     }
 
+    // Over the owner's allowance (hosted mode): accepted but silently dropped.
+    if (site.suspended) return reply.code(202).send();
+
     const userAgent = request.headers['user-agent'];
     if (isBot(userAgent)) return reply.code(202).send();
     const ua = userAgent as string;

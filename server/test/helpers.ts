@@ -5,6 +5,8 @@ import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fas
 import { buildApp, type BuildOptions } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import type { AppContext } from '../src/context.js';
+import { StripeError, type CheckoutParams, type StripeClient, type StripeSubscription } from '../src/billing/stripe.js';
+import type { MailTransport, OutgoingMail } from '../src/mail.js';
 
 export const ADMIN_EMAIL = 'admin@example.com';
 export const ADMIN_PASSWORD = 'correct horse battery';
@@ -128,3 +130,173 @@ export function pageview(site: string, url: string, extra: Record<string, unknow
 export const MIN = 60_000;
 export const HOUR = 3_600_000;
 export const DAY = 86_400_000;
+
+// ---- hosted ("cloud") mode ----
+
+export const CLOUD_URL = 'https://analytics.example.com';
+
+export const CLOUD_ENV: Record<string, string> = {
+  PUBLIC_URL: CLOUD_URL,
+  SIGNUP_ENABLED: 'true',
+  SMTP_URL: 'smtp://user:smtp-secret@127.0.0.1:2525',
+  MAIL_FROM: 'PTR Analytics <no-reply@example.com>',
+};
+
+export const BILLING_ENV: Record<string, string> = {
+  ...CLOUD_ENV,
+  BILLING_ENABLED: 'true',
+  STRIPE_SECRET_KEY: 'sk_test_supersecretkey123',
+  STRIPE_WEBHOOK_SECRET: 'whsec_testwebhooksecret123',
+  STRIPE_PRICE_ID: 'price_persite123',
+  FREE_SITES: '1',
+};
+
+export interface MailCapture {
+  sent: OutgoingMail[];
+  transport: MailTransport;
+}
+
+export function captureMail(): MailCapture {
+  const sent: OutgoingMail[] = [];
+  return {
+    sent,
+    transport: {
+      async send(m) {
+        sent.push(m);
+      },
+    },
+  };
+}
+
+/** Extract the token from the (only) link in a captured mail. */
+export function tokenFromMail(mail: OutgoingMail | undefined, page: 'verify' | 'reset'): string {
+  if (!mail) throw new Error('no mail');
+  const m = new RegExp(`${CLOUD_URL.replace(/[.]/g, '\\.')}/${page}#token=([A-Za-z0-9_-]{43})`).exec(mail.text);
+  if (!m) throw new Error(`no ${page} link in mail: ${mail.text}`);
+  return m[1] as string;
+}
+
+export interface CloudTestApp extends TestApp {
+  mail: MailCapture;
+  stripe: FakeStripe;
+}
+
+export async function createCloudApp(opts: { env?: Record<string, string>; billing?: boolean } = {}): Promise<CloudTestApp> {
+  const mail = captureMail();
+  const stripe = new FakeStripe();
+  const t = await createTestApp({
+    env: { ...(opts.billing ? BILLING_ENV : CLOUD_ENV), ...opts.env },
+    build: { mailTransport: mail.transport, stripe },
+  });
+  return { ...t, mail, stripe };
+}
+
+/** POST with the CSRF header (no session). */
+export function post(app: FastifyInstance, url: string, payload: unknown, ip = '198.51.100.7'): Promise<LightMyRequestResponse> {
+  return app.inject({ method: 'POST', url, headers: { 'x-pa-request': '1' }, remoteAddress: ip, payload: payload as InjectOptions['payload'] });
+}
+
+/** Sign up + verify a member through the API; returns its session cookie and id. */
+export async function signupMember(t: CloudTestApp, email: string, password = 'member password 123'): Promise<{ cookie: string; id: number }> {
+  const before = t.mail.sent.length;
+  const res = await post(t.app, '/api/auth/signup', { email, password, acceptTerms: true }, `198.51.100.${(before % 200) + 1}`);
+  if (res.statusCode !== 202) throw new Error(`signup failed: ${res.statusCode} ${res.body}`);
+  await t.ctx.mailer?.idle();
+  const token = tokenFromMail(t.mail.sent[t.mail.sent.length - 1], 'verify');
+  const v = await post(t.app, '/api/auth/verify', { token, password });
+  if (v.statusCode !== 200) throw new Error(`verify failed: ${v.statusCode} ${v.body}`);
+  return { cookie: cookieFrom(v), id: (v.json() as { user: { id: number } }).user.id };
+}
+
+let fakeSeq = 0;
+const fakeId = (prefix: string): string => `${prefix}_${(++fakeSeq).toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/** In-memory Stripe for tests (no network). */
+export class FakeStripe implements StripeClient {
+  customers = new Map<string, { email: string; userId: number; deleted: boolean }>();
+  subs = new Map<string, StripeSubscription>();
+  checkouts: CheckoutParams[] = [];
+  updates: Array<{ id: string; p: Parameters<StripeClient['updateSubscription']>[1] }> = [];
+  calls: string[] = [];
+  /** When set, every call fails like an unreachable API. */
+  failing = false;
+  /** When set, quantity increases stay pending (payment failed). */
+  declineIncreases = false;
+  priceId = 'price_persite123';
+
+  private check(name: string): void {
+    this.calls.push(name);
+    if (this.failing) throw new StripeError(500, 'api_error', undefined);
+  }
+
+  async createCustomer(p: { email: string; userId: number }): Promise<{ id: string }> {
+    this.check('createCustomer');
+    const id = fakeId('cus');
+    this.customers.set(id, { ...p, deleted: false });
+    return { id };
+  }
+
+  async createCheckoutSession(p: CheckoutParams): Promise<{ url: string }> {
+    this.check('createCheckoutSession');
+    this.checkouts.push(p);
+    return { url: `https://checkout.stripe.com/c/pay/${fakeId('cs_test')}` };
+  }
+
+  async createPortalSession(p: { customerId: string; returnUrl: string }): Promise<{ url: string }> {
+    this.check('createPortalSession');
+    return { url: `https://billing.stripe.com/p/session/${p.customerId}` };
+  }
+
+  async listSubscriptions(customerId: string): Promise<StripeSubscription[]> {
+    this.check('listSubscriptions');
+    return [...this.subs.values()].filter((s) => s.customer === customerId).sort((a, b) => b.created - a.created).map((s) => structuredClone(s));
+  }
+
+  async retrieveSubscription(id: string): Promise<StripeSubscription> {
+    this.check('retrieveSubscription');
+    const s = this.subs.get(id);
+    if (!s) throw new StripeError(404, 'invalid_request_error', 'resource_missing');
+    return structuredClone(s);
+  }
+
+  async updateSubscription(id: string, p: Parameters<StripeClient['updateSubscription']>[1]): Promise<StripeSubscription> {
+    this.check('updateSubscription');
+    this.updates.push({ id, p });
+    const s = this.subs.get(id);
+    if (!s) throw new StripeError(404, 'invalid_request_error', 'resource_missing');
+    if (p.cancelAtPeriodEnd !== undefined) s.cancelAtPeriodEnd = p.cancelAtPeriodEnd;
+    if (p.item) {
+      const item = s.items.find((i) => i.id === p.item?.id);
+      if (!item) throw new StripeError(400, 'invalid_request_error', undefined);
+      const pending = this.declineIncreases && p.paymentBehavior === 'pending_if_incomplete' && p.item.quantity > item.quantity;
+      if (!pending) item.quantity = p.item.quantity;
+    }
+    return structuredClone(s);
+  }
+
+  async cancelSubscription(id: string): Promise<void> {
+    this.check('cancelSubscription');
+    const s = this.subs.get(id);
+    if (s) s.status = 'canceled';
+  }
+
+  async deleteCustomer(id: string): Promise<void> {
+    this.check('deleteCustomer');
+    const c = this.customers.get(id);
+    if (c) c.deleted = true;
+  }
+
+  /** Simulate a completed Checkout: a subscription for the customer. */
+  addSubscription(customer: string, quantity: number, status = 'active', priceId = this.priceId): StripeSubscription {
+    const sub: StripeSubscription = {
+      id: fakeId('sub'),
+      customer,
+      status,
+      created: Math.floor(Date.now() / 1000) + this.subs.size,
+      cancelAtPeriodEnd: false,
+      items: [{ id: fakeId('si'), priceId, quantity }],
+    };
+    this.subs.set(sub.id, sub);
+    return sub;
+  }
+}

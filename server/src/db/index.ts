@@ -1,14 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { MIGRATIONS } from './migrations.js';
+import { MIGRATIONS, type Migration } from './migrations.js';
 
 export type DB = Database.Database;
 
 const JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024;
 
+export interface MigrationLog {
+  warn(msg: string): void;
+}
+
+const consoleLog: MigrationLog = { warn: (msg) => console.warn(msg) };
+
 /** Open (and create if needed) the SQLite database and run pending migrations. */
-export function openDatabase(file: string): DB {
+export function openDatabase(file: string, log: MigrationLog = consoleLog): DB {
   if (file !== ':memory:') {
     // The database holds password hashes, session hashes and the daily salt: owner-only.
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -31,23 +37,80 @@ export function openDatabase(file: string): DB {
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
-  migrate(db);
+  migrate(db, log);
   return db;
 }
 
-export function migrate(db: DB): void {
+interface FkViolation {
+  table: string;
+  rowid: number | null;
+  parent: string;
+  fkid: number;
+}
+
+/**
+ * Foreign-key violations of rows that reference one of `parents` (only the child tables
+ * that point at them are scanned, so huge unrelated tables such as events are never read).
+ */
+function fkViolations(db: DB, parents: readonly string[]): FkViolation[] {
+  const wanted = new Set(parents.map((p) => p.toLowerCase()));
+  const tables = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).all() as Array<{ name: string }>).map(
+    (r) => r.name,
+  );
+  const out: FkViolation[] = [];
+  for (const table of tables) {
+    const quoted = `"${table.replace(/"/g, '""')}"`;
+    const fks = db.pragma(`foreign_key_list(${quoted})`) as Array<{ table: string }>;
+    if (!fks.some((fk) => wanted.has(fk.table.toLowerCase()))) continue;
+    for (const v of db.pragma(`foreign_key_check(${quoted})`) as FkViolation[]) {
+      if (wanted.has(v.parent.toLowerCase())) out.push(v);
+    }
+  }
+  return out;
+}
+
+const violationKey = (v: FkViolation): string => `${v.table}\n${v.rowid}\n${v.parent}\n${v.fkid}`;
+
+export function migrate(db: DB, log: MigrationLog = consoleLog, migrations: readonly Migration[] = MIGRATIONS): void {
   const current = db.pragma('user_version', { simple: true }) as number;
-  if (current > MIGRATIONS.length) {
+  if (current > migrations.length) {
     throw new Error(
-      `Database schema version ${current} is newer than this server supports (${MIGRATIONS.length}). Upgrade PTR Analytics.`,
+      `Database schema version ${current} is newer than this server supports (${migrations.length}). Upgrade PTR Analytics.`,
     );
   }
-  for (let v = current; v < MIGRATIONS.length; v++) {
-    const sql = MIGRATIONS[v] as string;
-    db.transaction(() => {
-      db.exec(sql);
-      db.pragma(`user_version = ${v + 1}`);
-    })();
+  for (let v = current; v < migrations.length; v++) {
+    const m = migrations[v] as Migration;
+    if (typeof m === 'string') {
+      db.transaction(() => {
+        db.exec(m);
+        db.pragma(`user_version = ${v + 1}`);
+      })();
+      continue;
+    }
+    // Table rebuild: foreign keys must be off (they cannot be toggled inside a transaction).
+    const fkWasOn = (db.pragma('foreign_keys', { simple: true }) as number) === 1;
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        // Rows that were already orphaned before the migration are not its fault.
+        const before = new Set(fkViolations(db, m.rebuilds).map(violationKey));
+        db.exec(m.sql);
+        const after = fkViolations(db, m.rebuilds);
+        const added = after.filter((x) => !before.has(violationKey(x)));
+        if (added.length > 0) throw new Error(`migration ${v + 1} would violate foreign keys`);
+        if (after.length > 0) {
+          const tables = [...new Set(after.map((x) => x.table))].join(', ');
+          log.warn(
+            `Database migration ${v + 1}: ${after.length} pre-existing row(s) in ${tables} reference missing ` +
+              `${m.rebuilds.join('/')} rows (left over from before this upgrade). They were kept unchanged; ` +
+              'run `PRAGMA foreign_key_check` on a copy of the database to inspect them.',
+          );
+        }
+        db.pragma(`user_version = ${v + 1}`);
+      })();
+    } finally {
+      if (fkWasOn) db.pragma('foreign_keys = ON');
+    }
   }
 }
 

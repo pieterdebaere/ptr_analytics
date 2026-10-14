@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, setUnauthorizedHandler } from '../api/client';
+import { ApiError, api, isUpgradeRequired, setUnauthorizedHandler } from '../api/client';
 
 function mockFetch(status: number, body?: unknown) {
   const fn = vi.fn(async (_url: string, _init?: RequestInit) =>
@@ -86,5 +86,50 @@ describe('api client', () => {
     await expect(api.createUser({ email: 'a@b.c', password: 'x'.repeat(12), role: 'viewer' })).rejects.toThrow(
       'user already exists',
     );
+  });
+
+  it('exposes the 402 upgrade code', async () => {
+    mockFetch(402, { error: 'site limit reached', code: 'upgrade_required' });
+    const err = await api.createSite({ name: 'x', domains: ['x.com'] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe('upgrade_required');
+    expect(isUpgradeRequired(err)).toBe(true);
+    mockFetch(402, { error: 'x', code: '<script>' });
+    const err2 = await api.createSite({ name: 'x', domains: ['x.com'] }).catch((e: unknown) => e);
+    expect((err2 as ApiError).code).toBeUndefined();
+  });
+
+  it('calls the hosted-mode and live endpoints', async () => {
+    const fetch = mockFetch(200, { url: 'https://checkout.stripe.com/c/pay/x' });
+    await api.billingCheckout(3);
+    expect(fetch.mock.calls[0]![0]).toBe('/api/billing/checkout');
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ paidSites: 3 });
+    expect((fetch.mock.calls[0]![1]?.headers as Record<string, string>)['X-PA-Request']).toBe('1');
+
+    const del = mockFetch(204);
+    await api.deleteAccount('secret-password');
+    expect(del.mock.calls[0]![0]).toBe('/api/account');
+    expect(del.mock.calls[0]![1]?.method).toBe('DELETE');
+    expect(JSON.parse(String(del.mock.calls[0]![1]?.body))).toEqual({ password: 'secret-password' });
+
+    const live = mockFetch(200, { visitors: 1, countries: [], recent: [] });
+    await api.siteLive('abc123def456');
+    await api.live();
+    expect(live.mock.calls.map((c) => c[0])).toEqual(['/api/sites/abc123def456/stats/live', '/api/live']);
+
+    const signup = mockFetch(202, { ok: true });
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    await api.signup('a@b.c', 'x'.repeat(12));
+    expect(JSON.parse(String(signup.mock.calls[0]![1]?.body))).toEqual({ email: 'a@b.c', password: 'x'.repeat(12), acceptTerms: true });
+  });
+
+  it('does not redirect when a public endpoint answers 401', async () => {
+    mockFetch(401, { error: 'unauthorized' });
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    await expect(api.publicConfig()).rejects.toBeInstanceOf(ApiError);
+    await expect(api.verifyEmail('tok', 'pw')).rejects.toBeInstanceOf(ApiError);
+    expect(handler).not.toHaveBeenCalled();
   });
 });

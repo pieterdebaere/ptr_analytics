@@ -1,18 +1,25 @@
 import { useId, useState, type KeyboardEvent } from 'react';
-import { displayText, normalizeDomain } from '../lib/safety';
-import { CloseIcon } from './Icons';
+import { XIcon } from 'lucide-react';
+import { Label } from '@/components/ui/label';
+import { displayText, normalizeDomain } from '@/lib/safety';
+import { cn } from '@/lib/utils';
 
 export const MAX_DOMAINS = 20;
+/** Hosted mode: members may list at most this many domains per site. */
+export const MEMBER_MAX_DOMAINS = 5;
 
 /** Chips input for site domains (hostname, localhost or *.example.com). */
 export function DomainsInput({
   value,
   onChange,
   disabled = false,
+  max = MAX_DOMAINS,
 }: {
   value: string[];
   onChange: (domains: string[]) => void;
   disabled?: boolean;
+  /** maximum number of entries (20, or 5 for hosted-mode members) */
+  max?: number;
 }) {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -30,8 +37,8 @@ export function DomainsInput({
         return false;
       }
       if (!next.includes(d)) {
-        if (next.length >= MAX_DOMAINS) {
-          setError(`A site can have at most ${MAX_DOMAINS} domains.`);
+        if (next.length >= max) {
+          setError(`A site can have at most ${max} domains.`);
           return false;
         }
         next.push(d);
@@ -57,22 +64,26 @@ export function DomainsInput({
   };
 
   return (
-    <div className="field">
-      <label className="field-label" htmlFor={inputId}>
-        Domains
-      </label>
-      <div className={`chips-input${disabled ? ' is-disabled' : ''}`}>
+    <div className="flex flex-col gap-2">
+      <Label htmlFor={inputId}>Domains</Label>
+      <div
+        className={cn(
+          'flex min-h-8 w-full flex-wrap items-center gap-1 rounded-lg border border-input bg-transparent px-1 py-1 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30',
+          disabled && 'cursor-not-allowed bg-input/50 opacity-70',
+          error && 'border-destructive ring-3 ring-destructive/20',
+        )}
+      >
         {value.map((d) => (
-          <span key={d} className="chip">
-            <bdi className="bidi-isolate">{displayText(d)}</bdi>
+          <span key={d} className="inline-flex h-6 max-w-full items-center gap-1 rounded-md bg-muted pr-0.5 pl-2 text-xs font-medium">
+            <bdi className="bidi-isolate truncate">{displayText(d)}</bdi>
             {!disabled ? (
               <button
                 type="button"
-                className="chip-remove"
+                className="inline-flex size-5 items-center justify-center rounded text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
                 aria-label={`Remove ${displayText(d)}`}
                 onClick={() => onChange(value.filter((x) => x !== d))}
               >
-                <CloseIcon size={12} />
+                <XIcon className="size-3" aria-hidden="true" />
               </button>
             ) : null}
           </span>
@@ -80,10 +91,11 @@ export function DomainsInput({
         {!disabled ? (
           <input
             id={inputId}
-            className="chips-input-field"
+            className="h-6 min-w-32 flex-1 bg-transparent px-1.5 text-base outline-none placeholder:text-muted-foreground md:text-sm"
             value={draft}
             placeholder={value.length ? 'Add another…' : 'example.com'}
             aria-describedby={helpId}
+            aria-invalid={error ? true : undefined}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
             onBlur={() => {
@@ -93,13 +105,13 @@ export function DomainsInput({
           />
         ) : null}
       </div>
-      <div id={helpId} className="field-help">
+      <div id={helpId} className="text-xs">
         {error ? (
-          <span className="form-error" role="alert">
+          <span className="text-destructive" role="alert">
             {error}
           </span>
         ) : (
-          <span className="muted">
+          <span className="text-muted-foreground">
             Press Enter to add. <code>example.com</code> also matches <code>www.example.com</code>; use{' '}
             <code>*.example.com</code> for all subdomains.
           </span>

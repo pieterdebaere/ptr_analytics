@@ -1,3 +1,5 @@
+import { securityRoutes } from './routes/security.js';
+import { registerUptime } from './uptime/index.js';
 import fs from 'node:fs';
 import type { Socket } from 'node:net';
 import path from 'node:path';
@@ -11,13 +13,18 @@ import { runCleanup } from './jobs/cleanup.js';
 import { HttpError } from './lib/errors.js';
 import { hashPassword } from './lib/password.js';
 import { requireAuth } from './auth/guard.js';
+import type { StripeClient } from './billing/stripe.js';
+import type { MailTransport } from './mail.js';
+import { accountRoutes } from './routes/account.js';
 import { authRoutes } from './routes/auth.js';
+import { billingRoutes, billingWebhookRoutes } from './routes/billing.js';
 import { exportRoutes } from './routes/export.js';
 import { ingestRoutes } from './routes/ingest.js';
 import { siteRoutes } from './routes/sites.js';
 import { staticRoutes } from './routes/static.js';
 import { statsRoutes } from './routes/stats.js';
 import { userRoutes } from './routes/users.js';
+import { statsService, type StatsServiceOptions } from './stats/service.js';
 import { applySecurityHeaders, registerCsrfCheck, registerSecurityHeaders } from './security.js';
 
 export interface BuildOptions {
@@ -33,6 +40,12 @@ export interface BuildOptions {
   fetchFn?: FetchFn;
   /** Destination for log lines instead of stdout (tests). */
   logStream?: { write(msg: string): void };
+  /** Mail transport instead of SMTP_URL (tests capture outgoing mail). */
+  mailTransport?: MailTransport;
+  /** Stripe client instead of the REST client (tests; no network). */
+  stripe?: StripeClient;
+  /** Overrides for the stats service limits (tests). */
+  statsOptions?: Partial<StatsServiceOptions>;
 }
 
 declare module 'fastify' {
@@ -117,6 +130,29 @@ export function startupMessages(config: Config): { warn: string[]; info: string[
       'NODE_ENV=production but session cookies are not marked Secure (COOKIE_SECURE=false or PUBLIC_URL is not https). ' +
         'Serve the dashboard over HTTPS and set PUBLIC_URL=https://... (or COOKIE_SECURE=true).',
     );
+  }
+  if (config.cloud.signupEnabled) {
+    info.push(
+      `Hosted mode: public sign-up is enabled${config.cloud.billingEnabled ? ' with Stripe billing' : ''} ` +
+        `(members get ${config.cloud.billingEnabled ? `${config.cloud.freeSites} free site(s)` : `up to ${config.cloud.memberSiteLimit} site(s)`}).`,
+    );
+    if (config.trustProxy === false) {
+      warn.push(
+        'SIGNUP_ENABLED with TRUST_PROXY=false: if this server runs behind a reverse proxy, ALL clients share ONE ' +
+          'rate-limit bucket (the proxy address), so one abusive client can block sign-up, login and password reset ' +
+          'for everybody. Set TRUST_PROXY to your proxy (hop count or IPs/CIDRs).',
+      );
+    }
+    const smtp = config.cloud.smtpUrl?.toLowerCase() ?? '';
+    if (smtp.startsWith('smtp:') && config.cloud.smtpAllowInsecure) {
+      warn.push(
+        'SMTP_URL uses smtp:// and SMTP_ALLOW_INSECURE=true: mail (with verification and password-reset links) and the ' +
+          'SMTP password may travel in cleartext. Use smtps:// or remove SMTP_ALLOW_INSECURE (STARTTLS is then required).',
+      );
+    }
+    if (config.cloud.allowInsecurePublicUrl && !config.publicUrl?.startsWith('https://')) {
+      warn.push('ALLOW_INSECURE_PUBLIC_URL=true: hosted mode over plain http is for local development only.');
+    }
   }
   if (typeof config.trustProxy === 'number') {
     info.push(
@@ -213,12 +249,15 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   const dbPath = options.dbPath ?? path.join(config.dataDir, 'analytics.db');
   let db: DB;
   try {
-    db = openDatabase(dbPath);
+    db = openDatabase(dbPath, { warn: (msg) => app.log.warn(msg) });
   } catch (err) {
     await app.close();
     throw err;
   }
-  const ctx = createContext(config, db, now, app.log, readVersion());
+  const ctx = createContext(config, db, now, app.log, readVersion(), {
+    ...(options.mailTransport ? { mailTransport: options.mailTransport } : {}),
+    ...(options.stripe ? { stripe: options.stripe } : {}),
+  });
   app.decorate('ctx', ctx);
   app.decorateRequest('user', null);
   app.decorateRequest('authTokenHash', null);
@@ -226,6 +265,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   const timers: NodeJS.Timeout[] = [];
   app.addHook('onClose', async () => {
     for (const t of timers) clearInterval(t);
+    await ctx.mailer?.close();
     if (db.open) db.close();
   });
 
@@ -239,7 +279,9 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   registerCsrfCheck(app, config);
 
   app.setErrorHandler((err: FastifyError | HttpError, request, reply) => {
-    if (err instanceof HttpError) return reply.code(err.statusCode).send({ error: err.message });
+    if (err instanceof HttpError) {
+      return reply.code(err.statusCode).send(err.code === undefined ? { error: err.message } : { error: err.message, code: err.code });
+    }
     if ('validation' in err && err.validation) return reply.code(400).send({ error: 'invalid request' });
     const status = err.statusCode ?? 500;
     if (status >= 400 && status < 500) return reply.code(status).send({ error: GENERIC_MESSAGES[status] ?? 'bad request' });
@@ -249,16 +291,24 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
 
   await ctx.geo.load();
   await bootstrapAdmin(ctx);
+  // Allowance settings (FREE_SITES, MEMBER_SITE_LIMIT, BILLING_ENABLED) may have changed.
+  ctx.billing.recomputeAll();
   const messages = startupMessages(config);
   for (const m of messages.warn) ctx.log.warn(m);
   for (const m of messages.info) ctx.log.info(m);
 
+  if (options.statsOptions) statsService(ctx, options.statsOptions);
   await app.register(ingestRoutes, { ctx });
   await app.register(authRoutes, { ctx });
+  await app.register(accountRoutes, { ctx });
+  await app.register(billingRoutes, { ctx });
+  await app.register(billingWebhookRoutes, { ctx });
   await app.register(userRoutes, { ctx });
   await app.register(siteRoutes, { ctx });
   await app.register(statsRoutes, { ctx });
   await app.register(exportRoutes, { ctx });
+  await app.register(securityRoutes, { ctx });
+  await registerUptime(app, ctx, { backgroundJobs: options.backgroundJobs ?? false });
   app.get('/api/config', { preHandler: requireAuth(ctx) }, async () => ({
     publicUrl: config.publicUrl,
     version: ctx.version,

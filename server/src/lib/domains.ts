@@ -72,6 +72,43 @@ export function normalizeDomainList(input: unknown): string[] | null {
   return out;
 }
 
+/** Domain entries per site for self-service members (hosted mode). */
+export const MEMBER_MAX_DOMAINS = 5;
+
+/**
+ * Shared hosting suffixes where every subdomain belongs to a different customer: a wildcard
+ * over one of them would let a member collect (or spoof) analytics for everybody's sites.
+ */
+export const SHARED_HOSTING_SUFFIXES: ReadonlySet<string> = new Set([
+  'github.io',
+  'vercel.app',
+  'netlify.app',
+  'pages.dev',
+  'herokuapp.com',
+  'web.app',
+  'firebaseapp.com',
+  'onrender.com',
+  'fly.dev',
+  'azurewebsites.net',
+  'cloudfront.net',
+  'appspot.com',
+]);
+
+/**
+ * Extra rules for domains entered by members (admins are unaffected): at most
+ * MEMBER_MAX_DOMAINS entries and no wildcard directly over a shared hosting suffix.
+ * Returns an error message, or null when the (normalised) list is acceptable.
+ */
+export function memberDomainProblem(domains: readonly string[]): string | null {
+  if (domains.length > MEMBER_MAX_DOMAINS) return `a site can have at most ${MEMBER_MAX_DOMAINS} domains`;
+  for (const d of domains) {
+    if (d.startsWith('*.') && SHARED_HOSTING_SUFFIXES.has(d.slice(2))) {
+      return `wildcards over shared hosting domains (${d}) are not allowed; add your own subdomain instead`;
+    }
+  }
+  return null;
+}
+
 /** Does `hostname` (already normalised) match one domain entry? */
 export function domainMatches(entry: string, hostname: string): boolean {
   if (entry.startsWith('*.')) {
